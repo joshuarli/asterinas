@@ -36,8 +36,11 @@ pub(super) fn sys_mount(
     );
 
     let dst_path = {
-        let dst_name = dst_name.to_string_lossy();
-        let fs_path = FsPath::from_fd_at(AT_FDCWD, &dst_name, EmptyPathStr::Reject)?;
+        let fs_path = FsPath::from_fd_at_bytes(
+            AT_FDCWD,
+            dst_name.to_bytes(),
+            EmptyPathStr::Reject,
+        )?;
         ctx.thread_local
             .borrow_fs()
             .resolver()
@@ -116,8 +119,11 @@ fn do_bind_mount(
         let src_name = ctx
             .user_space()
             .read_cstring(src_name_addr, MAX_FILENAME_LEN)?;
-        let src_name = src_name.to_string_lossy();
-        let fs_path = FsPath::from_fd_at(AT_FDCWD, &src_name, EmptyPathStr::Reject)?;
+        let fs_path = FsPath::from_fd_at_bytes(
+            AT_FDCWD,
+            src_name.to_bytes(),
+            EmptyPathStr::Reject,
+        )?;
         ctx.thread_local
             .borrow_fs()
             .resolver()
@@ -172,8 +178,11 @@ fn do_move_mount_old(src_name_addr: Vaddr, dst_path: Path, ctx: &Context) -> Res
         let src_name = ctx
             .user_space()
             .read_cstring(src_name_addr, MAX_FILENAME_LEN)?;
-        let src_name = src_name.to_string_lossy();
-        let fs_path = FsPath::from_fd_at(AT_FDCWD, &src_name, EmptyPathStr::Reject)?;
+        let fs_path = FsPath::from_fd_at_bytes(
+            AT_FDCWD,
+            src_name.to_bytes(),
+            EmptyPathStr::Reject,
+        )?;
         ctx.thread_local
             .borrow_fs()
             .resolver()
@@ -221,11 +230,12 @@ fn do_new_mount(
     let source = if src_name_addr == 0 {
         None
     } else {
-        let source = ctx
+        let source_cstr = ctx
             .user_space()
-            .read_cstring(src_name_addr, MAX_FILENAME_LEN)?
-            .to_string_lossy()
-            .into_owned();
+            .read_cstring(src_name_addr, MAX_FILENAME_LEN)?;
+        let source = String::from(source_cstr
+            .to_str()
+            .map_err(|_| Error::with_message(Errno::EILSEQ, "mount source is not UTF-8"))?);
         Some(source)
     };
 

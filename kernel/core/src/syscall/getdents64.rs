@@ -63,7 +63,7 @@ pub(super) fn sys_getdents64(
     let user_space = ctx.user_space();
     let writer = user_space.writer(buf_addr, buf_len)?;
     let mut reader = DirentBufferReader::<Dirent64>::new(writer);
-    let _ = inode_handle.readdir(&mut reader)?;
+    inode_handle.readdir(&mut reader)?;
     let read_len = reader.read_len();
     fs::vfs::notify::on_access(&file);
     Ok(SyscallReturn::Return(read_len as _))
@@ -103,6 +103,10 @@ impl<'a, T: DirentSerializer> DirentBufferReader<'a, T> {
 
 impl<T: DirentSerializer> DirentVisitor for DirentBufferReader<'_, T> {
     fn visit(&mut self, name: &str, ino: u64, type_: InodeType, offset: usize) -> Result<()> {
+        self.visit_bytes(name.as_bytes(), ino, type_, offset)
+    }
+
+    fn visit_bytes(&mut self, name: &[u8], ino: u64, type_: InodeType, offset: usize) -> Result<()> {
         let dirent_serializer = T::new(ino, offset as u64, type_, CString::new(name)?);
         let len = dirent_serializer.len();
         if self.writer.avail() < len {

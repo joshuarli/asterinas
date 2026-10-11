@@ -25,14 +25,17 @@ pub(super) fn sys_symlinkat(
         target, dirfd, link_path_name
     );
 
-    let target = target.to_string_lossy();
+    let target = target.to_bytes();
     if target.is_empty() {
         return_errno_with_message!(Errno::ENOENT, "the symlink path is empty");
     }
 
     let (dir_path, link_name) = {
-        let link_path_name = link_path_name.to_string_lossy();
-        let fs_path = FsPath::from_fd_at(dirfd, &link_path_name, EmptyPathStr::Reject)?;
+        let fs_path = FsPath::from_fd_at_bytes(
+            dirfd,
+            link_path_name.to_bytes(),
+            EmptyPathStr::Reject,
+        )?;
         ctx.thread_local
             .borrow_fs()
             .resolver()
@@ -41,7 +44,7 @@ pub(super) fn sys_symlinkat(
             .into_parent_and_filename()?
     };
 
-    dir_path.new_symlink_child(&link_name, &target, mkmod!(a+rwx))?;
+    dir_path.new_symlink_child_bytes(&link_name, target, mkmod!(a+rwx))?;
     fs::vfs::notify::on_create(&dir_path, || link_name);
     Ok(SyscallReturn::Return(0))
 }

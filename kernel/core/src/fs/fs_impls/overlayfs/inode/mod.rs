@@ -189,7 +189,7 @@ enum CreateOp<'a> {
         mode: InodeMode,
     },
     Symlink {
-        target: &'a str,
+        target: &'a [u8],
         mode: InodeMode,
     },
     Mknod {
@@ -207,7 +207,7 @@ impl<'a> CreateOp<'a> {
         Self::General { kind, mode }
     }
 
-    fn symlink(target: &'a str, mode: InodeMode) -> Self {
+    fn symlink(target: &'a [u8], mode: InodeMode) -> Self {
         Self::Symlink { target, mode }
     }
 
@@ -237,16 +237,16 @@ impl<'a> CreateOp<'a> {
     }
 
     /// Runs the one real create call this request selects, in `dir`, under `name`.
-    fn create_child_in(&self, dir: &Dentry, name: &str) -> Result<Arc<Dentry>> {
+    fn create_child_in(&self, dir: &Dentry, name: &[u8]) -> Result<Arc<Dentry>> {
         let dir = dir.as_dir_dentry_or_err()?;
         match self {
             Self::General { kind, mode } => {
-                dir.create_child(name, || dir.inode().create(&dir, name, *kind, *mode))
+                dir.create_child_bytes(name, || dir.inode().create_bytes(&dir, name, *kind, *mode))
             }
-            Self::Symlink { target, mode } => dir.create_child(name, || {
-                dir.inode().create_symlink(&dir, name, target, *mode)
+            Self::Symlink { target, mode } => dir.create_child_bytes(name, || {
+                dir.inode().create_symlink_bytes(&dir, name, target, *mode)
             }),
-            Self::Mknod { mode, node } => dir.mknod(
+            Self::Mknod { mode, node } => dir.mknod_bytes(
                 name,
                 *mode,
                 match *node {
@@ -446,7 +446,7 @@ impl Inode for OverlayInode {
         target: &str,
         mode: InodeMode,
     ) -> Result<Arc<dyn Inode>> {
-        self.create_impl(self_dentry, name, CreateOp::symlink(target, mode))
+        self.create_impl(self_dentry, name, CreateOp::symlink(target.as_bytes(), mode))
     }
 
     fn mknod(

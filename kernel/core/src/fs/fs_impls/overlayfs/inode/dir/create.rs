@@ -54,7 +54,7 @@ impl OverlayInode {
             Lookup::Negative(NegativeLookup::Absent) => {
                 let upper = self.writable_upper();
                 // `create_child_in` selects the single real-layer syscall per op.
-                let new_upper = op.create_child_in(upper.dentry(), name)?;
+                let new_upper = op.create_child_in(upper.dentry(), name.as_bytes())?;
                 let inode = fs.project_inode(RealObjectStack::upper_only(
                     RealObject::new_upper(new_upper),
                 ))?;

@@ -179,11 +179,12 @@ fn do_utimes(
         let pathname = ctx
             .user_space()
             .read_cstring(pathname_ptr, MAX_FILENAME_LEN)?;
-        Some(pathname.to_string_lossy().into_owned())
+        Some(pathname.to_bytes().to_vec())
     };
 
     let path = if let Some(pathname) = pathname.as_ref() {
-        let fs_path = FsPath::from_fd_at(dirfd, pathname, EmptyPathStr::AllowIfFlag(flags.bits()))?;
+        let fs_path =
+            FsPath::from_fd_at_bytes(dirfd, pathname, EmptyPathStr::AllowIfFlag(flags.bits()))?;
         let fs_ref = ctx.thread_local.borrow_fs();
         let path_resolver = fs_ref.resolver().read();
         if flags.contains(UtimensFlags::AT_SYMLINK_NOFOLLOW) {

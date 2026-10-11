@@ -26,6 +26,6 @@ impl ProcSymOps for ThreadSelfSymOps {
     fn read_link(&self) -> Result<SymbolicLink> {
         let pid = current!().pid();
         let tid = current_thread!().as_posix_thread().unwrap().tid();
-        Ok(SymbolicLink::Plain(format!("{}/task/{}", pid, tid)))
+        Ok(SymbolicLink::Plain(format!("{}/task/{}", pid, tid).into_bytes()))
     }
 }

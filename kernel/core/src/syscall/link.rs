@@ -30,15 +30,16 @@ pub(super) fn sys_linkat(
     );
 
     let (old_path, new_path, new_name) = {
-        let old_path_name = old_path_name.to_string_lossy();
-        let new_path_name = new_path_name.to_string_lossy();
-
-        let old_fs_path = FsPath::from_fd_at(
+        let old_fs_path = FsPath::from_fd_at_bytes(
             old_dirfd,
-            &old_path_name,
+            old_path_name.to_bytes(),
             EmptyPathStr::AllowIfFlag(flags.bits()),
         )?;
-        let new_fs_path = FsPath::from_fd_at(new_dirfd, &new_path_name, EmptyPathStr::Reject)?;
+        let new_fs_path = FsPath::from_fd_at_bytes(
+            new_dirfd,
+            new_path_name.to_bytes(),
+            EmptyPathStr::Reject,
+        )?;
 
         let fs_ref = ctx.thread_local.borrow_fs();
         let path_resolver = fs_ref.resolver().read();
@@ -59,7 +60,7 @@ pub(super) fn sys_linkat(
         (old_path, new_path, new_name)
     };
 
-    new_path.link(&old_path, &new_name)?;
+    new_path.link_bytes(&old_path, &new_name)?;
     Ok(SyscallReturn::Return(0))
 }
 

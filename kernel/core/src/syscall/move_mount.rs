@@ -45,8 +45,7 @@ pub(super) fn sys_move_mount(
 
     let fs_ref = ctx.thread_local.borrow_fs();
     let path_resolver = fs_ref.resolver().read();
-    let to_path = to_path.to_string_lossy();
-    let to_fs_path = FsPath::from_fd_at(to_dfd, &to_path, EmptyPathStr::Reject)?;
+    let to_fs_path = FsPath::from_fd_at_bytes(to_dfd, to_path.to_bytes(), EmptyPathStr::Reject)?;
     let target_path = path_resolver.lookup(&to_fs_path)?;
     match source {
         MoveMountSource::Detached(detached_mount) => {
@@ -54,8 +53,8 @@ pub(super) fn sys_move_mount(
             detached_root.move_mount_to(target_path, ctx)?;
         }
         MoveMountSource::Path(from_path) => {
-            let from_path = from_path.to_string_lossy();
-            let from_fs_path = FsPath::from_fd_at(from_dfd, &from_path, EmptyPathStr::Reject)?;
+            let from_fs_path =
+                FsPath::from_fd_at_bytes(from_dfd, from_path.to_bytes(), EmptyPathStr::Reject)?;
             let source_path = path_resolver.lookup(&from_fs_path)?;
             source_path.move_mount_to(target_path, ctx)?;
         }

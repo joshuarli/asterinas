@@ -34,10 +34,8 @@ pub(super) fn sys_openat(
         "dirfd = {}, path = {:?}, flags = {}, mode = {}",
         dirfd, path, flags, mode
     );
-
     let file_handle = {
-        let path = path.to_string_lossy();
-        let fs_path = FsPath::from_fd_at(dirfd, path.as_ref(), EmptyPathStr::Reject)?;
+        let fs_path = FsPath::from_fd_at_bytes(dirfd, path.to_bytes(), EmptyPathStr::Reject)?;
 
         let fs_ref = ctx.thread_local.borrow_fs();
         let mask_mode = mode & !fs_ref.umask().get();
@@ -132,7 +130,7 @@ pub(super) fn sys_openat2(
         let open_args = OpenArgs::from_flags_and_mode(flags, mode)?;
         let lookup_res = path_resolver.lookup_unresolved_openat2(
             dirfd,
-            &path.to_string_lossy(),
+            path.to_bytes(),
             open_args.follow_tail_link(),
             resolve,
         );
@@ -234,7 +232,7 @@ fn do_open_resolved(
             }
 
             let (parent, tail_name) = result.into_parent_and_basename();
-            let new_path = parent.new_child(&tail_name, InodeType::File, open_args.inode_mode)?;
+            let new_path = parent.new_child_bytes(&tail_name, InodeType::File, open_args.inode_mode)?;
             fs::vfs::notify::on_create(&parent, || tail_name.clone());
 
             // Don't check access mode for newly created file.

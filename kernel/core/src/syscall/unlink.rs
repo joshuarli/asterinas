@@ -25,7 +25,7 @@ pub(super) fn sys_unlinkat(
     let path_name = ctx.user_space().read_cstring(path_addr, MAX_FILENAME_LEN)?;
     debug!("dirfd = {}, path = {:?}", dirfd, path_name);
 
-    let path_name = path_name.to_string_lossy();
+    let path_name = path_name.to_bytes();
     let (dir_path, name) = {
         let (parent_path_name, target_name) = path_name
             .split_dirname_and_basename()
@@ -34,12 +34,16 @@ pub(super) fn sys_unlinkat(
         let fs_ref = ctx.thread_local.borrow_fs();
         let path_resolver = fs_ref.resolver().read();
 
-        let parent_fs_path = FsPath::from_fd_at(dirfd, parent_path_name, EmptyPathStr::Reject)?;
+        let parent_fs_path = FsPath::from_fd_at_bytes(
+            dirfd,
+            parent_path_name,
+            EmptyPathStr::Reject,
+        )?;
         let dir_path = path_resolver.lookup(&parent_fs_path)?;
 
         // A trailing slash makes the unlink fail in one of two ways:
         // `dir/` with `EISDIR`, `file/` with `ENOTDIR`.
-        if path_name.ends_with('/') {
+        if path_name.ends_with(b"/") {
             let target = path_resolver.lookup_at_path(&dir_path, target_name)?;
             if target.type_() == InodeType::Dir {
                 return_errno_with_message!(Errno::EISDIR, "a directory cannot be unlinked");
@@ -54,7 +58,7 @@ pub(super) fn sys_unlinkat(
         (dir_path, target_name)
     };
 
-    dir_path.unlink(name)?;
+    dir_path.unlink_bytes(name)?;
     Ok(SyscallReturn::Return(0))
 }
 

@@ -175,8 +175,8 @@ pub(super) fn lookup_path_for_xattr<'a>(
 ) -> Result<Cow<'a, Path>> {
     let lookup_path_from_fs =
         |path: &CString, ctx: &Context, symlink_no_follow: bool| -> Result<Cow<'_, Path>> {
-            let path = path.to_string_lossy();
-            let fs_path = FsPath::from_fd_at(AT_FDCWD, &path, EmptyPathStr::Reject)?;
+            let fs_path =
+                FsPath::from_fd_at_bytes(AT_FDCWD, path.as_bytes(), EmptyPathStr::Reject)?;
             let fs_ref = ctx.thread_local.borrow_fs();
             let path_resolver = fs_ref.resolver().read();
             let path = if symlink_no_follow {

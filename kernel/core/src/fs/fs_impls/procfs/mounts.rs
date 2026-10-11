@@ -23,6 +23,6 @@ impl MountsSymOps {
 
 impl ProcSymOps for MountsSymOps {
     fn read_link(&self) -> Result<SymbolicLink> {
-        Ok(SymbolicLink::Plain("self/mounts".to_string()))
+        Ok(SymbolicLink::Plain(b"self/mounts".to_vec()))
     }
 }

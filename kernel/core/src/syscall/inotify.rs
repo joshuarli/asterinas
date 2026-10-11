@@ -74,8 +74,7 @@ pub(super) fn sys_inotify_add_watch(
     };
 
     let path = {
-        let path = path.to_string_lossy();
-        let fs_path = FsPath::try_from(path.as_ref())?;
+        let fs_path = FsPath::try_from(path.to_bytes())?;
 
         if options.contains(InotifyControls::DONT_FOLLOW) {
             ctx.thread_local

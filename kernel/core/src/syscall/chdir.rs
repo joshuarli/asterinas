@@ -17,8 +17,7 @@ pub(super) fn sys_chdir(path_ptr: Vaddr, ctx: &Context) -> Result<SyscallReturn>
     let fs_ref = ctx.thread_local.borrow_fs();
     let mut path_resolver = fs_ref.resolver().write();
     let path = {
-        let path_name = path_name.to_string_lossy();
-        let fs_path = FsPath::try_from(path_name.as_ref())?;
+        let fs_path = FsPath::try_from(path_name.to_bytes())?;
         path_resolver.lookup(&fs_path)?
     };
 

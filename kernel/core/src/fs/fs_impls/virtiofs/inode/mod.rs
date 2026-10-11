@@ -583,7 +583,7 @@ impl Inode for VirtioFsInode {
         let fs = self.fs_ref();
         let target = fs.session().readlink(self.nodeid())?;
 
-        Ok(SymbolicLink::Plain(target))
+        Ok(SymbolicLink::Plain(target.into_bytes()))
     }
 
     fn extension(&self) -> &Extension {

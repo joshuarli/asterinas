@@ -21,6 +21,6 @@ impl SelfSymOps {
 
 impl ProcSymOps for SelfSymOps {
     fn read_link(&self) -> Result<SymbolicLink> {
-        Ok(SymbolicLink::Plain(current!().pid().to_string()))
+        Ok(SymbolicLink::Plain(current!().pid().to_string().into_bytes()))
     }
 }

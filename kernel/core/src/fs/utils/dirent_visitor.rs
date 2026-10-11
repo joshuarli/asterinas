@@ -25,6 +25,16 @@ pub trait DirentVisitor {
     /// dir_inode.readdir_at(0, &mut all_dirents).unwrap();
     /// ```
     fn visit(&mut self, name: &str, ino: u64, type_: InodeType, offset: usize) -> Result<()>;
+
+    /// Visit a directory entry whose name is an arbitrary Linux pathname byte sequence.
+    ///
+    /// Implementations that expose names as text keep working for UTF-8 names; visitors that
+    /// implement the syscall ABI can override this method to preserve every byte.
+    fn visit_bytes(&mut self, name: &[u8], ino: u64, type_: InodeType, offset: usize) -> Result<()> {
+        let name = core::str::from_utf8(name)
+            .map_err(|_| Error::with_message(Errno::EILSEQ, "directory entry name is not UTF-8"))?;
+        self.visit(name, ino, type_, offset)
+    }
 }
 
 impl DirentVisitor for Vec<String> {

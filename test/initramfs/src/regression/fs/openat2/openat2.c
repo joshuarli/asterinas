@@ -4,9 +4,11 @@
 
 #include <fcntl.h>
 #include <linux/openat2.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "../../common/test.h"
@@ -20,6 +22,14 @@
 #define TEST_FILE TEST_DIR "/inside/secret"
 #define TEST_LINK TEST_DIR "/inside_link"
 #define ESCAPE_LINK TEST_DIR "/escape_link"
+
+struct linux_dirent64 {
+	uint64_t ino;
+	int64_t off;
+	uint16_t reclen;
+	uint8_t type;
+	char name[];
+};
 
 static struct open_how beneath_how = {
 	.flags = O_RDONLY,
@@ -109,6 +119,45 @@ FN_TEST(openat2_resolution_flags_reject_links_and_mounts)
 
 	how.resolve = RESOLVE_NO_XDEV;
 	TEST_ERRNO(openat2_with_how(AT_FDCWD, "/proc/self/cmdline", &how), EXDEV);
+	TEST_SUCC(close(dirfd));
+}
+END_TEST()
+
+FN_TEST(openat2_preserves_non_utf8_names)
+{
+	const char name[] = { 'r', 'a', 'w', (char)0xff, 'f', 'i', 'l', 'e', '\0' };
+	struct open_how create_how = {
+		.flags = O_CREAT | O_EXCL | O_RDWR,
+		.mode = 0600,
+	};
+	int dirfd = TEST_SUCC(open(TEST_DIR "/inside", O_RDONLY | O_DIRECTORY));
+	int fd = TEST_SUCC(openat2_with_how(dirfd, name, &create_how));
+	TEST_SUCC(write(fd, "raw", 3));
+	TEST_SUCC(close(fd));
+
+	fd = TEST_SUCC(openat2_with_how(dirfd, name, &beneath_how));
+	char contents[3];
+	TEST_RES(read(fd, contents, sizeof(contents)), _ret == sizeof(contents));
+	TEST_RES(memcmp(contents, "raw", sizeof(contents)), _ret == 0);
+	TEST_SUCC(close(fd));
+
+	char buffer[512];
+	ssize_t bytes = syscall(SYS_getdents64, dirfd, buffer, sizeof(buffer));
+	TEST_RES(bytes, _ret > 0);
+	int found = 0;
+	for (size_t offset = 0; offset < (size_t)bytes;) {
+		struct linux_dirent64 *entry = (void *)(buffer + offset);
+		TEST_RES(entry->reclen, _ret >= offsetof(struct linux_dirent64, name) + 1);
+		TEST_RES(offset + entry->reclen, _ret <= (size_t)bytes);
+		if (entry->reclen >= offsetof(struct linux_dirent64, name) + sizeof(name) &&
+		    memcmp(entry->name, name, sizeof(name)) == 0) {
+			found = 1;
+		}
+		offset += entry->reclen;
+	}
+	TEST_RES(found, _ret);
+
+	TEST_SUCC(unlinkat(dirfd, name, 0));
 	TEST_SUCC(close(dirfd));
 }
 END_TEST()

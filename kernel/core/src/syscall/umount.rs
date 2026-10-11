@@ -14,8 +14,7 @@ pub(super) fn sys_umount(path_addr: Vaddr, flags: u64, ctx: &Context) -> Result<
 
     umount_flags.check_unsupported_flags()?;
 
-    let path_name = path_name.to_string_lossy();
-    let fs_path = FsPath::from_fd_at(AT_FDCWD, &path_name, EmptyPathStr::Reject)?;
+    let fs_path = FsPath::from_fd_at_bytes(AT_FDCWD, path_name.to_bytes(), EmptyPathStr::Reject)?;
 
     let target_path = if umount_flags.contains(UmountFlags::UMOUNT_NOFOLLOW) {
         ctx.thread_local

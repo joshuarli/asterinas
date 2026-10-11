@@ -227,7 +227,7 @@ impl InotifyFile {
     /// The event will be queued and can be read by users.
     /// If the event can be merged with the last event in the queue, it will be merged.
     /// The event is only queued if it matches one of the subscriber's interesting events.
-    fn receive_event(&self, wd: u32, event: FsEvents, name: Option<String>) {
+    fn receive_event(&self, wd: u32, event: FsEvents, name: Option<Vec<u8>>) {
         let new_event = InotifyEvent::new(wd, event, 0, name);
 
         'notify: {
@@ -515,7 +515,7 @@ impl InotifySubscriber {
 
 impl FsEventSubscriber for InotifySubscriber {
     /// Sends FS events to the inotify file.
-    fn deliver_event(&self, event: FsEvents, name: Option<String>) -> bool {
+    fn deliver_event(&self, event: FsEvents, name: Option<Vec<u8>>) -> bool {
         let (interesting, options) = self.interesting_and_controls();
 
         if !event.contains(FsEvents::IN_IGNORED) && !is_interesting(interesting, event) {
@@ -563,7 +563,7 @@ fn is_interesting(interesting: InotifyEvents, event: FsEvents) -> bool {
 /// Represents an inotify event that can be read by users.
 struct InotifyEvent {
     header: InotifyEventHeader,
-    name: Option<String>,
+    name: Option<Vec<u8>>,
 }
 
 /// The header of an inotify event.
@@ -579,7 +579,7 @@ struct InotifyEventHeader {
 }
 
 impl InotifyEvent {
-    fn new(wd: u32, event: FsEvents, cookie: u32, name: Option<String>) -> Self {
+    fn new(wd: u32, event: FsEvents, cookie: u32, name: Option<Vec<u8>>) -> Self {
         // Calculate the actual name length including the null terminator.
         let actual_name_len = name.as_ref().map_or(0, |name| name.len() + 1);
         // Calculate the padded name length aligned to `size_of::<InotifyEventHeader>`.
@@ -622,7 +622,7 @@ impl InotifyEvent {
             return Ok(total_size);
         };
         // Write the actual name bytes.
-        writer.write_fallible(&mut VmReader::from(name.as_bytes()).to_fallible())?;
+        writer.write_fallible(&mut VmReader::from(name.as_slice()).to_fallible())?;
         // Fill remaining bytes with zeros for alignment.
         // Note that this also includes the null terminator.
         writer.fill_zeros((self.header.name_len as usize) - name.len())?;

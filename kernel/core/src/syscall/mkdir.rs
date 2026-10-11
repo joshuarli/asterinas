@@ -22,8 +22,7 @@ pub(super) fn sys_mkdirat(
 
     let fs_ref = ctx.thread_local.borrow_fs();
     let (dir_path, name) = {
-        let path = path.to_string_lossy();
-        let fs_path = FsPath::from_fd_at(dirfd, &path, EmptyPathStr::Reject)?;
+        let fs_path = FsPath::from_fd_at_bytes(dirfd, path.to_bytes(), EmptyPathStr::Reject)?;
         fs_ref
             .resolver()
             .read()
@@ -35,7 +34,7 @@ pub(super) fn sys_mkdirat(
         let mask_mode = mode & !fs_ref.umask().get();
         InodeMode::from_bits_truncate(mask_mode)
     };
-    dir_path.new_child(&name, InodeType::Dir, inode_mode)?;
+    dir_path.new_child_bytes(&name, InodeType::Dir, inode_mode)?;
     fs::vfs::notify::on_mkdir(&dir_path, || name);
     Ok(SyscallReturn::Return(0))
 }

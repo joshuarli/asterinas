@@ -116,7 +116,7 @@ impl FsEventPublisher {
     }
 
     /// Broadcasts an event to all the subscribers of this publisher.
-    pub(crate) fn publish_event(&self, events: FsEvents, name: Option<String>) {
+    pub(crate) fn publish_event(&self, events: FsEvents, name: Option<Vec<u8>>) {
         let interesting = self.all_interesting_events.load(Ordering::Relaxed);
         if !interesting.intersects(events) {
             return;
@@ -203,7 +203,7 @@ pub(crate) trait FsEventSubscriber: Any + Send + Sync {
     ///
     /// Invariant: This method must not sleep or perform blocking operations. The publisher
     /// may hold a spin lock when calling this method.
-    fn deliver_event(&self, events: FsEvents, name: Option<String>) -> bool;
+    fn deliver_event(&self, events: FsEvents, name: Option<Vec<u8>>) -> bool;
 
     /// Returns the events that this subscriber is interested in.
     fn interesting_events(&self) -> FsEvents;
@@ -298,10 +298,10 @@ pub(crate) fn on_change(path: &Path) {
 }
 
 /// Notifies that a file was deleted from a directory.
-pub(crate) fn on_delete(
+pub(crate) fn on_delete<N: AsRef<[u8]>>(
     dir_inode: &Arc<dyn Inode>,
     inode: &Arc<dyn Inode>,
-    name: impl FnOnce() -> String,
+    name: impl FnOnce() -> N,
 ) {
     if !dir_inode
         .fs()
@@ -334,10 +334,10 @@ pub(crate) fn on_inode_removed(inode: &Arc<dyn Inode>) {
 }
 
 /// Notifies that a file was linked to a directory.
-pub(crate) fn on_link(
+pub(crate) fn on_link<N: AsRef<[u8]>>(
     dir_inode: &Arc<dyn Inode>,
     inode: &Arc<dyn Inode>,
-    name: impl FnOnce() -> String,
+    name: impl FnOnce() -> N,
 ) {
     if !dir_inode
         .fs()
@@ -351,7 +351,7 @@ pub(crate) fn on_link(
 }
 
 /// Notifies that a directory was created.
-pub(crate) fn on_mkdir(dir_path: &Path, name: impl FnOnce() -> String) {
+pub(crate) fn on_mkdir<N: AsRef<[u8]>>(dir_path: &Path, name: impl FnOnce() -> N) {
     if !dir_path
         .fs()
         .fs_event_subscriber_stats()
@@ -363,7 +363,7 @@ pub(crate) fn on_mkdir(dir_path: &Path, name: impl FnOnce() -> String) {
 }
 
 /// Notifies that a file was created.
-pub(crate) fn on_create(file_path: &Path, name: impl FnOnce() -> String) {
+pub(crate) fn on_create<N: AsRef<[u8]>>(file_path: &Path, name: impl FnOnce() -> N) {
     if !file_path
         .fs()
         .fs_event_subscriber_stats()
@@ -434,7 +434,7 @@ fn notify_parent(path: &Path, mut events: FsEvents) {
 
     let parent = path.parent_within_mount();
     if let Some(parent) = parent {
-        notify_inode_with_name(parent.inode(), events, || path.name());
+        notify_inode_with_name(parent.inode(), events, || path.name_bytes());
     }
     notify_inode(path.inode(), events);
 }
@@ -454,8 +454,12 @@ fn notify_inode(inode: &Arc<dyn Inode>, events: FsEvents) {
 ///
 /// Similar to `notify_inode`, but includes a name parameter for events that require
 /// child name information (e.g., CREATE, DELETE).
-fn notify_inode_with_name(inode: &Arc<dyn Inode>, events: FsEvents, name: impl FnOnce() -> String) {
+fn notify_inode_with_name<N: AsRef<[u8]>>(
+    inode: &Arc<dyn Inode>,
+    events: FsEvents,
+    name: impl FnOnce() -> N,
+) {
     if let Some(publisher) = inode.fs_event_publisher() {
-        publisher.publish_event(events, Some(name()));
+        publisher.publish_event(events, Some(name().as_ref().to_vec()));
     }
 }

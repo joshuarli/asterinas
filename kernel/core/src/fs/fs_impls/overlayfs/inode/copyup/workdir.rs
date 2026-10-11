@@ -112,7 +112,7 @@ impl UpperWorkdirInuse {
     ) -> Result<WorkdirTemp> {
         let workspace = self.workdir_workspace()?;
         let name = self.next_temp_name(target_name);
-        let dentry = op.create_child_in(workspace, &name)?;
+        let dentry = op.create_child_in(workspace, name.as_bytes())?;
         Ok(WorkdirTemp {
             name,
             dentry,

@@ -22,10 +22,8 @@ pub(super) fn sys_pivot_root(
         new_root_name, put_old_name
     );
 
-    let new_root_name = new_root_name.to_string_lossy();
-    let new_root_path = FsPath::try_from(new_root_name.as_ref())?;
-    let put_old_name = put_old_name.to_string_lossy();
-    let put_old_path = FsPath::try_from(put_old_name.as_ref())?;
+    let new_root_path = FsPath::try_from(new_root_name.to_bytes())?;
+    let put_old_path = FsPath::try_from(put_old_name.to_bytes())?;
 
     // TODO: Locking the global PID table here is a workaround. We need to use a
     // more suitable lock (i.e. the global mount lock or the namespace lock) to avoid deadlock.

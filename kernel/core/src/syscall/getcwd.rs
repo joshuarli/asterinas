@@ -20,17 +20,20 @@ pub(super) fn sys_getcwd(buf: Vaddr, len: usize, ctx: &Context) -> Result<Syscal
     // to conform to POSIX. Here follows Linux's behavior to keep compatibility.
     //
     // Reference: <https://man7.org/linux/man-pages/man3/getcwd.3.html>
-    let abs_path = match abs_path {
+    let mut abs_path = match abs_path {
         AbsPathResult::Reachable(s) => s,
-        AbsPathResult::Unreachable(s) => alloc::format!("(unreachable){}", s),
+        AbsPathResult::Unreachable(s) => {
+            let mut path = b"(unreachable)".to_vec();
+            path.extend_from_slice(&s);
+            path
+        }
     };
 
-    let cwd = CString::new(abs_path)?;
-    let bytes = cwd.as_bytes_with_nul();
-    if bytes.len() > len {
+    abs_path.push(0);
+    if abs_path.len() > len {
         return_errno_with_message!(Errno::ERANGE, "the CWD buffer is too small");
     }
-    ctx.user_space().write_bytes(buf, bytes)?;
+    ctx.user_space().write_bytes(buf, &abs_path)?;
 
-    Ok(SyscallReturn::Return(bytes.len() as _))
+    Ok(SyscallReturn::Return(abs_path.len() as _))
 }

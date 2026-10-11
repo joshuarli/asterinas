@@ -8,7 +8,7 @@ use core::{
 use hashbrown::HashMap;
 use ostd::sync::{RwMutexUpgradeableGuard, RwMutexWriteGuard};
 
-use super::{RenameMode, is_dot, is_dot_or_dotdot, is_dotdot};
+use super::{RenameMode, is_dot_bytes, is_dot_or_dotdot_bytes, is_dotdot_bytes};
 use crate::{
     fs::{
         self,
@@ -152,7 +152,7 @@ enum NameAndParent {
     /// `None` is the root (name `"/"`, no parent);
     /// `Some` is a named child whose name and parent can change
     /// (e.g. on `rename`).
-    Real(Option<RwLock<(String, Arc<Dentry>)>>),
+    Real(Option<RwLock<(Vec<u8>, Arc<Dentry>)>>),
     /// An anonymous child:
     /// a real parent directory,
     /// but a fixed `"/"` name and never present in the parent's children cache.
@@ -167,15 +167,19 @@ enum NameAndParent {
 struct SetNameAndParentError;
 
 impl NameAndParent {
-    fn name(&self, inode: &dyn Inode) -> String {
+    fn name_bytes(&self, inode: &dyn Inode) -> Vec<u8> {
         match self {
             NameAndParent::Real(name_and_parent) => match name_and_parent {
                 Some(name_and_parent) => name_and_parent.read().0.clone(),
-                None => String::from("/"),
+                None => b"/".to_vec(),
             },
-            NameAndParent::Anonymous(_) => String::from("/"),
-            NameAndParent::Pseudo(name_fn) => (name_fn)(inode),
+            NameAndParent::Anonymous(_) => b"/".to_vec(),
+            NameAndParent::Pseudo(name_fn) => (name_fn)(inode).into_bytes(),
         }
+    }
+
+    fn name(&self, inode: &dyn Inode) -> String {
+        String::from_utf8_lossy(&self.name_bytes(inode)).into_owned()
     }
 
     fn parent(&self) -> Option<Arc<Dentry>> {
@@ -194,10 +198,10 @@ impl NameAndParent {
     /// if the `Dentry` is a root, anonymous, or pseudo `Dentry`.
     /// (Promoting an anonymous `Dentry` to a named one,
     /// e.g. for `linkat(2)` on an `O_TMPFILE` file, is future work.)
-    fn set(&self, name: &str, parent: Arc<Dentry>) -> Result<(), SetNameAndParentError> {
+    fn set(&self, name: &[u8], parent: Arc<Dentry>) -> Result<(), SetNameAndParentError> {
         if let NameAndParent::Real(Some(name_and_parent)) = self {
             let mut name_and_parent = name_and_parent.write();
-            *name_and_parent = (String::from(name), parent);
+            *name_and_parent = (name.to_vec(), parent);
             Ok(())
         } else {
             Err(SetNameAndParentError)
@@ -270,11 +274,16 @@ impl Dentry {
         self.type_
     }
 
-    /// Gets the name of the `Dentry`.
+    /// Gets the display name of the `Dentry` as lossy UTF-8.
     ///
-    /// Returns "/" if it is a root `Dentry`.
+    /// Returns "/" if it is a root `Dentry`. Use `name_bytes` for pathname
+    /// operations that must preserve arbitrary Linux filename bytes.
     pub(in crate::fs) fn name(&self) -> String {
         self.name_and_parent.name(self.inode.as_ref())
+    }
+
+    pub(in crate::fs) fn name_bytes(&self) -> Vec<u8> {
+        self.name_and_parent.name_bytes(self.inode.as_ref())
     }
 
     /// Gets the parent `Dentry`.
@@ -400,12 +409,20 @@ impl DirDentry<'_> {
         name: &str,
         create_inode_fn: impl FnOnce() -> Result<Arc<dyn Inode>>,
     ) -> Result<Arc<Dentry>> {
+        self.create_child_bytes(name.as_bytes(), create_inode_fn)
+    }
+
+    pub(in crate::fs) fn create_child_bytes(
+        &self,
+        name: &[u8],
+        create_inode_fn: impl FnOnce() -> Result<Arc<dyn Inode>>,
+    ) -> Result<Arc<Dentry>> {
         let children = self.validate_child_absent(name)?;
         let new_inode = create_inode_fn()?;
         let mut children = children.upgrade();
         let new_child = Dentry::new(
             new_inode,
-            DentryOptions::Named((String::from(name), self.this())),
+            DentryOptions::Named((name.to_vec(), self.this())),
         );
 
         Ok(self.insert_positive_child(&mut children, name, new_child))
@@ -414,7 +431,7 @@ impl DirDentry<'_> {
     /// Validates that `name` is absent and keeps that result stable for creation.
     fn validate_child_absent<'a>(
         &'a self,
-        name: &str,
+        name: &[u8],
     ) -> Result<RwMutexUpgradeableGuard<'a, DentryChildren>> {
         let mut children = self.children.upread();
 
@@ -433,11 +450,11 @@ impl DirDentry<'_> {
             children = children_for_update.downgrade();
         }
 
-        match self.inode.lookup(name) {
+        match self.inode.lookup_bytes(name) {
             Ok(inode) => {
                 let existing_child = Dentry::new(
                     inode,
-                    DentryOptions::Named((String::from(name), self.this())),
+                    DentryOptions::Named((name.to_vec(), self.this())),
                 );
                 let mut children_for_update = children.upgrade();
                 self.insert_positive_child(&mut children_for_update, name, existing_child);
@@ -452,11 +469,11 @@ impl DirDentry<'_> {
     fn insert_positive_child(
         &self,
         children: &mut DentryChildren,
-        name: &str,
+        name: &[u8],
         child: Arc<Dentry>,
     ) -> Arc<Dentry> {
         // TODO: Use a better storage strategy to avoid extra string allocations.
-        children.insert_positive(String::from(name), child.clone());
+        children.insert_positive(name.to_vec(), child.clone());
         self.revalidate_positive_children_if_needed(children);
 
         child
@@ -493,7 +510,7 @@ impl DirDentry<'_> {
     fn resolve_child_for_rename(
         &self,
         children: &mut DentryChildren,
-        name: &str,
+        name: &[u8],
     ) -> Result<Arc<Dentry>> {
         if let Some(cached_entry) = children.find(name) {
             if !self.revalidate_cached_entry(name, &cached_entry) {
@@ -510,10 +527,10 @@ impl DirDentry<'_> {
             }
         }
 
-        self.inode.lookup(name).map(|inode| {
+        self.inode.lookup_bytes(name).map(|inode| {
             let dentry = Dentry::new(
                 inode,
-                DentryOptions::Named((String::from(name), self.this())),
+                DentryOptions::Named((name.to_vec(), self.this())),
             );
             self.insert_positive_child(children, name, dentry)
         })
@@ -560,7 +577,11 @@ impl DirDentry<'_> {
     /// full path-component semantics should use
     /// [`super::PathResolver::lookup_at_path`].
     pub(in crate::fs) fn lookup_child(&self, name: &str) -> Result<Arc<Dentry>> {
-        debug_assert!(!is_dot_or_dotdot(name));
+        self.lookup_child_bytes(name.as_bytes())
+    }
+
+    pub(in crate::fs) fn lookup_child_bytes(&self, name: &[u8]) -> Result<Arc<Dentry>> {
+        debug_assert!(!is_dot_or_dotdot_bytes(name));
 
         let mut children = self.children.upread();
 
@@ -582,10 +603,10 @@ impl DirDentry<'_> {
 
         // Looks up via the file system.
 
-        let inode = match self.inode.lookup(name) {
+        let inode = match self.inode.lookup_bytes(name) {
             Ok(inode) => inode,
             Err(error) if error.error() == Errno::ENOENT => {
-                children.upgrade().insert_negative(name.to_string());
+                children.upgrade().insert_negative(name.to_vec());
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -593,7 +614,7 @@ impl DirDentry<'_> {
 
         let target = Dentry::new(
             inode,
-            DentryOptions::Named((String::from(name), self.this())),
+            DentryOptions::Named((name.to_vec(), self.this())),
         );
         let mut children = children.upgrade();
 
@@ -607,12 +628,21 @@ impl DirDentry<'_> {
         mode: InodeMode,
         type_: MknodType,
     ) -> Result<Arc<Dentry>> {
+        self.mknod_bytes(name.as_bytes(), mode, type_)
+    }
+
+    pub(in crate::fs) fn mknod_bytes(
+        &self,
+        name: &[u8],
+        mode: InodeMode,
+        type_: MknodType,
+    ) -> Result<Arc<Dentry>> {
         let children = self.validate_child_absent(name)?;
         Self::check_mknod_capability(&type_)?;
-        let inode = self.inode.mknod(self, name, mode, type_)?;
+        let inode = self.inode.mknod_bytes(self, name, mode, type_)?;
         let new_child = Dentry::new(
             inode,
-            DentryOptions::Named((String::from(name), self.this())),
+            DentryOptions::Named((name.to_vec(), self.this())),
         );
         let mut children = children.upgrade();
 
@@ -638,23 +668,31 @@ impl DirDentry<'_> {
 
     /// Links a new `Dentry` by `link()` the old inode.
     pub(in crate::fs) fn link(&self, old_dentry: &Dentry, name: &str) -> Result<()> {
+        self.link_bytes(old_dentry, name.as_bytes())
+    }
+
+    pub(in crate::fs) fn link_bytes(&self, old_dentry: &Dentry, name: &[u8]) -> Result<()> {
         let children = self.validate_child_absent(name)?;
-        self.inode.link(self, old_dentry, name)?;
+        self.inode.link_bytes(self, old_dentry, name)?;
         let dentry = Dentry::new(
             old_dentry.inode().clone(),
-            DentryOptions::Named((String::from(name), self.this())),
+            DentryOptions::Named((name.to_vec(), self.this())),
         );
         let mut children = children.upgrade();
         self.insert_positive_child(&mut children, name, dentry.clone());
         fs::vfs::notify::on_link(dentry.parent().unwrap().inode(), dentry.inode(), || {
-            name.to_string()
+            name.to_vec()
         });
         Ok(())
     }
 
     /// Deletes a `Dentry` by `unlink()` the inner inode.
     pub(in crate::fs) fn unlink(&self, name: &str) -> Result<()> {
-        if is_dot_or_dotdot(name) {
+        self.unlink_bytes(name.as_bytes())
+    }
+
+    pub(in crate::fs) fn unlink_bytes(&self, name: &[u8]) -> Result<()> {
+        if is_dot_or_dotdot_bytes(name) {
             return_errno_with_message!(Errno::EISDIR, "unlink on . or ..");
         }
 
@@ -668,7 +706,9 @@ impl DirDentry<'_> {
             // FIXME: `DELETE_SELF` should be generated after closing the last FD.
             fs::vfs::notify::on_inode_removed(child_inode);
         }
-        fs::vfs::notify::on_delete(dir_inode, child_inode, || name.to_string());
+        fs::vfs::notify::on_delete(dir_inode, child_inode, || {
+            name.to_vec()
+        });
         if nlinks == 0 {
             // Ideally, we would use `fs_event_publisher()` here to avoid creating a
             // `FsEventPublisher` instance on a dying inode. However, it isn't possible because we
@@ -685,10 +725,14 @@ impl DirDentry<'_> {
 
     /// Deletes a directory `Dentry` by `rmdir()` the inner inode.
     pub(in crate::fs) fn rmdir(&self, name: &str) -> Result<()> {
-        if is_dot(name) {
+        self.rmdir_bytes(name.as_bytes())
+    }
+
+    pub(in crate::fs) fn rmdir_bytes(&self, name: &[u8]) -> Result<()> {
+        if is_dot_bytes(name) {
             return_errno_with_message!(Errno::EINVAL, "rmdir on .");
         }
-        if is_dotdot(name) {
+        if is_dotdot_bytes(name) {
             return_errno_with_message!(Errno::ENOTEMPTY, "rmdir on ..");
         }
 
@@ -701,7 +745,9 @@ impl DirDentry<'_> {
             // FIXME: `DELETE_SELF` should be generated after closing the last FD.
             fs::vfs::notify::on_inode_removed(child_inode);
         }
-        fs::vfs::notify::on_delete(dir_inode, child_inode, || name.to_string());
+        fs::vfs::notify::on_delete(dir_inode, child_inode, || {
+            name.to_vec()
+        });
         if nlinks == 0 {
             // Ideally, we would use `fs_event_publisher()` here to avoid creating a
             // `FsEventPublisher` instance on a dying inode. However, it isn't possible because we
@@ -718,7 +764,7 @@ impl DirDentry<'_> {
 
     fn remove_child(
         &self,
-        name: &str,
+        name: &[u8],
         remove_child_fn: impl FnOnce(&dyn Inode, &Dentry) -> Result<()>,
     ) -> Result<Arc<Dentry>> {
         let dir_inode = self.inode();
@@ -748,8 +794,8 @@ impl DirDentry<'_> {
         let child_dentry = match &cached_child {
             Some(child) => child.clone(),
             None => Dentry::new(
-                dir_inode.lookup(name)?,
-                DentryOptions::Named((String::from(name), self.this())),
+                dir_inode.lookup_bytes(name)?,
+                DentryOptions::Named((name.to_vec(), self.this())),
             ),
         };
 
@@ -769,13 +815,23 @@ impl DirDentry<'_> {
         new_name: &str,
         mode: RenameMode,
     ) -> Result<()> {
+        self.rename_bytes(old_name.as_bytes(), new_dir, new_name.as_bytes(), mode)
+    }
+
+    pub(in crate::fs) fn rename_bytes(
+        &self,
+        old_name: &[u8],
+        new_dir: &DirDentry,
+        new_name: &[u8],
+        mode: RenameMode,
+    ) -> Result<()> {
         // Confined path walks hold the read side while validating ancestry.
         let _rename_guard = super::PATH_RENAME_LOCK.write();
 
-        if is_dot_or_dotdot(old_name) {
+        if is_dot_or_dotdot_bytes(old_name) {
             return_errno_with_message!(Errno::EBUSY, "old_name is . or ..");
         }
-        if is_dot_or_dotdot(new_name) {
+        if is_dot_or_dotdot_bytes(new_name) {
             if mode == RenameMode::NoReplace {
                 return_errno_with_message!(Errno::EEXIST, "new_name is . or ..");
             } else {
@@ -827,7 +883,7 @@ impl DirDentry<'_> {
                 }
             }
 
-            old_dir_inode.rename(&old_dentry, self, new_name, replaced_inode, mode)?;
+            old_dir_inode.rename_bytes(&old_dentry, self, new_name, replaced_inode, mode)?;
 
             match mode {
                 RenameMode::Replace | RenameMode::NoReplace => {
@@ -884,7 +940,7 @@ impl DirDentry<'_> {
                 new_dir.check_sticky_bit_permission(replaced_inode)?;
             }
 
-            old_dir_inode.rename(&old_dentry, new_dir, new_name, replaced_inode, mode)?;
+            old_dir_inode.rename_bytes(&old_dentry, new_dir, new_name, replaced_inode, mode)?;
 
             match mode {
                 RenameMode::Replace | RenameMode::NoReplace => {
@@ -950,7 +1006,7 @@ impl DirDentry<'_> {
     /// Revalidates a cached entry.
     ///
     /// Returns `true` if the cached entry is still valid, or `false` if it should be invalidated.
-    fn revalidate_cached_entry(&self, name: &str, cached_entry: &CachedDentry) -> bool {
+    fn revalidate_cached_entry(&self, name: &[u8], cached_entry: &CachedDentry) -> bool {
         let policy = self.revalidation_policy;
         if policy.is_empty() {
             return true;
@@ -959,13 +1015,15 @@ impl DirDentry<'_> {
         if policy.contains(RevalidationPolicy::REVALIDATE_EXISTS)
             && let CachedDentry::Positive { dentry } = cached_entry
         {
-            return self.inode.revalidate_exists(name, dentry.inode().as_ref());
+            return self
+                .inode
+                .revalidate_exists_bytes(name, dentry.inode().as_ref());
         }
 
         if policy.contains(RevalidationPolicy::REVALIDATE_ABSENT)
             && let CachedDentry::Negative = cached_entry
         {
-            return self.inode.revalidate_absent(name);
+            return self.inode.revalidate_absent_bytes(name);
         }
 
         true
@@ -1002,7 +1060,7 @@ impl Debug for Dentry {
 /// so [`Dentry::key`] must not be called on them.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) struct DentryKey {
-    name: String,
+    name: Vec<u8>,
     parent_ptr: usize,
 }
 
@@ -1018,7 +1076,7 @@ impl DentryKey {
             NameAndParent::Anonymous(_)
         ));
 
-        let name = dentry.name();
+        let name = dentry.name_bytes();
         let parent = dentry.parent().unwrap_or_else(|| dentry.this());
 
         Self {
@@ -1040,7 +1098,7 @@ enum DentryOptions {
     /// Root of a mounted filesystem.
     Root,
     /// A named entry under a parent directory.
-    Named((String, Arc<Dentry>)),
+    Named((Vec<u8>, Arc<Dentry>)),
     /// A real inode parented to a directory
     /// but kept out of the parent's children cache.
     /// Reserved for `O_TMPFILE`.
@@ -1059,7 +1117,7 @@ enum DentryOptions {
 // of cached dentries.
 #[derive(Debug)]
 struct DentryChildren {
-    entries: HashMap<String, CachedDentry>,
+    entries: HashMap<Vec<u8>, CachedDentry>,
     insert_count: usize,
 }
 
@@ -1115,12 +1173,12 @@ impl DentryChildren {
     }
 
     /// Finds a cached dentry by name.
-    fn find(&self, name: &str) -> Option<CachedDentry> {
+    fn find(&self, name: &[u8]) -> Option<CachedDentry> {
         self.entries.get(name).cloned()
     }
 
     /// Inserts a positive dentry.
-    fn insert_positive(&mut self, name: String, dentry: Arc<Dentry>) {
+    fn insert_positive(&mut self, name: Vec<u8>, dentry: Arc<Dentry>) {
         let _prev = self
             .entries
             .insert(name, CachedDentry::new_positive(dentry));
@@ -1134,7 +1192,7 @@ impl DentryChildren {
     /// Inserts a negative dentry.
     ///
     /// This operation should not overwrite an existing entry.
-    fn insert_negative(&mut self, name: String) {
+    fn insert_negative(&mut self, name: Vec<u8>) {
         let prev = self.entries.insert(name, CachedDentry::new_negative());
         debug_assert!(
             prev.is_none(),
@@ -1151,7 +1209,7 @@ impl DentryChildren {
     }
 
     /// Deletes a positive dentry by name, turning it into a negative entry if exists.
-    fn delete(&mut self, name: &str) {
+    fn delete(&mut self, name: &[u8]) {
         let Some((_, exist_entry)) = self.entries.get_key_value_mut(name) else {
             return;
         };
@@ -1168,7 +1226,7 @@ impl DentryChildren {
     }
 
     /// Removes a dentry by name without installing a negative cache entry.
-    fn remove(&mut self, name: &str) -> Option<Arc<Dentry>> {
+    fn remove(&mut self, name: &[u8]) -> Option<Arc<Dentry>> {
         let removed_entry = self.entries.remove(name);
         #[cfg(debug_assertions)]
         if matches!(removed_entry, Some(CachedDentry::Negative)) {
@@ -1182,7 +1240,8 @@ impl DentryChildren {
         self.entries
             .retain(|name, cached_entry| match cached_entry {
                 CachedDentry::Positive { dentry } => {
-                    dir.inode.revalidate_exists(name, dentry.inode().as_ref())
+                    dir.inode
+                        .revalidate_exists_bytes(name, dentry.inode().as_ref())
                 }
                 CachedDentry::Negative => true,
             });

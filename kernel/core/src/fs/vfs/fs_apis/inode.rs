@@ -136,8 +136,8 @@ pub(crate) struct Metadata {
 /// Describes whether an inode may get new hard links.
 ///
 /// This does not control symbolic links. A symbolic link is a separate inode
-/// whose target is a pathname string, so creating one does not link the target
-/// inode directly.
+/// whose payload is a pathname byte sequence, so creating one does not link the
+/// target inode directly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HardLinkability {
     /// Allows creating hard links to the inode.
@@ -452,6 +452,18 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
         Err(Error::new(Errno::ENOTDIR))
     }
 
+    /// Creates a child inode using its raw Linux pathname bytes.
+    fn create_bytes(
+        &self,
+        self_dentry: &Dentry,
+        name: &[u8],
+        type_: InodeType,
+        mode: InodeMode,
+    ) -> Result<Arc<dyn Inode>> {
+        let name = core::str::from_utf8(name).map_err(|_| Error::new(Errno::EILSEQ))?;
+        self.create(self_dentry, name, type_, mode)
+    }
+
     /// Creates a symbolic-link child inode.
     fn create_symlink(
         &self,
@@ -461,6 +473,19 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
         mode: InodeMode,
     ) -> Result<Arc<dyn Inode>> {
         Err(Error::new(Errno::EOPNOTSUPP))
+    }
+
+    /// Creates a symbolic link from raw pathname bytes for both its name and target.
+    fn create_symlink_bytes(
+        &self,
+        self_dentry: &Dentry,
+        name: &[u8],
+        target: &[u8],
+        mode: InodeMode,
+    ) -> Result<Arc<dyn Inode>> {
+        let name = core::str::from_utf8(name).map_err(|_| Error::new(Errno::EILSEQ))?;
+        let target = core::str::from_utf8(target).map_err(|_| Error::new(Errno::EILSEQ))?;
+        self.create_symlink(self_dentry, name, target, mode)
     }
 
     /// Creates an unnamed temporary inode.
@@ -484,6 +509,18 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
         Err(Error::new(Errno::ENOTDIR))
     }
 
+    /// Creates a device or named-pipe inode using raw Linux pathname bytes.
+    fn mknod_bytes(
+        &self,
+        self_dentry: &Dentry,
+        name: &[u8],
+        mode: InodeMode,
+        type_: MknodType,
+    ) -> Result<Arc<dyn Inode>> {
+        let name = core::str::from_utf8(name).map_err(|_| Error::new(Errno::EILSEQ))?;
+        self.mknod(self_dentry, name, mode, type_)
+    }
+
     /// Opens a file for this inode if supported.
     fn open(
         &self,
@@ -497,6 +534,12 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
     /// Creates a hard link to an existing inode.
     fn link(&self, self_dentry: &Dentry, old_dentry: &Dentry, name: &str) -> Result<()> {
         Err(Error::new(Errno::ENOTDIR))
+    }
+
+    /// Creates a hard link using raw Linux pathname bytes for the new name.
+    fn link_bytes(&self, self_dentry: &Dentry, old_dentry: &Dentry, name: &[u8]) -> Result<()> {
+        let name = core::str::from_utf8(name).map_err(|_| Error::new(Errno::EILSEQ))?;
+        self.link(self_dentry, old_dentry, name)
     }
 
     /// Removes the specified child directory entry from this directory.
@@ -514,6 +557,12 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
         Err(Error::new(Errno::ENOTDIR))
     }
 
+    /// Looks up a child inode using raw Linux pathname bytes.
+    fn lookup_bytes(&self, name: &[u8]) -> Result<Arc<dyn Inode>> {
+        let name = core::str::from_utf8(name).map_err(|_| Error::new(Errno::EILSEQ))?;
+        self.lookup(name)
+    }
+
     /// Renames or moves a child entry, optionally replacing an existing inode.
     fn rename(
         &self,
@@ -524,6 +573,19 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
         mode: RenameMode,
     ) -> Result<()> {
         Err(Error::new(Errno::ENOTDIR))
+    }
+
+    /// Renames or moves a child entry using raw Linux pathname bytes for the new name.
+    fn rename_bytes(
+        &self,
+        old_child_dentry: &Dentry,
+        new_dir_dentry: &Dentry,
+        new_name: &[u8],
+        replaced_inode: Option<&Arc<dyn Inode>>,
+        mode: RenameMode,
+    ) -> Result<()> {
+        let new_name = core::str::from_utf8(new_name).map_err(|_| Error::new(Errno::EILSEQ))?;
+        self.rename(old_child_dentry, new_dir_dentry, new_name, replaced_inode, mode)
     }
 
     /// Reads the target of a symbolic link.
@@ -572,6 +634,12 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
         true
     }
 
+    /// Checks whether a cached child named by raw Linux pathname bytes exists.
+    fn revalidate_exists_bytes(&self, name: &[u8], child: &dyn Inode) -> bool {
+        core::str::from_utf8(name)
+            .is_ok_and(|name| self.revalidate_exists(name, child))
+    }
+
     /// Checks whether a name is still absent under this directory.
     ///
     /// Called on a negative cache hit
@@ -587,6 +655,11 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
     /// Otherwise, the return value is considered garbage.
     fn revalidate_absent(&self, _name: &str) -> bool {
         true
+    }
+
+    /// Checks whether a raw Linux pathname byte sequence remains absent.
+    fn revalidate_absent_bytes(&self, name: &[u8]) -> bool {
+        core::str::from_utf8(name).is_ok_and(|name| self.revalidate_absent(name))
     }
 
     /// Returns the end position for [`SeekFrom::End`].
@@ -785,7 +858,7 @@ pub(crate) enum SymbolicLink {
     ///
     /// This is the most common type of symbolic link.
     /// Symbolic links on a normal FS are of this variant.
-    Plain(String),
+    Plain(Vec<u8>),
     /// An file object residing at a FS path.
     ///
     /// This variant is intended to support the special ProcFS symbolic links,

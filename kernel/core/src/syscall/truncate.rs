@@ -35,8 +35,7 @@ pub(super) fn sys_truncate(path_ptr: Vaddr, len: isize, ctx: &Context) -> Result
     check_length(len, ctx)?;
 
     let dir_path = {
-        let path_name = path_name.to_string_lossy();
-        let fs_path = FsPath::from_fd_at(AT_FDCWD, &path_name, EmptyPathStr::Reject)?;
+        let fs_path = FsPath::from_fd_at_bytes(AT_FDCWD, path_name.to_bytes(), EmptyPathStr::Reject)?;
         ctx.thread_local
             .borrow_fs()
             .resolver()

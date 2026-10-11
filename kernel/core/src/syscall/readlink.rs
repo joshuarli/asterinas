@@ -37,13 +37,12 @@ pub(super) fn sys_readlinkat(
         let fs_ref = ctx.thread_local.borrow_fs();
         let path_resolver = fs_ref.resolver().read();
 
-        let path_name = path_name.to_string_lossy();
-        let fs_path = FsPath::from_fd_at(dirfd, &path_name, EmptyPathStr::Allow)?;
+        let fs_path = FsPath::from_fd_at_bytes(dirfd, path_name.to_bytes(), EmptyPathStr::Allow)?;
         let path = path_resolver.lookup_no_follow(&fs_path)?;
 
         match path.inode().read_link()? {
             SymbolicLink::Plain(s) => s,
-            SymbolicLink::Path(path) => path_resolver.make_abs_path(&path).into_string(),
+            SymbolicLink::Path(path) => path_resolver.make_abs_path(&path).into_bytes(),
         }
     };
 

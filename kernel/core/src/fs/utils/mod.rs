@@ -22,6 +22,5 @@ pub(crate) const NAME_MAX: usize = 255;
 /// The upper limit for resolving symbolic links
 pub(crate) const SYMLINKS_MAX: usize = 40;
 
-pub(crate) type CStr256 = aster_util::fixed_str::FixedCStr<256>;
 pub(crate) type Str16 = aster_util::fixed_str::FixedNonTerminatedCStr<16>;
 pub(crate) type Str64 = aster_util::fixed_str::FixedNonTerminatedCStr<64>;

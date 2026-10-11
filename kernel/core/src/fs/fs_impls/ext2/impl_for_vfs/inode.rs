@@ -183,6 +183,16 @@ impl Inode for Ext2Inode {
         Ok(self.create(name, type_, mode.into())?)
     }
 
+    fn create_bytes(
+        &self,
+        _self_dentry: &Dentry,
+        name: &[u8],
+        type_: InodeType,
+        mode: InodeMode,
+    ) -> Result<Arc<dyn Inode>> {
+        Ok(self.create_bytes(name, type_, mode.into())?)
+    }
+
     fn create_symlink(
         &self,
         _self_dentry: &Dentry,
@@ -191,6 +201,16 @@ impl Inode for Ext2Inode {
         mode: InodeMode,
     ) -> Result<Arc<dyn Inode>> {
         Ok(self.create_symlink(name, target, mode.into())?)
+    }
+
+    fn create_symlink_bytes(
+        &self,
+        _self_dentry: &Dentry,
+        name: &[u8],
+        target: &[u8],
+        mode: InodeMode,
+    ) -> Result<Arc<dyn Inode>> {
+        Ok(self.create_symlink_bytes(name, target, mode.into())?)
     }
 
     fn mknod(
@@ -215,8 +235,32 @@ impl Inode for Ext2Inode {
         Ok(new_inode)
     }
 
+    fn mknod_bytes(
+        &self,
+        self_dentry: &Dentry,
+        name: &[u8],
+        mode: InodeMode,
+        type_: MknodType,
+    ) -> Result<Arc<dyn Inode>> {
+        let (inode_type, device_id) = match type_ {
+            MknodType::CharDevice(dev_id) => (InodeType::CharDevice, Some(dev_id)),
+            MknodType::BlockDevice(dev_id) => (InodeType::BlockDevice, Some(dev_id)),
+            MknodType::NamedPipe => (InodeType::NamedPipe, None),
+        };
+        let new_inode = self.create_bytes(name, inode_type, mode.into())?;
+        if let Some(device_id) = device_id {
+            new_inode.set_device_id(device_id)?;
+        }
+        let _ = self_dentry;
+        Ok(new_inode)
+    }
+
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
         Ok(self.lookup(name)?)
+    }
+
+    fn lookup_bytes(&self, name: &[u8]) -> Result<Arc<dyn Inode>> {
+        Ok(self.lookup_bytes(name)?)
     }
 
     fn link(&self, _self_dentry: &Dentry, old_dentry: &Dentry, name: &str) -> Result<()> {
@@ -224,14 +268,19 @@ impl Inode for Ext2Inode {
         self.link(old, name)
     }
 
+    fn link_bytes(&self, _self_dentry: &Dentry, old_dentry: &Dentry, name: &[u8]) -> Result<()> {
+        let old = old_dentry.inode().downcast_ref::<Ext2Inode>().unwrap();
+        self.link_bytes(old, name)
+    }
+
     fn unlink(&self, child_dentry: &Dentry) -> Result<()> {
         let child = child_dentry.inode().downcast_ref::<Ext2Inode>().unwrap();
-        self.unlink(&child_dentry.name(), child)
+        self.unlink_bytes(&child_dentry.name_bytes(), child)
     }
 
     fn rmdir(&self, child_dentry: &Dentry) -> Result<()> {
         let child = child_dentry.inode().downcast_ref::<Ext2Inode>().unwrap();
-        self.rmdir(&child_dentry.name(), child)
+        self.rmdir_bytes(&child_dentry.name_bytes(), child)
     }
 
     fn rename(
@@ -255,6 +304,29 @@ impl Inode for Ext2Inode {
 
         self.rename(
             &old_child_dentry.name(),
+            old_inode,
+            new_dir_inode,
+            new_name,
+            replaced_inode,
+        )
+    }
+
+    fn rename_bytes(
+        &self,
+        old_child_dentry: &Dentry,
+        new_dir_dentry: &Dentry,
+        new_name: &[u8],
+        replaced_inode: Option<&Arc<dyn Inode>>,
+        mode: RenameMode,
+    ) -> Result<()> {
+        if mode == RenameMode::Exchange {
+            return_errno_with_message!(Errno::EINVAL, "RENAME_EXCHANGE is not supported on ext2");
+        }
+        let new_dir_inode = new_dir_dentry.inode().downcast_ref::<Ext2Inode>().unwrap();
+        let old_inode = old_child_dentry.inode().downcast_ref::<Ext2Inode>().unwrap();
+        let replaced_inode = replaced_inode.map(|inode| inode.downcast_ref::<Ext2Inode>().unwrap());
+        self.rename_bytes(
+            &old_child_dentry.name_bytes(),
             old_inode,
             new_dir_inode,
             new_name,

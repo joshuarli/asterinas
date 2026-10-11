@@ -29,8 +29,7 @@ pub(super) fn sys_statfs(
     );
 
     let statfs = {
-        let path_name = path_name.to_string_lossy();
-        let fs_path = FsPath::try_from(path_name.as_ref())?;
+        let fs_path = FsPath::try_from(path_name.to_bytes())?;
         let path = ctx
             .thread_local
             .borrow_fs()

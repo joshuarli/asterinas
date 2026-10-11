@@ -52,8 +52,8 @@ impl FastSymlinkTarget {
 }
 
 impl Inode {
-    /// Reads symbolic link target bytes and decodes them as UTF-8.
-    pub(in ext2) fn read_link(&self) -> Result<String> {
+    /// Reads the exact target bytes of a symbolic link.
+    pub(in ext2) fn read_link(&self) -> Result<Vec<u8>> {
         if self.type_ != InodeType::SymLink {
             return_errno!(Errno::EINVAL);
         }
@@ -67,6 +67,15 @@ impl Inode {
         &self,
         name: &str,
         target: &str,
+        perm: FilePerm,
+    ) -> Result<Arc<Inode>> {
+        self.create_symlink_bytes(name.as_bytes(), target.as_bytes(), perm)
+    }
+
+    pub(in ext2) fn create_symlink_bytes(
+        &self,
+        name: &[u8],
+        target: &[u8],
         perm: FilePerm,
     ) -> Result<Arc<Inode>> {
         if target.len() >= BLOCK_SIZE {
@@ -88,7 +97,7 @@ impl InodeInner {
         matches!(self.payload, InodePayload::FastSymlink { .. })
     }
 
-    fn write_symlink_target(&mut self, fs: &Arc<Ext2>, target: &str) -> Result<()> {
+    fn write_symlink_target(&mut self, fs: &Arc<Ext2>, target: &[u8]) -> Result<()> {
         let target_len = target.len();
 
         // Linux reserves one byte in `i_block` for a trailing NUL.
@@ -98,7 +107,7 @@ impl InodeInner {
                 block_manager.truncate_to_byte_len(0);
             }
             let mut fast_target = FastSymlinkTarget::new_zeros();
-            fast_target.write(target.as_bytes())?;
+            fast_target.write(target)?;
             self.payload = InodePayload::FastSymlink {
                 target: fast_target,
             };
@@ -116,22 +125,21 @@ impl InodeInner {
                 );
             }
             self.prepare_write(fs.as_ref(), 0, target_len)?;
-            self.page_cache().write_bytes(0, target.as_bytes())?;
+            self.page_cache().write_bytes(0, target)?;
         }
 
         self.set_file_size(target_len);
         Ok(())
     }
 
-    fn read_link(&self) -> Result<String> {
+    fn read_link(&self) -> Result<Vec<u8>> {
         let link_size = self.file_size();
 
         if let InodePayload::FastSymlink { target } = &self.payload {
             // Exclude the Linux-compatible trailing NUL byte from the target.
             let read_len = link_size.min(MAX_FAST_SYMLINK_LEN - 1);
             let target_bytes = target.read(read_len);
-            return String::from_utf8(target_bytes)
-                .map_err(|_| Error::with_message(Errno::EIO, "symlink target is not valid UTF-8"));
+            return Ok(target_bytes);
         }
 
         let mut target = vec![0u8; link_size];
@@ -139,7 +147,6 @@ impl InodeInner {
             Error::with_message(Errno::EIO, "failed to read symlink target from page cache")
         })?;
 
-        String::from_utf8(target)
-            .map_err(|_| Error::with_message(Errno::EIO, "symlink target is not valid UTF-8"))
+        Ok(target)
     }
 }

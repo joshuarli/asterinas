@@ -94,12 +94,21 @@ impl Path {
     /// Use [`Self::new_symlink_child`] to create a symbolic link, because a
     /// symbolic link should be created atomically with its target.
     pub(crate) fn new_child(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Self> {
+        self.new_child_bytes(name.as_bytes(), type_, mode)
+    }
+
+    pub(crate) fn new_child_bytes(
+        &self,
+        name: &[u8],
+        type_: InodeType,
+        mode: InodeMode,
+    ) -> Result<Self> {
         debug_assert_ne!(type_, InodeType::SymLink);
 
         let dir_dentry = self.dentry.as_dir_dentry_or_err()?;
         self.check_dir_entry_mutation()?;
-        let new_child_dentry = dir_dentry.create_child(name, || {
-            dir_dentry.inode().create(&dir_dentry, name, type_, mode)
+        let new_child_dentry = dir_dentry.create_child_bytes(name, || {
+            dir_dentry.inode().create_bytes(&dir_dentry, name, type_, mode)
         })?;
         Ok(Self::new(self.mount.clone(), new_child_dentry))
     }
@@ -114,12 +123,21 @@ impl Path {
         target: &str,
         mode: InodeMode,
     ) -> Result<Self> {
+        self.new_symlink_child_bytes(name.as_bytes(), target.as_bytes(), mode)
+    }
+
+    pub(crate) fn new_symlink_child_bytes(
+        &self,
+        name: &[u8],
+        target: &[u8],
+        mode: InodeMode,
+    ) -> Result<Self> {
         let dir_dentry = self.dentry.as_dir_dentry_or_err()?;
         self.check_dir_entry_mutation()?;
-        let new_child_dentry = dir_dentry.create_child(name, || {
+        let new_child_dentry = dir_dentry.create_child_bytes(name, || {
             dir_dentry
                 .inode()
-                .create_symlink(&dir_dentry, name, target, mode)
+                .create_symlink_bytes(&dir_dentry, name, target, mode)
         })?;
         Ok(Self::new(self.mount.clone(), new_child_dentry))
     }
@@ -128,8 +146,12 @@ impl Path {
     ///
     /// This does not interpret special names, check search permissions, or traverse mount points.
     pub(crate) fn lookup_child(&self, name: &str) -> Result<Self> {
+        self.lookup_child_bytes(name.as_bytes())
+    }
+
+    pub(crate) fn lookup_child_bytes(&self, name: &[u8]) -> Result<Self> {
         let dir_dentry = self.dentry.as_dir_dentry_or_err()?;
-        let child_dentry = dir_dentry.lookup_child(name)?;
+        let child_dentry = dir_dentry.lookup_child_bytes(name)?;
         Ok(Self::new(self.mount.clone(), child_dentry))
     }
 
@@ -778,16 +800,28 @@ impl Path {
     pub(crate) fn type_(&self) -> InodeType;
     pub(crate) fn name(&self) -> String;
 
+    pub(crate) fn name_bytes(&self) -> Vec<u8> {
+        self.dentry.name_bytes()
+    }
+
     /// Creates a `Path` by making an inode of the `type_` with the `mode`.
     pub(crate) fn mknod(&self, name: &str, mode: InodeMode, type_: MknodType) -> Result<Self> {
+        self.mknod_bytes(name.as_bytes(), mode, type_)
+    }
+
+    pub(crate) fn mknod_bytes(
+        &self,
+        name: &[u8],
+        mode: InodeMode,
+        type_: MknodType,
+    ) -> Result<Self> {
         let dir_dentry = self.dentry.as_dir_dentry_or_err()?;
         self.check_dir_entry_mutation()?;
-        let inner = dir_dentry.mknod(name, mode, type_)?;
+        let inner = dir_dentry.mknod_bytes(name, mode, type_)?;
         Ok(Self::new(self.mount.clone(), inner))
     }
 
-    /// Links a new name for the `Path`.
-    pub(crate) fn link(&self, old: &Self, name: &str) -> Result<()> {
+    pub(crate) fn link_bytes(&self, old: &Self, name: &[u8]) -> Result<()> {
         if !Arc::ptr_eq(&old.mount, &self.mount) {
             return_errno_with_message!(Errno::EXDEV, "the operation cannot cross mounts");
         }
@@ -795,29 +829,26 @@ impl Path {
         let dir_dentry = self.dentry.as_dir_dentry_or_err()?;
         old.check_hardlink_source()?;
         self.check_dir_entry_mutation()?;
-        dir_dentry.link(&old.dentry, name)
+        dir_dentry.link_bytes(&old.dentry, name)
     }
 
-    /// Unlinks a name from the `Path`.
-    pub(crate) fn unlink(&self, name: &str) -> Result<()> {
+    pub(crate) fn unlink_bytes(&self, name: &[u8]) -> Result<()> {
         let dir_dentry = self.dentry.as_dir_dentry_or_err()?;
         self.check_dir_entry_mutation()?;
-        dir_dentry.unlink(name)
+        dir_dentry.unlink_bytes(name)
     }
 
-    /// Removes a directory by `rmdir()` the inner inode.
-    pub(crate) fn rmdir(&self, name: &str) -> Result<()> {
+    pub(crate) fn rmdir_bytes(&self, name: &[u8]) -> Result<()> {
         let dir_dentry = self.dentry.as_dir_dentry_or_err()?;
         self.check_dir_entry_mutation()?;
-        dir_dentry.rmdir(name)
+        dir_dentry.rmdir_bytes(name)
     }
 
-    /// Renames a `Path` to the new `Path` by `rename()` the inner inode.
-    pub(crate) fn rename(
+    pub(crate) fn rename_bytes(
         &self,
-        old_name: &str,
+        old_name: &[u8],
         new_dir: &Self,
-        new_name: &str,
+        new_name: &[u8],
         mode: RenameMode,
     ) -> Result<()> {
         if !Arc::ptr_eq(&self.mount, &new_dir.mount) {
@@ -832,7 +863,7 @@ impl Path {
             new_dir.check_dir_entry_mutation()?;
         }
 
-        old_dir_dentry.rename(old_name, &new_dir_dentry, new_name, mode)
+        old_dir_dentry.rename_bytes(old_name, &new_dir_dentry, new_name, mode)
     }
 }
 
@@ -950,19 +981,28 @@ fn capable_modify_file_cap(inode: &dyn Inode, ctx: &Context) -> Result<()> {
 
 /// Checks if the file name is ".", indicating it's the current directory.
 pub(crate) const fn is_dot(filename: &str) -> bool {
-    let name_bytes = filename.as_bytes();
-    name_bytes.len() == 1 && name_bytes[0] == DOT_BYTE
+    is_dot_bytes(filename.as_bytes())
 }
 
 /// Checks if the file name is "..", indicating it's the parent directory.
 pub(crate) const fn is_dotdot(filename: &str) -> bool {
-    let name_bytes = filename.as_bytes();
-    name_bytes.len() == 2 && name_bytes[0] == DOT_BYTE && name_bytes[1] == DOT_BYTE
+    is_dotdot_bytes(filename.as_bytes())
 }
 
 /// Checks if the file name is "." or "..", indicating it's the current or parent directory.
 pub(crate) const fn is_dot_or_dotdot(filename: &str) -> bool {
-    let name_bytes = filename.as_bytes();
+    is_dot_or_dotdot_bytes(filename.as_bytes())
+}
+
+pub(crate) const fn is_dot_bytes(name_bytes: &[u8]) -> bool {
+    name_bytes.len() == 1 && name_bytes[0] == DOT_BYTE
+}
+
+pub(crate) const fn is_dotdot_bytes(name_bytes: &[u8]) -> bool {
+    name_bytes.len() == 2 && name_bytes[0] == DOT_BYTE && name_bytes[1] == DOT_BYTE
+}
+
+pub(crate) const fn is_dot_or_dotdot_bytes(name_bytes: &[u8]) -> bool {
     let name_len = name_bytes.len();
     if name_len == 1 {
         name_bytes[0] == DOT_BYTE

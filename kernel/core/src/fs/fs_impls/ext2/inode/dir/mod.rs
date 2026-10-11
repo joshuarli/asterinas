@@ -40,6 +40,10 @@ struct DirEntryInfo {
 impl Inode {
     /// Looks up a directory entry by name and returns the referenced inode.
     pub(in ext2) fn lookup(&self, name: &str) -> Result<Arc<Inode>> {
+        self.lookup_bytes(name.as_bytes())
+    }
+
+    pub(in ext2) fn lookup_bytes(&self, name: &[u8]) -> Result<Arc<Inode>> {
         let ino = {
             let inner = self.inner.read();
             inner.find_entry_info(name)?.ino
@@ -62,8 +66,7 @@ impl Inode {
         result
     }
 
-    /// Removes an empty sub-directory.
-    pub(in ext2) fn rmdir(&self, name: &str, child: &Inode) -> Result<()> {
+    pub(in ext2) fn rmdir_bytes(&self, name: &[u8], child: &Inode) -> Result<()> {
         let fs = self.fs()?;
         let lock_targets = [self, child];
 
@@ -109,6 +112,15 @@ impl Inode {
         type_: InodeType,
         perm: FilePerm,
     ) -> Result<Arc<Inode>> {
+        self.create_bytes(name.as_bytes(), type_, perm)
+    }
+
+    pub(in ext2) fn create_bytes(
+        &self,
+        name: &[u8],
+        type_: InodeType,
+        perm: FilePerm,
+    ) -> Result<Arc<Inode>> {
         if matches!(type_, InodeType::Unknown | InodeType::SymLink) {
             return_errno!(Errno::EINVAL);
         }
@@ -126,7 +138,7 @@ impl Inode {
     /// Creates a child inode, initializes it, and publishes its directory entry.
     pub(super) fn create_initialized_child(
         &self,
-        name: &str,
+        name: &[u8],
         type_: InodeType,
         perm: FilePerm,
         init_child_fn: impl FnOnce(&Arc<Ext2>, &Inode) -> Result<()>,
@@ -172,6 +184,10 @@ impl Inode {
 
     /// Adds a hard link in this directory to an existing non-directory inode.
     pub(in ext2) fn link(&self, old: &Inode, name: &str) -> Result<()> {
+        self.link_bytes(old, name.as_bytes())
+    }
+
+    pub(in ext2) fn link_bytes(&self, old: &Inode, name: &[u8]) -> Result<()> {
         let fs = self.fs()?;
         let dir_entry_file_type = DirEntryFileType::from(old.type_);
         let lock_targets = [self, old];
@@ -195,8 +211,7 @@ impl Inode {
         Ok(())
     }
 
-    /// Removes a non-directory entry from this directory.
-    pub(in ext2) fn unlink(&self, name: &str, child: &Inode) -> Result<()> {
+    pub(in ext2) fn unlink_bytes(&self, name: &[u8], child: &Inode) -> Result<()> {
         let fs = self.fs()?;
 
         // The `DirDentry.children` lock in the VFS layer keeps the parent
@@ -239,6 +254,23 @@ impl Inode {
         new_name: &str,
         replaced_inode: Option<&Inode>,
     ) -> Result<()> {
+        self.rename_bytes(
+            old_name.as_bytes(),
+            old_inode,
+            new_dir_inode,
+            new_name.as_bytes(),
+            replaced_inode,
+        )
+    }
+
+    pub(in ext2) fn rename_bytes(
+        &self,
+        old_name: &[u8],
+        old_inode: &Inode,
+        new_dir_inode: &Inode,
+        new_name: &[u8],
+        replaced_inode: Option<&Inode>,
+    ) -> Result<()> {
         // The `DirDentry.children` lock in the VFS layer keeps the parent
         // directory entry stable during this operation, so we only need to
         // lock all related inodes in order, without rechecking the lookup
@@ -279,7 +311,7 @@ impl Inode {
         // corruption; bail out before we silently write a wrong `..` update.
         if old_inode.type_ == InodeType::Dir {
             let old_inner = guards.inner(old_inode.ino());
-            let parent_ino = old_inner.find_entry_info("..")?.ino;
+            let parent_ino = old_inner.find_entry_info(b"..")?.ino;
             if parent_ino != self.ino {
                 return_errno_with_message!(Errno::EIO, "dotdot entry inconsistent with source dir");
             }
@@ -310,10 +342,10 @@ impl Inode {
         &self,
         guards: &mut MultiInodeInnerGuards,
         new_dir_inode: &Inode,
-        old_name: &str,
+        old_name: &[u8],
         old_inode: &Inode,
         replaced_inode: Option<&Inode>,
-        new_name: &str,
+        new_name: &[u8],
     ) -> Result<()> {
         let old_is_dir = old_inode.type_ == InodeType::Dir;
         let has_replaced = replaced_inode.is_some();
@@ -376,7 +408,7 @@ impl Inode {
         // Step 4.3: update moved inode metadata.
         let old_inner = guards.inner_mut(old_inode.ino());
         if old_is_dir && !is_same_dir {
-            let dotdot_entry_info = old_inner.find_entry_info("..")?;
+            let dotdot_entry_info = old_inner.find_entry_info(b"..")?;
             old_inner.set_entry_target(
                 &dotdot_entry_info,
                 new_dir_inode.ino,
@@ -435,7 +467,7 @@ impl InodeInner {
     /// Overwrites an existing directory entry's inode and file type in place.
     fn overwrite_entry(
         &mut self,
-        name: &str,
+        name: &[u8],
         new_ino: Ext2Ino,
         new_file_type: DirEntryFileType,
     ) -> Result<()> {
@@ -447,7 +479,7 @@ impl InodeInner {
     fn add_new_entry(
         &mut self,
         fs: &Ext2,
-        name: &str,
+        name: &[u8],
         ino: Ext2Ino,
         file_type: DirEntryFileType,
     ) -> Result<()> {
@@ -541,13 +573,11 @@ impl InodeInner {
 
                 let ino = entry.header.ino;
                 if ino != 0 {
-                    let name = core::str::from_utf8(entry.name)
-                        .map_err(|_| Error::with_message(Errno::EIO, "invalid dir entry name"))?;
                     let dir_entry_file_type = DirEntryFileType::try_from(entry.header.file_type)
                         .unwrap_or(DirEntryFileType::Unknown);
                     let inode_type = InodeType::from(dir_entry_file_type);
                     if visitor
-                        .visit(name, ino as u64, inode_type, next_offset)
+                        .visit_bytes(entry.name, ino as u64, inode_type, next_offset)
                         .is_err()
                     {
                         advanced = current_offset - offset;
@@ -629,14 +659,13 @@ impl InodeInner {
     fn add_entry(
         &self,
         slot: &DirSlotInfo,
-        name: &str,
+        name: &[u8],
         ino: Ext2Ino,
         file_type: DirEntryFileType,
     ) -> Result<()> {
         debug_assert_ne!(ino, 0);
 
-        let name_bytes = name.as_bytes();
-        let entry_rec_len = DirEntryHeader::min_rec_len(name_bytes.len()) as usize;
+        let entry_rec_len = DirEntryHeader::min_rec_len(name.len()) as usize;
         debug_assert!(entry_rec_len <= slot.slot_rec_len);
 
         let page_cache = self.page_cache();
@@ -657,21 +686,20 @@ impl InodeInner {
         let header = DirEntryHeader {
             ino: ino.to_le(),
             rec_len: (entry_rec_len as u16).to_le(),
-            name_len: name_bytes.len() as u8,
+            name_len: name.len() as u8,
             file_type: file_type as u8,
         };
-        view.write_entry(0, header, name_bytes)?;
+        view.write_entry(0, header, name)?;
         Ok(())
     }
 
     /// Locate a target entry by name for delete/set_entry_target operations.
-    fn find_entry_info(&self, name: &str) -> Result<DirEntryInfo> {
+    fn find_entry_info(&self, name: &[u8]) -> Result<DirEntryInfo> {
         if self.inode_type() != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
         }
 
         let file_size = self.file_size();
-        let name_bytes = name.as_bytes();
         let page_cache = self.page_cache();
 
         for block_idx in 0..file_size.div_ceil(BLOCK_SIZE) {
@@ -680,7 +708,7 @@ impl InodeInner {
             let mut entry_iter = block.iter_entries();
             while let Some((entry_offset, entry)) = entry_iter.next_entry()? {
                 let ino = entry.header.ino;
-                if ino == 0 || entry.name != name_bytes {
+                if ino == 0 || entry.name != name {
                     continue;
                 }
                 return Ok(DirEntryInfo {
@@ -796,7 +824,7 @@ mod test {
         old.write_direct_at(0, &mut payload_reader).unwrap();
 
         let free_blocks_before = f.ext2.super_block().free_blocks_count();
-        root.unlink("old", old.as_ref()).unwrap();
+        root.unlink_bytes(b"old", old.as_ref()).unwrap();
         assert_errno!(f.ext2.read_inode(old_ino), Errno::ESTALE);
         assert!(
             f.ext2

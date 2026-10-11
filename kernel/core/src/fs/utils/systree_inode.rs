@@ -581,7 +581,9 @@ impl<KInode: SysTreeInodeTy + Send + Sync + 'static> Inode for KInode {
 
     default fn read_link(&self) -> Result<SymbolicLink> {
         match &self.node_kind() {
-            SysTreeNodeKind::Symlink(s) => Ok(SymbolicLink::Plain(s.target_path().to_string())),
+            SysTreeNodeKind::Symlink(s) => {
+                Ok(SymbolicLink::Plain(s.target_path().to_string().into_bytes()))
+            }
             _ => Err(Error::new(Errno::EINVAL)),
         }
     }

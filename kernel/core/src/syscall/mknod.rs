@@ -34,8 +34,8 @@ pub(super) fn sys_mknodat(
     );
 
     let (dir_path, name) = {
-        let path_name = path_name.to_string_lossy();
-        let fs_path = FsPath::from_fd_at(dirfd, &path_name, EmptyPathStr::Reject)?;
+        let fs_path =
+            FsPath::from_fd_at_bytes(dirfd, path_name.to_bytes(), EmptyPathStr::Reject)?;
         fs_ref
             .resolver()
             .read()
@@ -45,19 +45,19 @@ pub(super) fn sys_mknodat(
 
     match inode_type {
         InodeType::File => {
-            let _ = dir_path.new_child(&name, InodeType::File, inode_mode)?;
+            let _ = dir_path.new_child_bytes(&name, InodeType::File, inode_mode)?;
         }
         InodeType::CharDevice => {
-            let _ = dir_path.mknod(&name, inode_mode, MknodType::CharDevice(dev as u64))?;
+            let _ = dir_path.mknod_bytes(&name, inode_mode, MknodType::CharDevice(dev as u64))?;
         }
         InodeType::BlockDevice => {
-            let _ = dir_path.mknod(&name, inode_mode, MknodType::BlockDevice(dev as u64))?;
+            let _ = dir_path.mknod_bytes(&name, inode_mode, MknodType::BlockDevice(dev as u64))?;
         }
         InodeType::NamedPipe => {
-            let _ = dir_path.mknod(&name, inode_mode, MknodType::NamedPipe)?;
+            let _ = dir_path.mknod_bytes(&name, inode_mode, MknodType::NamedPipe)?;
         }
         InodeType::Socket => {
-            let _ = dir_path.new_child(&name, InodeType::Socket, inode_mode)?;
+            let _ = dir_path.new_child_bytes(&name, InodeType::Socket, inode_mode)?;
         }
         _ => return_errno_with_message!(Errno::EPERM, "unimplemented file types"),
     }

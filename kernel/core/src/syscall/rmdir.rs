@@ -22,22 +22,22 @@ pub(super) fn do_rmdirat(
     let path_name = ctx.user_space().read_cstring(path_addr, MAX_FILENAME_LEN)?;
     debug!("dirfd = {}, path_addr = {:?}", dirfd, path_addr);
 
-    let path_name = path_name.to_string_lossy();
     let (dir_path, name) = {
         let (parent_path_name, target_name) = path_name
+            .to_bytes()
             .split_dirname_and_basename()
             .map_err(SplitPathError::reject_root_as_busy)?;
-        let fs_path = FsPath::from_fd_at(dirfd, parent_path_name, EmptyPathStr::Reject)?;
+        let fs_path = FsPath::from_fd_at_bytes(dirfd, parent_path_name, EmptyPathStr::Reject)?;
         (
             ctx.thread_local
                 .borrow_fs()
                 .resolver()
                 .read()
                 .lookup(&fs_path)?,
-            target_name,
+            target_name.to_vec(),
         )
     };
 
-    dir_path.rmdir(name)?;
+    dir_path.rmdir_bytes(&name)?;
     Ok(SyscallReturn::Return(0))
 }

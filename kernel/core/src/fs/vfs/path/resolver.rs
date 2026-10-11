@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::str;
-
 use ostd::task::Task;
 
-use super::{Mount, MountTopology, Path};
+use super::{
+    Mount, MountTopology, Path, is_dot_bytes, is_dotdot_bytes,
+};
 use crate::{
     fs::{
         file::{
@@ -26,6 +26,13 @@ pub(crate) const AT_FDCWD: RawFileDesc = -100;
 
 /// The `AT_EMPTY_PATH` flag bit, as defined by Linux.
 pub(crate) const AT_EMPTY_PATH: u32 = 0x1000;
+
+fn trim_slashes_start(mut path: &[u8]) -> &[u8] {
+    while path.starts_with(b"/") {
+        path = &path[1..];
+    }
+    path
+}
 
 bitflags! {
     /// Resolution constraints accepted by `openat2(2)`.
@@ -228,11 +235,11 @@ impl PathResolver {
     pub(crate) fn make_abs_path(&self, path: &Path) -> AbsPathResult {
         // Handle the root path.
         if path == &self.root {
-            return AbsPathResult::Reachable("/".to_string());
+            return AbsPathResult::Reachable(b"/".to_vec());
         }
         // Handle pseudo paths.
         if path.is_pseudo() {
-            return AbsPathResult::Unreachable(path.name());
+            return AbsPathResult::Unreachable(path.name_bytes());
         }
 
         // TODO: The paths reported via `/proc/<pid>/fd/<fd>` are currently
@@ -247,7 +254,7 @@ impl PathResolver {
         // the pseudo-path special-case above); the anonymous side is wired up
         // together with the `O_TMPFILE` open path in PR #3185.
 
-        let mut components = VecDeque::new();
+        let mut components: VecDeque<Vec<u8>> = VecDeque::new();
         components.push_front(self.resolve_name(path));
 
         let mut parent_path = self.resolve_parent(path);
@@ -262,7 +269,7 @@ impl PathResolver {
 
             let parent_name = self.resolve_name(&parent_dir);
             // Stop if we reach an absolute root.
-            if parent_name == "/" {
+            if parent_name == b"/" {
                 break;
             }
 
@@ -271,8 +278,15 @@ impl PathResolver {
             parent_path = self.resolve_parent(&parent_dir);
         }
 
-        let path_name = alloc::format!("/{}", components.make_contiguous().join("/"));
-        debug_assert!(path_name.starts_with('/'));
+        let mut path_name = Vec::new();
+        path_name.push(b'/');
+        for (index, component) in components.iter().enumerate() {
+            if index != 0 {
+                path_name.push(b'/');
+            }
+            path_name.extend_from_slice(component);
+        }
+        debug_assert!(path_name.starts_with(b"/"));
 
         if reach_resolver_root {
             AbsPathResult::Reachable(path_name)
@@ -291,17 +305,17 @@ impl PathResolver {
     ///    - If the mount has a parent mount, then the name is that of the corresponding
     ///      mountpoint in the parent mount.
     ///    - If the mount has no parent, then the name is `"/"`.
-    fn resolve_name(&self, path: &Path) -> String {
+    fn resolve_name(&self, path: &Path) -> Vec<u8> {
         let mut owned;
         let mut current = path;
 
         loop {
             if current == &self.root {
-                return "/".to_string();
+                return b"/".to_vec();
             }
 
             if !current.is_mount_root() {
-                return current.name();
+                return current.name_bytes();
             }
 
             let Some(parent) = current
@@ -309,10 +323,10 @@ impl PathResolver {
                 .parent()
                 .and_then(|parent| parent.upgrade())
             else {
-                return current.name();
+                return current.name_bytes();
             };
             let Some(mountpoint) = current.mount_node().mountpoint() else {
-                return current.name();
+                return current.name_bytes();
             };
 
             owned = Path::new(parent, mountpoint);
@@ -569,17 +583,22 @@ impl PathResolver {
 /// Otherwise, it is `Unreachable`.
 #[derive(Clone, Debug)]
 pub(crate) enum AbsPathResult {
-    Reachable(String),
-    Unreachable(String),
+    Reachable(Vec<u8>),
+    Unreachable(Vec<u8>),
 }
 
 impl AbsPathResult {
-    /// Converts the `AbsPathResult` into a `String`.
-    pub(crate) fn into_string(self) -> String {
+    /// Returns the raw Linux pathname bytes represented by the result.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
         match self {
             AbsPathResult::Reachable(s) => s,
             AbsPathResult::Unreachable(s) => s,
         }
+    }
+
+    /// Converts a path to display text for kernel diagnostics and procfs text files.
+    pub(crate) fn into_string(self) -> String {
+        String::from_utf8_lossy(&self.into_bytes()).into_owned()
     }
 }
 
@@ -629,7 +648,7 @@ impl PathResolver {
 // Path lookup implementations
 impl PathResolver {
     /// Looks up a child entry with `name` within a directory `path`.
-    pub(crate) fn lookup_at_path(&self, path: &Path, name: &str) -> Result<Path> {
+    pub(crate) fn lookup_at_path(&self, path: &Path, name: &[u8]) -> Result<Path> {
         let dir_dentry = path.dentry.as_dir_dentry_or_err()?;
 
         if path.inode().check_permission(Permission::MAY_EXEC).is_err() {
@@ -639,12 +658,12 @@ impl PathResolver {
             return_errno_with_message!(Errno::ENAMETOOLONG, "the path name is too long");
         }
 
-        let target_path = if super::is_dot(name) {
+        let target_path = if is_dot_bytes(name) {
             return Ok(path.this());
-        } else if super::is_dotdot(name) {
+        } else if is_dotdot_bytes(name) {
             self.resolve_parent(path).unwrap_or_else(|| path.this())
         } else {
-            let target_dentry = dir_dentry.lookup_child(name)?;
+            let target_dentry = dir_dentry.lookup_child_bytes(name)?;
             Path::new(path.mount.clone(), target_dentry)
         };
 
@@ -693,20 +712,20 @@ impl PathResolver {
     pub(crate) fn lookup_unresolved_openat2(
         &self,
         dirfd: RawFileDesc,
-        path: &str,
+        path: &[u8],
         follow_tail_link: bool,
         resolve: OpenResolveFlags,
     ) -> Result<LookupResult> {
-        let fs_path = FsPath::from_fd_at(dirfd, path, EmptyPathStr::Reject)?;
+        let fs_path = FsPath::from_fd_at_bytes(dirfd, path, EmptyPathStr::Reject)?;
         let (base, relative_path) = match fs_path.inner {
             FsPathInner::Absolute(_) if resolve.contains(OpenResolveFlags::BENEATH) => {
                 return_errno_with_message!(Errno::EXDEV, "absolute path escapes the dirfd");
             }
             FsPathInner::Absolute(path) if resolve.contains(OpenResolveFlags::IN_ROOT) => {
                 let dirfd_path = FsPath::from_fd(dirfd)?;
-                (self.lookup(&dirfd_path)?, path.trim_start_matches('/'))
+                (self.lookup(&dirfd_path)?, trim_slashes_start(path))
             }
-            FsPathInner::Absolute(path) => (self.root.clone(), path.trim_start_matches('/')),
+            FsPathInner::Absolute(path) => (self.root.clone(), trim_slashes_start(path)),
             FsPathInner::CwdRelative(path) | FsPathInner::FdRelative(_, path) => {
                 let dirfd_path = FsPath::from_fd(dirfd)?;
                 (self.lookup(&dirfd_path)?, path)
@@ -735,7 +754,7 @@ impl PathResolver {
     fn lookup_inner(&self, fs_path: &FsPath, follow_tail_link: bool) -> Result<LookupResult> {
         let lookup_res = match fs_path.inner {
             FsPathInner::Absolute(path) => {
-                self.lookup_from_parent(&self.root, path.trim_start_matches('/'), follow_tail_link)?
+                self.lookup_from_parent(&self.root, trim_slashes_start(path), follow_tail_link)?
             }
             FsPathInner::CwdRelative(path) => {
                 self.lookup_from_parent(&self.cwd, path, follow_tail_link)?
@@ -776,7 +795,7 @@ impl PathResolver {
     fn lookup_from_parent(
         &self,
         parent: &Path,
-        relative_path: &str,
+        relative_path: &[u8],
         follow_tail_link: bool,
     ) -> Result<LookupResult> {
         self.lookup_from_parent_with_constraints(
@@ -791,12 +810,12 @@ impl PathResolver {
     fn lookup_from_parent_with_constraints(
         &self,
         parent: &Path,
-        relative_path: &str,
+        relative_path: &[u8],
         follow_tail_link: bool,
         boundary: Option<&Path>,
         resolve: OpenResolveFlags,
     ) -> Result<LookupResult> {
-        debug_assert!(!relative_path.starts_with('/'));
+        debug_assert!(!relative_path.starts_with(b"/"));
 
         if relative_path.len() > PATH_MAX {
             return_errno_with_message!(Errno::ENAMETOOLONG, "the path is too long");
@@ -806,7 +825,7 @@ impl PathResolver {
         }
 
         // To handle symlinks
-        let mut link_path_opt = None;
+        let mut link_path_opt: Option<Vec<u8>> = None;
         let mut follows = 0;
 
         // Initialize the first path and the relative path
@@ -814,16 +833,17 @@ impl PathResolver {
 
         while !relative_path.is_empty() {
             let (next_name, path_remain, target_is_dir) =
-                if let Some((prefix, suffix)) = relative_path.split_once('/') {
-                    let suffix = suffix.trim_start_matches('/');
+                if let Some(index) = relative_path.iter().position(|byte| *byte == b'/') {
+                    let prefix = &relative_path[..index];
+                    let suffix = trim_slashes_start(&relative_path[index + 1..]);
                     (prefix, suffix, true)
                 } else {
-                    (relative_path, "", false)
+                    (relative_path, b"".as_slice(), false)
                 };
 
             // Iterate next path
             let next_is_tail = path_remain.is_empty();
-            if super::is_dotdot(next_name)
+            if is_dotdot_bytes(next_name)
                 && let Some(boundary) = boundary
                 && current_path == *boundary
             {
@@ -841,7 +861,7 @@ impl PathResolver {
                     if next_is_tail && e.error() == Errno::ENOENT {
                         return Ok(LookupResult::AtParent(LookupParentResult::new(
                             current_path,
-                            next_name.to_string(),
+                            next_name.to_vec(),
                             target_is_dir,
                         )));
                     }
@@ -880,16 +900,16 @@ impl PathResolver {
                                 );
                             }
                             if !next_is_tail {
-                                tmp_link_path += "/";
-                                tmp_link_path += path_remain;
+                                tmp_link_path.push(b'/');
+                                tmp_link_path.extend_from_slice(path_remain);
                             } else if target_is_dir {
-                                tmp_link_path += "/";
+                                tmp_link_path.push(b'/');
                             }
                             tmp_link_path
                         };
 
                         // Change the path and relative path according to symlink
-                        if link_path_remain.starts_with('/') {
+                        if link_path_remain.starts_with(b"/") {
                             if resolve.contains(OpenResolveFlags::BENEATH) {
                                 return_errno_with_message!(
                                     Errno::EXDEV,
@@ -901,9 +921,9 @@ impl PathResolver {
                                 .cloned()
                                 .unwrap_or_else(|| self.root.clone());
                         }
-                        let link_path = link_path_opt.get_or_insert_with(|| String::new());
+                        let link_path = link_path_opt.get_or_insert_with(Vec::new);
                         link_path.clear();
-                        link_path.push_str(link_path_remain.trim_start_matches('/'));
+                        link_path.extend_from_slice(trim_slashes_start(&link_path_remain));
                         relative_path = link_path;
                         follows += 1;
                     }
@@ -982,7 +1002,7 @@ impl LookupResult {
     ///
     /// If the path was resolved or the unresolved name was expected to be a directory, an error
     /// will be returned.
-    pub(crate) fn into_parent_and_filename(self) -> Result<(Path, String)> {
+    pub(crate) fn into_parent_and_filename(self) -> Result<(Path, Vec<u8>)> {
         let LookupResult::AtParent(res) = self else {
             return_errno_with_message!(Errno::EEXIST, "the path already exists");
         };
@@ -992,7 +1012,7 @@ impl LookupResult {
     /// Consumes the `LookupResult` and returns the parent path and the unresolved name.
     ///
     /// If the path was resolved, an error will be returned.
-    pub(crate) fn into_parent_and_basename(self) -> Result<(Path, String)> {
+    pub(crate) fn into_parent_and_basename(self) -> Result<(Path, Vec<u8>)> {
         let LookupResult::AtParent(res) = self else {
             return_errno_with_message!(Errno::EEXIST, "the path already exists");
         };
@@ -1006,13 +1026,13 @@ pub(crate) struct LookupParentResult {
     /// The path of the parent directory where resolution stopped.
     parent: Path,
     /// The remaining unresolved component name.
-    unresolved_name: String,
+    unresolved_name: Vec<u8>,
     /// Indicates whether the target was expected to be a directory.
     target_is_dir: bool,
 }
 
 impl LookupParentResult {
-    fn new(parent: Path, unresolved_name: String, target_is_dir: bool) -> Self {
+    fn new(parent: Path, unresolved_name: Vec<u8>, target_is_dir: bool) -> Self {
         Self {
             parent,
             unresolved_name,
@@ -1028,7 +1048,7 @@ impl LookupParentResult {
     /// Consumes the `LookupParentResult` and returns the parent path and the unresolved file name.
     ///
     /// If the unresolved name was expected to be a directory, an error will be returned.
-    pub(crate) fn into_parent_and_filename(self) -> Result<(Path, String)> {
+    pub(crate) fn into_parent_and_filename(self) -> Result<(Path, Vec<u8>)> {
         if self.target_is_dir {
             return_errno_with_message!(Errno::ENOENT, "the path is a directory");
         }
@@ -1036,7 +1056,7 @@ impl LookupParentResult {
     }
 
     /// Consumes the `LookupParentResult` and returns the parent path and the unresolved name.
-    pub(crate) fn into_parent_and_basename(self) -> (Path, String) {
+    pub(crate) fn into_parent_and_basename(self) -> (Path, Vec<u8>) {
         (self.parent, self.unresolved_name)
     }
 }
@@ -1050,13 +1070,13 @@ pub(crate) struct FsPath<'a> {
 #[derive(Debug)]
 enum FsPathInner<'a> {
     /// An absolute path.
-    Absolute(&'a str),
+    Absolute(&'a [u8]),
     /// A relative path from the current working directory.
-    CwdRelative(&'a str),
+    CwdRelative(&'a [u8]),
     /// The path of the current working directory.
     Cwd,
     /// A relative path from the directory FD (dirfd).
-    FdRelative(FileDesc, &'a str),
+    FdRelative(FileDesc, &'a [u8]),
     /// The path of the FD.
     Fd(FileDesc),
 }
@@ -1096,6 +1116,15 @@ impl<'a> FsPath<'a> {
         path: &'a str,
         policy: EmptyPathStr,
     ) -> Result<Self> {
+        Self::from_fd_at_bytes(dirfd, path.as_bytes(), policy)
+    }
+
+    /// Constructs an `FsPath` from raw Linux pathname bytes and the `dirfd` pair.
+    pub(crate) fn from_fd_at_bytes(
+        dirfd: RawFileDesc,
+        path: &'a [u8],
+        policy: EmptyPathStr,
+    ) -> Result<Self> {
         if path.is_empty() {
             let allowed = match policy {
                 EmptyPathStr::Reject => false,
@@ -1112,7 +1141,7 @@ impl<'a> FsPath<'a> {
             return_errno_with_message!(Errno::ENAMETOOLONG, "the path is too long");
         }
 
-        let fs_path_inner = if path.starts_with('/') {
+        let fs_path_inner = if path.starts_with(b"/") {
             FsPathInner::Absolute(path)
         } else if dirfd == AT_FDCWD {
             FsPathInner::CwdRelative(path)
@@ -1131,6 +1160,14 @@ impl<'a> TryFrom<&'a str> for FsPath<'a> {
 
     fn try_from(path: &'a str) -> Result<FsPath<'a>> {
         FsPath::from_fd_at(AT_FDCWD, path, EmptyPathStr::Reject)
+    }
+}
+
+impl<'a> TryFrom<&'a [u8]> for FsPath<'a> {
+    type Error = Error;
+
+    fn try_from(path: &'a [u8]) -> Result<FsPath<'a>> {
+        FsPath::from_fd_at_bytes(AT_FDCWD, path, EmptyPathStr::Reject)
     }
 }
 
@@ -1168,6 +1205,32 @@ impl SplitPath for str {
             ))
         } else {
             Ok((".", trimmed))
+        }
+    }
+}
+
+impl SplitPath for [u8] {
+    fn split_dirname_and_basename(&self) -> core::result::Result<(&Self, &Self), SplitPathError> {
+        if self.is_empty() {
+            return Err(SplitPathError::Empty);
+        }
+
+        let end = self
+            .iter()
+            .rposition(|byte| *byte != b'/')
+            .map(|index| index + 1)
+            .ok_or(SplitPathError::Root)?;
+        let trimmed = &self[..end];
+
+        if let Some(pos) = trimmed.iter().rposition(|byte| *byte == b'/') {
+            let dirname_end = trimmed[..pos]
+                .iter()
+                .rposition(|byte| *byte != b'/')
+                .map(|index| index + 1);
+            let dirname = dirname_end.map(|end| &trimmed[..end]).unwrap_or(b"/");
+            Ok((dirname, &trimmed[pos + 1..]))
+        } else {
+            Ok((b".", trimmed))
         }
     }
 }

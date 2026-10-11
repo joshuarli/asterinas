@@ -76,9 +76,13 @@ fn lookup_and_open_executable_file(
         .user_space()
         .read_cstring(filename_ptr, MAX_FILENAME_LEN)?;
 
-    let filename = filename.to_string_lossy();
+    let filename_text = filename.to_string_lossy();
     let path = {
-        let fs_path = FsPath::from_fd_at(dfd, &filename, EmptyPathStr::AllowIfFlag(flags.bits()))?;
+        let fs_path = FsPath::from_fd_at_bytes(
+            dfd,
+            filename.to_bytes(),
+            EmptyPathStr::AllowIfFlag(flags.bits()),
+        )?;
 
         let fs_ref = ctx.thread_local.borrow_fs();
         let path_resolver = fs_ref.resolver().read();
@@ -95,14 +99,14 @@ fn lookup_and_open_executable_file(
     let thread_name = if filename.is_empty() {
         derive_thread_name(&path.name())
     } else {
-        derive_thread_name(&filename)
+        derive_thread_name(&filename_text)
     };
 
     // Preserve the path that a shebang interpreter must use to reopen the script.
     // For `execveat` relative to a file descriptor, use a `/dev/fd/...` path unless the
     // descriptor is close-on-exec, in which case mark the path as unavailable.
-    let shebang_script_path = if dfd == AT_FDCWD || filename.starts_with('/') {
-        ShebangScriptPath::Accessible(CString::new(filename.into_owned()).unwrap())
+    let shebang_script_path = if dfd == AT_FDCWD || filename.to_bytes().starts_with(b"/") {
+        ShebangScriptPath::Accessible(CString::new(filename.to_bytes()).unwrap())
     } else {
         // Races with later access by the interpreter are always possible. The check is
         // racy, but only for diagnostic purposes. This matches Linux.
@@ -120,9 +124,11 @@ fn lookup_and_open_executable_file(
             ShebangScriptPath::Inaccessible
         } else {
             let path = if filename.is_empty() {
-                format!("/dev/fd/{dfd}")
+                format!("/dev/fd/{dfd}").into_bytes()
             } else {
-                format!("/dev/fd/{dfd}/{filename}")
+                let mut path = format!("/dev/fd/{dfd}/").into_bytes();
+                path.extend_from_slice(filename.to_bytes());
+                path
             };
             ShebangScriptPath::Accessible(CString::new(path).unwrap())
         }

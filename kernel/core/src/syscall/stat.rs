@@ -71,9 +71,11 @@ pub(super) fn sys_fstatat(
     );
 
     let path = {
-        let filename = filename.to_string_lossy();
-        let fs_path =
-            FsPath::from_fd_at(dirfd, &filename, EmptyPathStr::AllowIfFlag(flags.bits()))?;
+        let fs_path = FsPath::from_fd_at_bytes(
+            dirfd,
+            filename.to_bytes(),
+            EmptyPathStr::AllowIfFlag(flags.bits()),
+        )?;
 
         let fs_ref = ctx.thread_local.borrow_fs();
         let path_resolver = fs_ref.resolver().read();
