@@ -135,6 +135,8 @@ TEST_TMPDIR=/ext2 TEST_DIRECT=1 ./empty_write/empty_write
 ./mount/mount_move
 ./mount/mount_propagation
 
+./openat2/openat2
+
 ./overlayfs/lchown_lower_symlink
 ./overlayfs/link_lower_file
 ./overlayfs/mknod_whiteout_rejected

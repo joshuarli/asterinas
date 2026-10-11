@@ -84,7 +84,7 @@ use super::{
     msync::sys_msync,
     munmap::sys_munmap,
     nanosleep::{sys_clock_nanosleep, sys_nanosleep},
-    open::{sys_creat, sys_open, sys_openat},
+    open::{sys_creat, sys_open, sys_openat, sys_openat2},
     pause::sys_pause,
     personality::sys_personality,
     pidfd_getfd::sys_pidfd_getfd,
@@ -371,6 +371,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_INOTIFY_ADD_WATCH = 254 => sys_inotify_add_watch(args[..3]);
     SYS_INOTIFY_RM_WATCH = 255 => sys_inotify_rm_watch(args[..2]);
     SYS_OPENAT = 257           => sys_openat(args[..4]);
+    SYS_OPENAT2 = 437          => sys_openat2(args[..4]);
     SYS_MKDIRAT = 258          => sys_mkdirat(args[..3]);
     SYS_MKNODAT = 259          => sys_mknodat(args[..4]);
     SYS_FCHOWNAT = 260         => sys_fchownat(args[..5]);

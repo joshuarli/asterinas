@@ -3,6 +3,7 @@
 //! Form file paths within and across FSes with dentries and mount points.
 
 use core::time::Duration;
+use ostd::sync::RwMutexReadGuard;
 
 pub(crate) use dentry::Dentry;
 use inherit_methods_macro::inherit_methods;
@@ -14,8 +15,8 @@ pub(crate) use mount_propagation::MountPropType;
 pub(in crate::fs) use mount_propagation::MountTopology;
 use mount_propagation::PendingPropagationChanges;
 pub(crate) use resolver::{
-    AT_FDCWD, AbsPathResult, EmptyPathStr, FsPath, LookupResult, PathResolver, SplitPath,
-    SplitPathError,
+    AT_FDCWD, AbsPathResult, EmptyPathStr, FsPath, LookupResult, OpenResolveFlags, PathResolver,
+    SplitPath, SplitPathError,
 };
 
 use crate::{
@@ -44,6 +45,23 @@ mod mount;
 mod mount_namespace;
 mod mount_propagation;
 mod resolver;
+
+// Serialize confined path walks against dentry and mount topology changes.
+pub(super) static PATH_RENAME_LOCK: RwMutex<()> = RwMutex::new(());
+
+pub(crate) struct PathLookupReadGuard {
+    _rename: RwMutexReadGuard<'static, ()>,
+    _mount_topology: RwMutexReadGuard<'static, MountTopology>,
+}
+
+pub(crate) fn path_lookup_read_lock() -> PathLookupReadGuard {
+    let rename = PATH_RENAME_LOCK.read();
+    let mount_topology = MountTopology::read_lock();
+    PathLookupReadGuard {
+        _rename: rename,
+        _mount_topology: mount_topology,
+    }
+}
 
 /// A `Path` is used to represent an exact location in the VFS tree.
 ///

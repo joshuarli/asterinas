@@ -27,6 +27,18 @@ pub(crate) const AT_FDCWD: RawFileDesc = -100;
 /// The `AT_EMPTY_PATH` flag bit, as defined by Linux.
 pub(crate) const AT_EMPTY_PATH: u32 = 0x1000;
 
+bitflags! {
+    /// Resolution constraints accepted by `openat2(2)`.
+    pub(crate) struct OpenResolveFlags: u64 {
+        const NO_XDEV = 0x01;
+        const NO_MAGICLINKS = 0x02;
+        const NO_SYMLINKS = 0x04;
+        const BENEATH = 0x08;
+        const IN_ROOT = 0x10;
+        const CACHED = 0x20;
+    }
+}
+
 /// Policy for how [`FsPath::from_fd_at`] treats an empty `path_str`.
 ///
 /// [`FsPath::from_fd_at`] is the entry point that
@@ -677,6 +689,49 @@ impl PathResolver {
         self.lookup_inner(fs_path, false)
     }
 
+    /// Resolves an `openat2` path while enforcing its kernel-side lookup constraints.
+    pub(crate) fn lookup_unresolved_openat2(
+        &self,
+        dirfd: RawFileDesc,
+        path: &str,
+        follow_tail_link: bool,
+        resolve: OpenResolveFlags,
+    ) -> Result<LookupResult> {
+        let fs_path = FsPath::from_fd_at(dirfd, path, EmptyPathStr::Reject)?;
+        let (base, relative_path) = match fs_path.inner {
+            FsPathInner::Absolute(_) if resolve.contains(OpenResolveFlags::BENEATH) => {
+                return_errno_with_message!(Errno::EXDEV, "absolute path escapes the dirfd");
+            }
+            FsPathInner::Absolute(path) if resolve.contains(OpenResolveFlags::IN_ROOT) => {
+                let dirfd_path = FsPath::from_fd(dirfd)?;
+                (self.lookup(&dirfd_path)?, path.trim_start_matches('/'))
+            }
+            FsPathInner::Absolute(path) => (self.root.clone(), path.trim_start_matches('/')),
+            FsPathInner::CwdRelative(path) | FsPathInner::FdRelative(_, path) => {
+                let dirfd_path = FsPath::from_fd(dirfd)?;
+                (self.lookup(&dirfd_path)?, path)
+            }
+            FsPathInner::Cwd | FsPathInner::Fd(_) => {
+                return_errno_with_message!(Errno::ENOENT, "the path is empty");
+            }
+        };
+
+        if resolve.contains(OpenResolveFlags::CACHED) {
+            return_errno_with_message!(Errno::EAGAIN, "cached path lookup is unavailable");
+        }
+
+        let boundary = resolve
+            .intersects(OpenResolveFlags::BENEATH | OpenResolveFlags::IN_ROOT)
+            .then(|| base.clone());
+        self.lookup_from_parent_with_constraints(
+            &base,
+            relative_path,
+            follow_tail_link,
+            boundary.as_ref(),
+            resolve,
+        )
+    }
+
     fn lookup_inner(&self, fs_path: &FsPath, follow_tail_link: bool) -> Result<LookupResult> {
         let lookup_res = match fs_path.inner {
             FsPathInner::Absolute(path) => {
@@ -724,6 +779,23 @@ impl PathResolver {
         relative_path: &str,
         follow_tail_link: bool,
     ) -> Result<LookupResult> {
+        self.lookup_from_parent_with_constraints(
+            parent,
+            relative_path,
+            follow_tail_link,
+            None,
+            OpenResolveFlags::empty(),
+        )
+    }
+
+    fn lookup_from_parent_with_constraints(
+        &self,
+        parent: &Path,
+        relative_path: &str,
+        follow_tail_link: bool,
+        boundary: Option<&Path>,
+        resolve: OpenResolveFlags,
+    ) -> Result<LookupResult> {
         debug_assert!(!relative_path.starts_with('/'));
 
         if relative_path.len() > PATH_MAX {
@@ -751,6 +823,18 @@ impl PathResolver {
 
             // Iterate next path
             let next_is_tail = path_remain.is_empty();
+            if super::is_dotdot(next_name)
+                && let Some(boundary) = boundary
+                && current_path == *boundary
+            {
+                if resolve.contains(OpenResolveFlags::BENEATH) {
+                    return_errno_with_message!(Errno::EXDEV, "path escapes the dirfd");
+                }
+                current_path = boundary.clone();
+                relative_path = path_remain;
+                continue;
+            }
+
             let next_path = match self.lookup_at_path(&current_path, next_name) {
                 Ok(child) => child,
                 Err(e) => {
@@ -765,6 +849,12 @@ impl PathResolver {
                 }
             };
 
+            if resolve.contains(OpenResolveFlags::NO_XDEV)
+                && next_path.mount.id() != parent.mount.id()
+            {
+                return_errno_with_message!(Errno::EXDEV, "path crosses a mount point");
+            }
+
             let next_type = next_path.type_();
             // If next inode is a symlink, follow symlinks at most `SYMLINKS_MAX` times.
             if next_type == InodeType::SymLink
@@ -773,6 +863,9 @@ impl PathResolver {
                     // resolved even when `follow_tail_link` is false.
                     || target_is_dir)
             {
+                if resolve.contains(OpenResolveFlags::NO_SYMLINKS) {
+                    return_errno_with_message!(Errno::ELOOP, "path contains a symbolic link");
+                }
                 if follows >= SYMLINKS_MAX {
                     return_errno_with_message!(Errno::ELOOP, "there are too many symlinks");
                 }
@@ -797,7 +890,16 @@ impl PathResolver {
 
                         // Change the path and relative path according to symlink
                         if link_path_remain.starts_with('/') {
-                            current_path = self.root.clone();
+                            if resolve.contains(OpenResolveFlags::BENEATH) {
+                                return_errno_with_message!(
+                                    Errno::EXDEV,
+                                    "absolute symbolic link escapes the dirfd"
+                                );
+                            }
+                            current_path = boundary
+                                .filter(|_| resolve.contains(OpenResolveFlags::IN_ROOT))
+                                .cloned()
+                                .unwrap_or_else(|| self.root.clone());
                         }
                         let link_path = link_path_opt.get_or_insert_with(|| String::new());
                         link_path.clear();
@@ -806,6 +908,25 @@ impl PathResolver {
                         follows += 1;
                     }
                     SymbolicLink::Path(path) => {
+                        if resolve.contains(OpenResolveFlags::NO_XDEV)
+                            && path.mount.id() != parent.mount.id()
+                        {
+                            return_errno_with_message!(Errno::EXDEV, "path crosses a mount point");
+                        }
+                        if resolve.intersects(
+                            OpenResolveFlags::BENEATH | OpenResolveFlags::NO_MAGICLINKS,
+                        ) {
+                            return_errno_with_message!(
+                                Errno::ELOOP,
+                                "path contains a magic link"
+                            );
+                        }
+                        if boundary.is_some_and(|boundary| !self.is_beneath(&path, boundary)) {
+                            return_errno_with_message!(
+                                Errno::EXDEV,
+                                "magic link escapes the dirfd"
+                            );
+                        }
                         current_path = path;
                         relative_path = path_remain;
                         follows += 1;
@@ -822,6 +943,19 @@ impl PathResolver {
         }
 
         Ok(LookupResult::Resolved(current_path))
+    }
+
+    fn is_beneath(&self, path: &Path, boundary: &Path) -> bool {
+        let mut current = path.clone();
+        loop {
+            if current == *boundary {
+                return true;
+            }
+            let Some(parent) = self.resolve_parent(&current) else {
+                return false;
+            };
+            current = parent;
+        }
     }
 }
 

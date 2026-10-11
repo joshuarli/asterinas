@@ -769,6 +769,9 @@ impl DirDentry<'_> {
         new_name: &str,
         mode: RenameMode,
     ) -> Result<()> {
+        // Confined path walks hold the read side while validating ancestry.
+        let _rename_guard = super::PATH_RENAME_LOCK.write();
+
         if is_dot_or_dotdot(old_name) {
             return_errno_with_message!(Errno::EBUSY, "old_name is . or ..");
         }

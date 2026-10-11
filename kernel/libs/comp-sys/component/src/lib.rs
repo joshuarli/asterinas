@@ -175,29 +175,16 @@ fn match_and_call(
             continue;
         }
 
-        // relative/path/to/comps/pci/src/lib.rs
-        let mut str: String = registry.path.to_owned();
-        str = str.replace('\\', "/");
-        // relative/path/to/comps/pci
-        // There are two cases, one in the test folder and one in the src folder.
-        // There may be multiple directories within the folder.
-        // There we assume it will not have such directories: 'comp1/src/comp2/src/lib.rs' so that we can split by tests or src string
-        if str.contains("src/") {
-            str = str
-                .trim_end_matches(str.get(str.find("src/").unwrap()..str.len()).unwrap())
-                .to_string();
-        } else if str.contains("tests/") {
-            str = str
-                .trim_end_matches(str.get(str.find("tests/").unwrap()..str.len()).unwrap())
-                .to_string();
-        } else {
-            panic!("The path of {} cannot recognized by component system", str);
-        }
-        let str = str.trim_end_matches('/').to_owned();
+        let component_path = registry_component_path(registry.path).unwrap_or_else(|| {
+            panic!(
+                "The path of {} cannot recognized by component system",
+                registry.path
+            )
+        });
 
         let mut info = components
-            .remove(&str)
-            .ok_or(ComponentSystemInitError::NotIncludeAllComponent(str))?;
+            .remove(&component_path)
+            .ok_or(ComponentSystemInitError::NotIncludeAllComponent(component_path))?;
         info.function.replace(registry.function);
         infos.push(info);
     }
@@ -222,4 +209,27 @@ fn match_and_call(
     }
     info!("All components initialization in {stage:?} stage completed");
     Ok(())
+}
+
+fn registry_component_path(path: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    let marker = path
+        .rfind("src/")
+        .or_else(|| path.rfind("tests/"))?;
+    Some(path[..marker].trim_end_matches('/').to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::registry_component_path;
+
+    #[test]
+    fn registry_path_uses_component_source_directory() {
+        assert_eq!(
+            registry_component_path("/src/asterinas/kernel/core/comps/uart/src/lib.rs"),
+            Some(alloc::string::String::from(
+                "/src/asterinas/kernel/core/comps/uart"
+            ))
+        );
+    }
 }

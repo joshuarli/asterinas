@@ -84,7 +84,7 @@ macro_rules! import_generic_syscall_entries {
             msync::sys_msync,
             munmap::sys_munmap,
             nanosleep::{sys_clock_nanosleep, sys_nanosleep},
-            open::sys_openat,
+            open::{sys_openat, sys_openat2},
             personality::sys_personality,
             pidfd_getfd::sys_pidfd_getfd,
             pidfd_open::sys_pidfd_open,
@@ -411,6 +411,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_PIDFD_OPEN = 434             => sys_pidfd_open(args[..2]);
             SYS_CLONE3 = 435                 => sys_clone3(args[..2], &user_ctx);
             SYS_CLOSE_RANGE = 436            => sys_close_range(args[..3]);
+            SYS_OPENAT2 = 437                => sys_openat2(args[..4]);
             SYS_PIDFD_GETFD = 438            => sys_pidfd_getfd(args[..3]);
             SYS_FACCESSAT2 = 439             => sys_faccessat2(args[..4]);
             SYS_EPOLL_PWAIT2 = 441           => sys_epoll_pwait2(args[..6]);
