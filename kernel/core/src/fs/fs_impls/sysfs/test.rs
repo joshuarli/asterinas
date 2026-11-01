@@ -504,7 +504,7 @@ fn read_link() {
     let target = link1_inode.read_link().expect("read_link failed");
     assert!(matches!(
         target,
-        SymbolicLink::Plain(s) if s == "../branch1/leaf1"
+        SymbolicLink::Plain(s) if s == b"../branch1/leaf1"
     ));
 
     // read_link on non-symlink should fail (expect EINVAL as per inode.rs)
