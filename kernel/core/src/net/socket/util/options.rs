@@ -16,8 +16,8 @@ use crate::{
         netlink::NETLINK_DEFAULT_BUF_SIZE,
         options::{
             AcceptConn, Broadcast, KeepAlive, Linger, PassCred, PeerCred, PeerGroups, Priority,
-            RecvBuf, RecvBufForce, RecvTimeout, ReuseAddr, ReusePort, SendBuf, SendBufForce,
-            SendTimeout, SocketOption, SocketType,
+            RecvBuf, RecvBufForce, RecvTimeout, RecvTimestamp, RecvTimestampNs, ReuseAddr,
+            ReusePort, SendBuf, SendBufForce, SendTimeout, SocketOption, SocketType, Timestamping,
             macros::{sock_option_mut, sock_option_ref},
         },
         unix::{CUserCred, UNIX_DATAGRAM_DEFAULT_BUF_SIZE, UNIX_STREAM_DEFAULT_BUF_SIZE},
@@ -41,6 +41,9 @@ pub(crate) struct SocketOptionSet {
     linger: LingerOption,
     reuse_port: bool,
     pass_cred: bool,
+    recv_timestamp: bool,
+    recv_timestamp_ns: bool,
+    timestamping: u32,
 }
 
 impl Default for SocketOptionSet {
@@ -55,6 +58,9 @@ impl Default for SocketOptionSet {
             linger: LingerOption::default(),
             reuse_port: false,
             pass_cred: false,
+            recv_timestamp: false,
+            recv_timestamp_ns: false,
+            timestamping: 0,
         }
     }
 }
@@ -162,6 +168,15 @@ impl SocketOptionSet {
                 let pass_cred = self.pass_cred();
                 socket_pass_cred.set(pass_cred);
             }
+            socket_recv_timestamp @ RecvTimestamp => {
+                socket_recv_timestamp.set(self.recv_timestamp() && !self.recv_timestamp_ns());
+            }
+            socket_recv_timestamp_ns @ RecvTimestampNs => {
+                socket_recv_timestamp_ns.set(self.recv_timestamp_ns());
+            }
+            socket_timestamping @ Timestamping => {
+                socket_timestamping.set(self.timestamping());
+            }
             socket_peer_cred @ PeerCred => {
                 let peer_cred = CUserCred::new_invalid();
                 socket_peer_cred.set(peer_cred);
@@ -255,6 +270,31 @@ impl SocketOptionSet {
                 let pass_cred = socket_pass_cred.get().unwrap();
                 self.set_pass_cred(*pass_cred);
                 socket.set_pass_cred(*pass_cred);
+            }
+            socket_recv_timestamp @ RecvTimestamp => {
+                let enabled = *socket_recv_timestamp.get().unwrap();
+                self.set_recv_timestamp(enabled);
+                self.set_recv_timestamp_ns(false);
+            }
+            socket_recv_timestamp_ns @ RecvTimestampNs => {
+                let enabled = *socket_recv_timestamp_ns.get().unwrap();
+                self.set_recv_timestamp(enabled);
+                self.set_recv_timestamp_ns(enabled);
+            }
+            socket_timestamping @ Timestamping => {
+                let flags = *socket_timestamping.get().unwrap();
+                if flags & !timestamping::SUPPORTED_FLAGS != 0
+                    || (flags & timestamping::TX_SOFTWARE != 0
+                        && flags & timestamping::OPT_TSONLY == 0)
+                    || (flags & timestamping::OPT_TSONLY != 0
+                        && flags & timestamping::TX_SOFTWARE == 0)
+                {
+                    return_errno_with_message!(
+                        Errno::EINVAL,
+                        "the timestamping flags are not supported"
+                    );
+                }
+                self.set_timestamping(flags);
             }
             socket_sendbuf_force @ SendBufForce => {
                 check_current_privileged()?;
@@ -435,4 +475,20 @@ pub(in crate::net) trait SetSocketLevelOption {
             timeouts.set_send_timeout(send_timeout);
         }
     }
+}
+
+/// Flags of `SO_TIMESTAMPING`.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v6.18/source/include/uapi/linux/net_tstamp.h>.
+/// Hardware timestamps are not supported, and transmit timestamps are reported without the packet
+/// (`OPT_TSONLY`).
+pub(crate) mod timestamping {
+    pub(crate) const TX_SOFTWARE: u32 = 1 << 1;
+    pub(crate) const RX_SOFTWARE: u32 = 1 << 3;
+    pub(crate) const SOFTWARE: u32 = 1 << 4;
+    pub(crate) const OPT_ID: u32 = 1 << 7;
+    pub(crate) const OPT_CMSG: u32 = 1 << 10;
+    pub(crate) const OPT_TSONLY: u32 = 1 << 11;
+    pub(crate) const SUPPORTED_FLAGS: u32 =
+        TX_SOFTWARE | RX_SOFTWARE | SOFTWARE | OPT_ID | OPT_CMSG | OPT_TSONLY;
 }

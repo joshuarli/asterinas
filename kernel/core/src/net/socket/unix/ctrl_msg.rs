@@ -224,8 +224,10 @@ impl AuxiliaryData {
         let mut cred = None;
 
         for ctrl_msg in ctrl_msgs.into_iter() {
-            let ControlMessage::Unix(unix_ctrl_msg) = ctrl_msg;
-            // TODO: What should we do if there are control messages of other protocols?
+            let ControlMessage::Unix(unix_ctrl_msg) = ctrl_msg else {
+                // TODO: What should we do if there are control messages of other protocols?
+                continue;
+            };
 
             match unix_ctrl_msg.0 {
                 Message::Files(FileMessage {

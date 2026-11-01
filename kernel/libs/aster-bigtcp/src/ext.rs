@@ -19,4 +19,9 @@ pub trait Ext {
 
     /// The type for UDP sockets to observe events.
     type UdpEventObserver: SocketEventObserver;
+
+    /// Returns the current wall-clock time in nanoseconds since the Unix epoch.
+    ///
+    /// UDP sockets stamp each received and transmitted packet with it.
+    fn wall_time_ns() -> u64;
 }

@@ -28,6 +28,9 @@ impl_socket_options!(
     pub(crate) struct SendTimeout(SocketTimeout);
     pub(crate) struct ReusePort(bool);
     pub(crate) struct PassCred(bool);
+    pub(crate) struct RecvTimestamp(bool);
+    pub(crate) struct RecvTimestampNs(bool);
+    pub(crate) struct Timestamping(u32);
     pub(crate) struct PeerCred(CUserCred);
     pub(crate) struct AcceptConn(bool);
     pub(crate) struct SendBufForce(u32);

@@ -267,6 +267,7 @@ smoltcp = { version = "=0.11.0", registry = "mycrates", default-features = false
     "proto-ipv6",
     "socket-udp",
     "socket-tcp",
+    "packetmeta-id",
 ] }
 takeable = "0.2.2"
 time = { version = "0.3", default-features = false, features = ["alloc"] }

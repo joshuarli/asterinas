@@ -19,5 +19,7 @@ bitflags::bitflags! {
         const CLOSED_RECV = 4;
         /// Sending data isn't possible anymore.
         const CLOSED_SEND = 8;
+        /// A transmit timestamp is waiting in the socket's error queue.
+        const HAS_ERROR = 16;
     }
 }

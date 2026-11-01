@@ -10,4 +10,8 @@ impl aster_bigtcp::ext::Ext for BigtcpExt {
 
     type TcpEventObserver = StreamObserver;
     type UdpEventObserver = DatagramObserver;
+
+    fn wall_time_ns() -> u64 {
+        aster_time::read_wall_time().as_nanos() as u64
+    }
 }

@@ -7,8 +7,8 @@ use crate::{
     context::current_userspace,
     net::socket::options::{
         AcceptConn, Broadcast, Error, KeepAlive, Linger, PassCred, PeerCred, PeerGroups, Priority,
-        RecvBuf, RecvBufForce, RecvTimeout, ReuseAddr, ReusePort, SendBuf, SendBufForce,
-        SendTimeout, SocketOption, SocketType,
+        RecvBuf, RecvBufForce, RecvTimeout, RecvTimestamp, RecvTimestampNs, ReuseAddr, ReusePort,
+        SendBuf, SendBufForce, SendTimeout, SocketOption, SocketType, Timestamping,
     },
     prelude::*,
     process::Gid,
@@ -43,10 +43,13 @@ enum CSocketOptionName {
     SNDTIMEO_OLD = 21,
     ATTACH_FILTER = 26,
     DETACH_FILTER = 27,
+    TIMESTAMP_OLD = 29,
     ACCPETCONN = 30,
     PEERSEC = 31,
     SNDBUFFORCE = 32,
     RCVBUFFORCE = 33,
+    TIMESTAMPNS_OLD = 35,
+    TIMESTAMPING_OLD = 37,
     PEERGROUPS = 59,
     RCVTIMEO_NEW = 66,
     SNDTIMEO_NEW = 67,
@@ -75,6 +78,9 @@ pub(crate) fn new_socket_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
         }
         CSocketOptionName::REUSEPORT => Ok(Box::new(ReusePort::new())),
         CSocketOptionName::PASSCRED => Ok(Box::new(PassCred::new())),
+        CSocketOptionName::TIMESTAMP_OLD => Ok(Box::new(RecvTimestamp::new())),
+        CSocketOptionName::TIMESTAMPNS_OLD => Ok(Box::new(RecvTimestampNs::new())),
+        CSocketOptionName::TIMESTAMPING_OLD => Ok(Box::new(Timestamping::new())),
         CSocketOptionName::PEERCRED => Ok(Box::new(PeerCred::new())),
         CSocketOptionName::ACCPETCONN => Ok(Box::new(AcceptConn::new())),
         CSocketOptionName::SNDBUFFORCE => Ok(Box::new(SendBufForce::new())),
@@ -97,6 +103,9 @@ impl_raw_socket_option!(RecvTimeout);
 impl_raw_socket_option!(SendTimeout);
 impl_raw_socket_option!(ReusePort);
 impl_raw_socket_option!(PassCred);
+impl_raw_socket_option!(RecvTimestamp);
+impl_raw_socket_option!(RecvTimestampNs);
+impl_raw_socket_option!(Timestamping);
 impl_raw_sock_option_get_only!(PeerCred);
 impl_raw_sock_option_get_only!(AcceptConn);
 impl_raw_socket_option!(SendBufForce);

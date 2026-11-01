@@ -49,4 +49,4 @@ pub const TCP_SEND_BUF_LEN: usize = 65536 * 2;
 // UDP socket buffer sizes:
 pub const UDP_SEND_PAYLOAD_LEN: usize = 65536;
 pub const UDP_RECV_PAYLOAD_LEN: usize = 65536;
-const UDP_METADATA_LEN: usize = 256;
+pub(crate) const UDP_METADATA_LEN: usize = 256;

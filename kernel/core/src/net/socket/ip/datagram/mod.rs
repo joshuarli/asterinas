@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_bigtcp::wire::IpEndpoint;
-use bound::BoundDatagram;
+use core::{
+    sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
+};
+
+use aster_bigtcp::wire::{IpAddress, IpEndpoint};
+use bound::{BoundDatagram, ReceivedMeta};
 use unbound::{BindOptions, UnboundDatagram};
 
-use super::{addr::UNSPECIFIED_LOCAL_ENDPOINT, ioctl::ipv4_ioctl};
+use super::{addr::UNSPECIFIED_LOCAL_ENDPOINT, ctrl_msg::IpControlMessage, ioctl::ipv4_ioctl};
 use crate::{
     events::IoEvents,
     fs::file::FileCommon,
@@ -20,10 +25,11 @@ use crate::{
             options::{Error as SocketError, SocketOption, macros::sock_option_mut},
             private::SocketPrivate,
             util::{
-                MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
-                datagram_common::{Bound, Inner, select_remote_and_bind},
+                ControlMessage, MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
+                datagram_common::{Inner, select_remote_and_bind},
                 options::{
                     GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
+                    timestamping,
                 },
             },
         },
@@ -42,6 +48,7 @@ pub(crate) struct DatagramSocket {
     inner: RwMutex<Inner<UnboundDatagram, BoundDatagram>>,
     options: RwLock<OptionSet>,
     timeouts: SocketTimeouts,
+    tx_timestamp_key: AtomicU32,
 
     pollee: Pollee,
     common: FileCommon,
@@ -69,6 +76,7 @@ impl DatagramSocket {
             inner: RwMutex::new(Inner::Unbound(unbound_datagram)),
             options: RwLock::new(OptionSet::new()),
             timeouts: SocketTimeouts::new(),
+            tx_timestamp_key: AtomicU32::new(0),
             pollee: Pollee::new(),
             common: new_socket_common(is_nonblocking),
         })
@@ -78,15 +86,78 @@ impl DatagramSocket {
         &self,
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
-    ) -> Result<(RecvOutput, SocketAddr)> {
-        let result = self
-            .inner
-            .read()
-            .try_recv(writer, flags)
-            .map(|(output, remote_endpoint)| (output, remote_endpoint.into()))?;
+    ) -> Result<(RecvOutput, ReceivedMeta, u32)> {
+        let result = match &*self.inner.read() {
+            Inner::Unbound(_) => {
+                return_errno_with_message!(Errno::EAGAIN, "the socket is not bound")
+            }
+            Inner::Bound(bound_datagram) => {
+                let (output, meta) = bound_datagram.try_recv_with_meta(writer, flags)?;
+                (output, meta, bound_datagram.iface().index())
+            }
+        };
         self.pollee.invalidate();
 
         Ok(result)
+    }
+
+    /// Builds the control messages a received datagram carries, as the socket options ask.
+    fn received_control_messages(
+        &self,
+        meta: &ReceivedMeta,
+        ifindex: u32,
+    ) -> Vec<ControlMessage> {
+        let options = self.options.read();
+        let mut messages = Vec::new();
+
+        if options.socket.recv_timestamp_ns() {
+            messages.push(ControlMessage::Ip(IpControlMessage::TimestampNs(
+                meta.arrived_at,
+            )));
+        } else if options.socket.recv_timestamp() {
+            messages.push(ControlMessage::Ip(IpControlMessage::Timestamp(
+                meta.arrived_at,
+            )));
+        }
+
+        let flags = options.socket.timestamping();
+        if flags & timestamping::RX_SOFTWARE != 0 && flags & timestamping::SOFTWARE != 0 {
+            messages.push(ControlMessage::Ip(IpControlMessage::Timestamping(
+                meta.arrived_at,
+            )));
+        }
+
+        if options.ip.pktinfo()
+            && let Some(IpAddress::Ipv4(address)) = meta.local_address
+        {
+            messages.push(ControlMessage::Ip(IpControlMessage::PacketInfo {
+                ifindex: ifindex as i32,
+                local: address.octets(),
+                destination: address.octets(),
+            }));
+        }
+
+        messages
+    }
+
+    /// Takes one pending transmit timestamp, as `recvmsg(MSG_ERRQUEUE)` does.
+    fn recv_error_queue(&self, flags: RecvFlags) -> Result<(RecvOutput, MessageHeader)> {
+        let stamp = match &*self.inner.read() {
+            Inner::Bound(bound_datagram) => bound_datagram.pop_tx_timestamp(),
+            Inner::Unbound(_) => None,
+        }
+        .ok_or_else(|| Error::with_message(Errno::EAGAIN, "the error queue is empty"))?;
+        self.pollee.invalidate();
+
+        let tx_id = stamp.tag.wrapping_sub(1);
+        let time = Duration::from_nanos(stamp.wall_time_ns);
+        let messages = vec![
+            ControlMessage::Ip(IpControlMessage::Timestamping(time)),
+            ControlMessage::Ip(IpControlMessage::TimestampingError { tx_id }),
+        ];
+        let output = RecvOutput::new_for_packet(flags, 0, 0);
+
+        Ok((output, MessageHeader::new(None, messages)))
     }
 
     fn try_send(
@@ -95,6 +166,7 @@ impl DatagramSocket {
         remote: Option<&IpEndpoint>,
         flags: SendFlags,
     ) -> Result<usize> {
+        let tx_tag = self.next_tx_tag();
         let (sent_bytes, iface_to_poll) = select_remote_and_bind(
             &self.inner,
             remote,
@@ -110,7 +182,7 @@ impl DatagramSocket {
                     .bind_ephemeral(remote_endpoint, &self.pollee)
             },
             |bound_datagram, remote_endpoint| {
-                let sent_bytes = bound_datagram.try_send(reader, remote_endpoint, flags)?;
+                let sent_bytes = bound_datagram.try_send_tagged(reader, remote_endpoint, tx_tag)?;
                 let iface_to_poll = bound_datagram.iface().clone();
                 Ok((sent_bytes, iface_to_poll))
             },
@@ -120,6 +192,24 @@ impl DatagramSocket {
         iface_to_poll.poll();
 
         Ok(sent_bytes)
+    }
+}
+
+impl DatagramSocket {
+    /// Returns the tag that asks for a transmit timestamp, or zero when none is requested.
+    ///
+    /// The tag is the timestamp key plus one, so that it is never zero.
+    fn next_tx_tag(&self) -> u32 {
+        let flags = self.options.read().socket.timestamping();
+        if flags & timestamping::TX_SOFTWARE == 0 || flags & timestamping::SOFTWARE == 0 {
+            return 0;
+        }
+        if flags & timestamping::OPT_ID == 0 {
+            return 1;
+        }
+        self.tx_timestamp_key
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
     }
 }
 
@@ -236,14 +326,17 @@ impl Socket for DatagramSocket {
             warn!("unsupported flags: {:?}", flags);
         }
 
-        let (output, peer_addr) =
+        if flags.contains(RecvFlags::MSG_ERRQUEUE) {
+            return self.recv_error_queue(flags);
+        }
+
+        let (output, meta, ifindex) =
             self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
                 self.try_recv(writer, flags)
             })?;
 
-        // TODO: Receive control message
-
-        let message_header = MessageHeader::new(Some(peer_addr), Vec::new());
+        let control_messages = self.received_control_messages(&meta, ifindex);
+        let message_header = MessageHeader::new(Some(meta.remote.into()), control_messages);
 
         Ok((output, message_header))
     }

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::time::Duration;
+
 use aster_bigtcp::{
     errors::udp::{RecvError, SendError},
-    wire::IpEndpoint,
+    wire::{IpAddress, IpEndpoint},
 };
 
 use crate::{
@@ -14,6 +16,13 @@ use crate::{
     prelude::*,
     util::{MultiRead, MultiWrite},
 };
+
+/// What the network stack knows about a received datagram besides its payload.
+pub(super) struct ReceivedMeta {
+    pub(super) remote: IpEndpoint,
+    pub(super) local_address: Option<IpAddress>,
+    pub(super) arrived_at: Duration,
+}
 
 pub(super) struct BoundDatagram {
     bound_socket: UdpSocket,
@@ -35,43 +44,33 @@ impl BoundDatagram {
     pub(super) fn bound_port(&self) -> &BoundUdpPort {
         self.bound_socket.bound_port()
     }
-}
 
-impl datagram_common::Bound for BoundDatagram {
-    type Endpoint = IpEndpoint;
-
-    fn local_endpoint(&self) -> Self::Endpoint {
-        self.bound_socket.local_endpoint()
-    }
-
-    fn remote_endpoint(&self) -> Option<&Self::Endpoint> {
-        self.remote_endpoint.as_ref()
-    }
-
-    fn set_remote_endpoint(&mut self, endpoint: &Self::Endpoint) {
-        self.remote_endpoint = Some(*endpoint)
-    }
-
-    fn try_recv(
+    /// Receives a datagram together with its arrival time and destination address.
+    pub(super) fn try_recv_with_meta(
         &self,
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
-    ) -> Result<(RecvOutput, Self::Endpoint)> {
-        let result = self
-            .bound_socket
-            .recv(flags.receive_behavior(), |packet, udp_metadata| {
+    ) -> Result<(RecvOutput, ReceivedMeta)> {
+        let result = self.bound_socket.recv(
+            flags.receive_behavior(),
+            |packet, udp_metadata, arrived_at_ns| {
                 let message_len = packet.len();
                 let copied_res = writer
                     .write(&mut VmReader::from(packet))
                     .map_err(Into::into);
-                let endpoint = udp_metadata.endpoint;
-                (copied_res, endpoint, message_len)
-            });
+                let meta = ReceivedMeta {
+                    remote: udp_metadata.endpoint,
+                    local_address: udp_metadata.local_address,
+                    arrived_at: Duration::from_nanos(arrived_at_ns),
+                };
+                (copied_res, meta, message_len)
+            },
+        );
 
         match result {
-            Ok((Ok(copied_len), endpoint, message_len)) => {
+            Ok((Ok(copied_len), meta, message_len)) => {
                 let output = RecvOutput::new_for_packet(flags, copied_len, message_len);
-                Ok((output, endpoint))
+                Ok((output, meta))
             }
             Ok((Err(e), _, _)) => Err(e),
             Err(RecvError::Exhausted) => {
@@ -83,15 +82,18 @@ impl datagram_common::Bound for BoundDatagram {
         }
     }
 
-    fn try_send(
+    /// Sends a datagram. A nonzero `tx_tag` asks for a transmit timestamp.
+    pub(super) fn try_send_tagged(
         &self,
         reader: &mut dyn MultiRead,
-        remote: &Self::Endpoint,
-        _flags: SendFlags,
+        remote: &IpEndpoint,
+        tx_tag: u32,
     ) -> Result<usize> {
+        let mut meta = aster_bigtcp::socket::UdpMetadata::from(*remote);
+        meta.meta.id = tx_tag;
         let result = self
             .bound_socket
-            .send(reader.sum_lens(), *remote, |socket_buffer| {
+            .send(reader.sum_lens(), meta, |socket_buffer| {
                 // FIXME: If copy failed, we should not send any packet.
                 // But current smoltcp API seems not to support this behavior.
                 reader
@@ -116,6 +118,45 @@ impl datagram_common::Bound for BoundDatagram {
         }
     }
 
+    /// Takes the oldest pending transmit timestamp.
+    pub(super) fn pop_tx_timestamp(&self) -> Option<aster_bigtcp::socket::TxTimestamp> {
+        self.bound_socket.pop_tx_timestamp()
+    }
+}
+
+impl datagram_common::Bound for BoundDatagram {
+    type Endpoint = IpEndpoint;
+
+    fn local_endpoint(&self) -> Self::Endpoint {
+        self.bound_socket.local_endpoint()
+    }
+
+    fn remote_endpoint(&self) -> Option<&Self::Endpoint> {
+        self.remote_endpoint.as_ref()
+    }
+
+    fn set_remote_endpoint(&mut self, endpoint: &Self::Endpoint) {
+        self.remote_endpoint = Some(*endpoint)
+    }
+
+    fn try_recv(
+        &self,
+        writer: &mut dyn MultiWrite,
+        flags: RecvFlags,
+    ) -> Result<(RecvOutput, Self::Endpoint)> {
+        let (output, meta) = self.try_recv_with_meta(writer, flags)?;
+        Ok((output, meta.remote))
+    }
+
+    fn try_send(
+        &self,
+        reader: &mut dyn MultiRead,
+        remote: &Self::Endpoint,
+        _flags: SendFlags,
+    ) -> Result<usize> {
+        self.try_send_tagged(reader, remote, 0)
+    }
+
     fn check_io_events(&self) -> IoEvents {
         self.bound_socket.raw_with(|socket| {
             let mut events = IoEvents::empty();
@@ -129,6 +170,10 @@ impl datagram_common::Bound for BoundDatagram {
             }
 
             events
-        })
+        }) | if self.bound_socket.has_tx_timestamp() {
+            IoEvents::ERR
+        } else {
+            IoEvents::empty()
+        }
     }
 }

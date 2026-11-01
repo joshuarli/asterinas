@@ -3,7 +3,11 @@
 use align_ext::AlignExt;
 
 use super::{RecvFlags, SocketAddr};
-use crate::{net::socket::unix::UnixControlMessage, prelude::*, util::net::CSocketOptionLevel};
+use crate::{
+    net::socket::{ip::IpControlMessage, unix::UnixControlMessage},
+    prelude::*,
+    util::net::CSocketOptionLevel,
+};
 
 /// Message header used for sendmsg/recvmsg.
 #[derive(Debug)]
@@ -39,6 +43,7 @@ impl MessageHeader {
 #[derive(Debug)]
 pub(crate) enum ControlMessage {
     Unix(UnixControlMessage),
+    Ip(IpControlMessage),
 }
 
 impl ControlMessage {
@@ -132,6 +137,7 @@ impl ControlMessage {
     fn write_to(&self, writer: &mut VmWriter) -> Result<(CControlHeader, RecvFlags)> {
         match self {
             Self::Unix(msg) => msg.write_to(writer),
+            Self::Ip(msg) => msg.write_to(writer),
         }
     }
 }
