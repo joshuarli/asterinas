@@ -121,3 +121,52 @@ fn balance_to<const MAX_ORDER1: BuddyOrder, const MAX_ORDER2: BuddyOrder>(
         }
     }
 }
+
+#[cfg(ktest)]
+mod test {
+    use ostd::{mm::PAGE_SIZE, prelude::ktest};
+
+    use super::*;
+    use crate::test::MockMemoryRegion;
+
+    #[ktest]
+    fn balance_to_terminates_when_only_small_chunks_remain() {
+        let region_order = 8;
+        let region = MockMemoryRegion::alloc(size_of_order(region_order));
+        let mut from = BuddySet::<20>::new_empty();
+        let mut to = BuddySet::<20>::new_empty();
+        let isolated_chunks = size_of_order(region_order) / PAGE_SIZE / 2;
+        for index in 0..isolated_chunks {
+            from.insert_chunk(region.paddr() + index * 2 * PAGE_SIZE, 0);
+        }
+        assert_eq!(from.total_size(), isolated_chunks * PAGE_SIZE);
+
+        balance_to(&mut from, &mut to, 17);
+
+        assert_eq!(to.total_size(), MAX_CHUNKS_PER_BALANCE * PAGE_SIZE);
+        assert_eq!(
+            from.total_size() + to.total_size(),
+            isolated_chunks * PAGE_SIZE
+        );
+
+        from.drain_chunks(|_, _| {});
+        to.drain_chunks(|_, _| {});
+    }
+
+    #[ktest]
+    fn balance_to_moves_no_more_than_the_requested_order() {
+        let region_order = 6;
+        let region = MockMemoryRegion::alloc(size_of_order(region_order));
+        let mut from = BuddySet::<20>::new_empty();
+        let mut to = BuddySet::<20>::new_empty();
+        from.insert_chunk(region.paddr(), region_order);
+
+        balance_to(&mut from, &mut to, 3);
+
+        assert_eq!(to.total_size(), size_of_order(3));
+        assert_eq!(from.total_size(), size_of_order(region_order) - size_of_order(3));
+
+        from.drain_chunks(|_, _| {});
+        to.drain_chunks(|_, _| {});
+    }
+}

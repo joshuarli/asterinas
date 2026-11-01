@@ -195,3 +195,34 @@ impl Drop for OnDemandGlobalLock {
         }
     }
 }
+
+#[cfg(ktest)]
+mod test {
+    use ostd::{irq, mm::PAGE_SIZE, prelude::ktest};
+
+    use super::*;
+
+    #[ktest]
+    fn reclaim_moves_chunks_cached_by_another_cpu_into_the_global_pool() {
+        let guard = irq::disable_local();
+        let current = guard.current_cpu();
+        let Some(remote) = all_cpus().find(|cpu| *cpu != current) else {
+            return;
+        };
+
+        let order = 4;
+        let layout = Layout::from_size_align(PAGE_SIZE << order, PAGE_SIZE).unwrap();
+        let stranded = alloc_from_local_or_global(&guard, layout).unwrap();
+        LOCAL_POOL
+            .get_on_cpu(remote)
+            .lock()
+            .insert_chunk(stranded, order);
+        let global_before = GLOBAL_POOL.lock().total_size();
+
+        assert!(reclaim_remote_local_pools(&guard));
+
+        assert_eq!(LOCAL_POOL.get_on_cpu(remote).lock().total_size(), 0);
+        assert!(GLOBAL_POOL.lock().total_size() >= global_before + layout.size());
+        assert!(!reclaim_remote_local_pools(&guard));
+    }
+}
