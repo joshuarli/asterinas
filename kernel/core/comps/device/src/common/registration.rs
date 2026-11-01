@@ -4,8 +4,9 @@
 //! and the builder that every typed device is created through.
 
 use alloc::{
-    string::ToString,
+    string::{String, ToString},
     sync::{Arc, Weak},
+    vec,
     vec::Vec,
 };
 use core::fmt::Write;
@@ -167,7 +168,7 @@ fn add_steps(this: &Arc<dyn AnyDevice>) -> Result<()> {
     place(this)?;
 
     // 2. Core attributes.
-    let mut attrs = Vec::new();
+    let mut attrs = vec![TyErasedAttr::from_dyn(&UEVENT_ATTR)];
     if base.devnum().is_some() {
         attrs.push(TyErasedAttr::from_dyn(&DEV_ATTR));
     }
@@ -368,4 +369,41 @@ fn show_dev(dev: &dyn AnyDevice, w: &mut dyn Write) -> Result<()> {
     let devnum = dev.devnum().ok_or(Error::NoDevNum)?;
     writeln!(w, "{}", devnum)?;
     Ok(())
+}
+
+const UEVENT_ATTR: Attr<dyn AnyDevice> = Attr::rw("uevent", show_uevent, store_uevent);
+
+fn uevent_environment(dev: &dyn AnyDevice) -> Vec<(String, String)> {
+    let mut environment = Vec::new();
+    if let Some(devnum) = dev.devnum() {
+        let id = devnum.id();
+        environment.push((String::from("MAJOR"), alloc::format!("{}", id.major().get())));
+        environment.push((String::from("MINOR"), alloc::format!("{}", id.minor().get())));
+        let devname = match dev.base().devnode().lock().as_ref() {
+            Some(request) => String::from(request.path.as_ref()),
+            None => String::from(dev.base().name().replace('!', "/")),
+        };
+        environment.push((String::from("DEVNAME"), devname));
+    }
+    if let Some(devtype) = dev.type_name() {
+        environment.push((String::from("DEVTYPE"), String::from(devtype)));
+    }
+    environment
+}
+
+fn show_uevent(dev: &dyn AnyDevice, w: &mut dyn Write) -> Result<()> {
+    for (key, value) in uevent_environment(dev) {
+        writeln!(w, "{}={}", key, value)?;
+    }
+    Ok(())
+}
+
+fn store_uevent(dev: &dyn AnyDevice, text: &str) -> Result<()> {
+    let request = hooks::UeventRequest {
+        command: String::from(text.trim_end_matches('\n')),
+        devpath: dev.base().tree_path(),
+        subsystem: String::from(dev.subsystem().name().unwrap_or_default()),
+        environment: uevent_environment(dev),
+    };
+    hooks::emit_uevent(&request)
 }

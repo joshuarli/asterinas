@@ -47,7 +47,6 @@ impl GroupIdSet {
     }
 
     /// Checks if the set of group IDs is empty.
-    #[expect(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.0 == 0
     }

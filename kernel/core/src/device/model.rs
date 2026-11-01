@@ -5,7 +5,7 @@
 
 use aster_device::{
     common::DevKind,
-    hooks::{self, DevNodeRequest, HookError, KernelHooks},
+    hooks::{self, DevNodeRequest, HookError, KernelHooks, UeventRequest},
 };
 
 use crate::{
@@ -35,6 +35,16 @@ impl KernelHooks for Hooks {
             );
             HookError
         })
+    }
+
+    fn emit_uevent(&self, request: &UeventRequest) -> core::result::Result<(), HookError> {
+        crate::net::socket::netlink::broadcast_synthetic_uevent(
+            &request.command,
+            request.devpath.clone(),
+            request.subsystem.clone(),
+            request.environment.clone(),
+        )
+        .map_err(|_| HookError)
     }
 
     fn delete_devnode(&self, request: &DevNodeRequest) -> core::result::Result<(), HookError> {

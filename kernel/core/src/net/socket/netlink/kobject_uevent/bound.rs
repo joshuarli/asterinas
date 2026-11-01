@@ -4,8 +4,12 @@ use super::message::UeventMessage;
 use crate::{
     events::IoEvents,
     net::socket::{
-        netlink::{NetlinkSocketAddr, common::BoundNetlink},
-        util::{RecvFlags, RecvOutput, SendFlags, datagram_common},
+        netlink::{
+            NetlinkSocketAddr,
+            common::BoundNetlink,
+            table::{NetlinkUeventProtocol, SupportedNetlinkProtocol},
+        },
+        util::{RecvFlags, RecvOutput, SendFlags, datagram_common, options::check_current_privileged},
     },
     prelude::*,
     util::{MultiRead, MultiWrite},
@@ -43,10 +47,20 @@ impl datagram_common::Bound for BoundNetlinkUevent {
             warn!("unsupported flags: {:?}", flags);
         }
 
+        if !remote.groups().is_empty() {
+            check_current_privileged()?;
+            let mut bytes = vec![0u8; reader.sum_lens()];
+            reader.read(&mut VmWriter::from(bytes.as_mut_slice()))?;
+            let len = bytes.len();
+            let message = UeventMessage::from_user_bytes(bytes, self.handle.addr())?;
+            NetlinkUeventProtocol::multicast(remote.groups(), message)?;
+            return Ok(len);
+        }
+
         if *remote != NetlinkSocketAddr::new_unspecified() {
             return_errno_with_message!(
                 Errno::ECONNREFUSED,
-                "sending uevent messages to user space is not supported"
+                "sending uevent messages to a port is not supported"
             );
         }
 

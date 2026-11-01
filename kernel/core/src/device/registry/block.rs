@@ -3,6 +3,10 @@
 use alloc::borrow::ToOwned;
 
 use aster_block::{BLOCK_SIZE, BlockDevice, SECTOR_SIZE, bio::BioStatus};
+use aster_device::{
+    class::{self, Class, ClassDevice, ClassHandle},
+    common::{Attr, DevNum, DeviceType as ModelDeviceType},
+};
 use aster_nvme::NvmeBlockDevice;
 use aster_virtio::device::block::device::BlockDevice as VirtIoBlockDevice;
 use device_id::DeviceId;
@@ -14,7 +18,7 @@ use crate::{
     dispatch_ioctl,
     events::IoEvents,
     fs::{
-        devtmpfs::{self, DevtmpfsNode, DevtmpfsNodeMeta},
+        devtmpfs::DevtmpfsNodeMeta,
         file::{PerOpenFileOps, SettableStatusFlags, StatusFlags, SyncMode},
         vfs::{inode::FileOps, path::Path},
     },
@@ -62,15 +66,41 @@ pub(super) fn init_in_first_kthread() {
 }
 
 pub(super) fn init_in_first_process() -> Result<()> {
+    let class = BLOCK_CLASS.call_once(|| class::register(BlockClass).unwrap());
     for device in aster_block::collect_all() {
-        let device: Arc<dyn Device> = Arc::new(BlockFile::new(device));
-        if let Some(meta) = device.devtmpfs_meta() {
-            devtmpfs::create_node(DevtmpfsNode::new(device.type_(), device.id(), meta))?;
-        }
+        let dev_type = if device.is_partition() {
+            &PARTITION_TYPE
+        } else {
+            &DISK_TYPE
+        };
+        let class_device = ClassDevice::builder(class, device.name().to_owned(), device.clone())
+            .devnum(DevNum::block(device.id()))
+            .dev_type(dev_type)
+            .build();
+        aster_device::add_device(&class_device)?;
     }
 
     Ok(())
 }
+
+/// The `block` class: whole disks and their partitions.
+struct BlockClass;
+
+impl Class for BlockClass {
+    const NAME: &'static str = "block";
+    type Device = Arc<dyn BlockDevice>;
+
+    fn dev_attrs(&self) -> &'static [Attr<ClassDevice<Self>>] {
+        &[]
+    }
+}
+
+static BLOCK_CLASS: spin::Once<Arc<ClassHandle<BlockClass>>> = spin::Once::new();
+
+static DISK_TYPE: ModelDeviceType<ClassDevice<BlockClass>> = ModelDeviceType::named("disk");
+
+static PARTITION_TYPE: ModelDeviceType<ClassDevice<BlockClass>> =
+    ModelDeviceType::named("partition");
 
 mod ioctl_defs {
     use crate::{
@@ -123,7 +153,7 @@ impl Device for BlockFile {
     }
 
     fn devtmpfs_meta(&self) -> Option<DevtmpfsNodeMeta> {
-        Some(DevtmpfsNodeMeta::new(self.0.name().to_owned()).unwrap())
+        None
     }
 
     fn open(&self) -> Result<Box<dyn PerOpenFileOps>> {

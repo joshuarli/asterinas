@@ -8,7 +8,7 @@
 //! Node creation requests are queued until [`install_hooks`] installs the hooks and replays them.
 //! Each [`DevNodeRequest`] carries the device number, path relative to `/dev`, and permissions.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use ostd::sync::Mutex;
 use spin::Once;
@@ -39,6 +39,24 @@ pub trait KernelHooks: Send + Sync + 'static {
     /// Deletes a `/dev` node created earlier.
     /// The request is the one that created the node.
     fn delete_devnode(&self, request: &DevNodeRequest) -> core::result::Result<(), HookError>;
+
+    /// Delivers the event a write to a device's `uevent` attribute asks for.
+    ///
+    /// Fails when the command is not a valid synthetic uevent.
+    fn emit_uevent(&self, request: &UeventRequest) -> core::result::Result<(), HookError>;
+}
+
+/// A request to deliver a synthetic uevent for a device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UeventRequest {
+    /// The text written to the `uevent` attribute: an action, an optional token, and `KEY=VALUE` pairs.
+    pub command: String,
+    /// The device's absolute path under sysfs, such as `/devices/virtual/block/vda`.
+    pub devpath: String,
+    /// The name of the subsystem that owns the device.
+    pub subsystem: String,
+    /// The `MAJOR`, `MINOR`, `DEVNAME` and `DEVTYPE` values the device contributes.
+    pub environment: Vec<(String, String)>,
 }
 
 /// A request to create or delete a `/dev` node.
@@ -62,6 +80,10 @@ pub(crate) fn create_devnode(request: DevNodeRequest) -> Result<()> {
 
 pub(crate) fn delete_devnode(request: &DevNodeRequest) -> Result<()> {
     HOOKS.delete_devnode(request)
+}
+
+pub(crate) fn emit_uevent(request: &UeventRequest) -> Result<()> {
+    HOOKS.emit_uevent(request)
 }
 
 /// The hooks, once installed, and the requests waiting for them.
@@ -105,6 +127,13 @@ impl HookSlot {
                 queue.push(request);
                 Ok(())
             }
+        }
+    }
+
+    pub(crate) fn emit_uevent(&self, request: &UeventRequest) -> Result<()> {
+        match self.hooks.get() {
+            Some(hooks) => hooks.emit_uevent(request).map_err(|_| Error::InvalidValue),
+            None => Err(Error::Hook),
         }
     }
 

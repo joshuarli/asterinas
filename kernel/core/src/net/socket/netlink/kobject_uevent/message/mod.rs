@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-#![cfg_attr(not(ktest), expect(dead_code))]
+use core::str::FromStr;
 
+use syn_uevent::SyntheticUevent;
 use uevent::Uevent;
 
 use crate::{
@@ -34,6 +35,25 @@ impl UeventMessage {
             uevent: uevent.to_string(),
             src_addr,
         }
+    }
+
+    /// Creates the message a write of `command` to a device's `uevent` attribute produces.
+    pub(crate) fn from_synthetic_command(
+        command: &str,
+        devpath: String,
+        subsystem: String,
+        envs: Vec<(String, String)>,
+    ) -> Result<Self> {
+        let synthetic = SyntheticUevent::from_str(command)?;
+        let uevent = Uevent::new_from_syn(synthetic, devpath, subsystem, envs);
+        Ok(Self::new(uevent, NetlinkSocketAddr::new_unspecified()))
+    }
+
+    /// Creates a message from the bytes a user-space socket sent to a multicast group.
+    pub(crate) fn from_user_bytes(bytes: Vec<u8>, src_addr: NetlinkSocketAddr) -> Result<Self> {
+        let uevent = String::from_utf8(bytes)
+            .map_err(|_| Error::with_message(Errno::EINVAL, "the uevent is not valid text"))?;
+        Ok(Self { uevent, src_addr })
     }
 
     /// Returns the source address of the uevent message.
