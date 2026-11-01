@@ -258,7 +258,7 @@ lru = "0.16.3"
 owo-colors = "4.2.2"
 paste = "1.0.15"
 postcard = "1.0.6"
-smoltcp = { git = "https://github.com/asterinas/smoltcp", tag = "r_2026-08-11_1b7629c", default-features = false, features = [
+smoltcp = { version = "=0.11.0", registry = "mycrates", default-features = false, features = [
     "alloc",
     "log",
     "medium-ethernet",
@@ -277,7 +277,7 @@ bitvec = { version = "1.0.1", default-features = false, features = ["alloc"] }
 cfg-if = "1.0"
 crc32fast = "1.4"
 fdt = { version = "0.1.5", features = ["pretty-printing"] }
-inherit-methods-macro = { git = "https://github.com/asterinas/inherit-methods-macro", rev = "98f7e3e", version = "0.1.0" }
+inherit-methods-macro = { version = "=0.1.0", registry = "mycrates" }
 intrusive-collections = { version = "0.9.6", features = ["nightly"] }
 libflate = { version = "2.3.0", default-features = false }
 log = "0.4"

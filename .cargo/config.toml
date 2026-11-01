@@ -1,0 +1,8 @@
+[source.crates-io]
+replace-with = "mycrates-mirror"
+
+[source.mycrates-mirror]
+registry = "sparse+https://crates.17166969.xyz/current/crates-io/"
+
+[registries.mycrates]
+index = "sparse+https://crates.17166969.xyz/current/registry/"
