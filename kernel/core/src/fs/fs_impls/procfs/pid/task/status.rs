@@ -54,6 +54,7 @@ use crate::{
 /// - CapEff: Effective capabilities.
 /// - CapBnd: Bounding set.
 /// - CapAmb: Ambient capabilities.
+/// - NoNewPrivs: Whether the no-new-privileges flag is set.
 /// - Seccomp: Seccomp mode.
 /// - Cpus_allowed: CPUs allowed for this process.
 /// - Cpus_allowed_list: List of CPUs allowed for this process.
@@ -196,6 +197,11 @@ impl ProcFileOps for StatusFileOps {
             printer,
             "CapAmb:\t{:016x}",
             credentials.ambient_capset().bits()
+        )?;
+        writeln!(
+            printer,
+            "NoNewPrivs:\t{}",
+            u8::from(credentials.no_new_privs())
         )?;
 
         Ok(printer.bytes_written())
