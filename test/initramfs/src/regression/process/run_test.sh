@@ -42,6 +42,7 @@ fi
 ./prctl/subreaper
 ./prctl/thread_name
 
+./pthread/pthread_create_fragmented_memory
 ./pthread/pthread_signal_test
 ./pthread/pthread_test
 

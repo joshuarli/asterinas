@@ -6,7 +6,7 @@ use ostd::cpu::num_cpus;
 
 use super::{BuddyOrder, BuddySet, MAX_LOCAL_BUDDY_ORDER, OnDemandGlobalLock, lesser_order_of};
 
-use crate::chunk::split_to_order;
+use crate::chunk::{size_of_order, split_to_order};
 
 /// Controls the expected size of cache for each CPU-local free pool.
 ///
@@ -81,29 +81,43 @@ pub(super) fn balance(
     }
 }
 
+const MAX_CHUNKS_PER_BALANCE: usize = 64;
+
 /// Balances from `a` to `b`.
 fn balance_to<const MAX_ORDER1: BuddyOrder, const MAX_ORDER2: BuddyOrder>(
     a: &mut BuddySet<MAX_ORDER1>,
     b: &mut BuddySet<MAX_ORDER2>,
     order: BuddyOrder,
 ) {
-    let allocated_from_a = a.alloc_chunk(order);
+    let mut remaining = size_of_order(order);
+    let mut chunk_order = order;
 
-    if let Some(addr) = allocated_from_a {
-        if order >= MAX_ORDER2 {
+    for _ in 0..MAX_CHUNKS_PER_BALANCE {
+        while chunk_order > 0 && size_of_order(chunk_order) > remaining {
+            chunk_order -= 1;
+        }
+        let addr = loop {
+            if let Some(addr) = a.alloc_chunk(chunk_order) {
+                break addr;
+            }
+            if chunk_order == 0 {
+                return;
+            }
+            chunk_order -= 1;
+        };
+
+        if chunk_order >= MAX_ORDER2 {
             let inserted_order = MAX_ORDER2 - 1;
-            split_to_order(addr, order, inserted_order).for_each(|addr| {
+            split_to_order(addr, chunk_order, inserted_order).for_each(|addr| {
                 b.insert_chunk(addr, inserted_order);
             });
         } else {
-            b.insert_chunk(addr, order);
+            b.insert_chunk(addr, chunk_order);
         }
-    } else {
-        // Maybe the chunk size is too large.
-        // Try to reduce the order and balance again.
-        if order > 1 {
-            balance_to(a, b, order - 1);
-            balance_to(a, b, order - 1);
+
+        remaining -= size_of_order(chunk_order);
+        if remaining == 0 {
+            return;
         }
     }
 }

@@ -56,6 +56,17 @@ impl<const MAX_ORDER: BuddyOrder> BuddySet<MAX_ORDER> {
         self.total_size += inserted_size;
     }
 
+    pub(crate) fn drain_chunks(&mut self, mut sink: impl FnMut(Paddr, BuddyOrder)) {
+        for order in (0..MAX_ORDER).rev() {
+            while !self.lists[order].is_empty() {
+                let addr = self
+                    .alloc_chunk(order)
+                    .expect("a non-empty free list must yield a chunk");
+                sink(addr, order);
+            }
+        }
+    }
+
     /// Allocates a chunk from the set.
     ///
     /// The function will choose and remove a buddy chunk of the given order

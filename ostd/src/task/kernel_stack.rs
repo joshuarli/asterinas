@@ -61,9 +61,14 @@ impl KernelStack {
     // non-negligible TLB and mapping overhead on task creation. This could
     // be improved by caching/reusing kernel stacks with a pool.
     pub(super) fn new_with_guard_page() -> Result<Self> {
-        let pages = FrameAllocOptions::new()
-            .zeroed(false)
-            .alloc_segment_with(KERNEL_STACK_SIZE / PAGE_SIZE, |_| KernelStackMeta)?;
+        let mut pages = Vec::with_capacity(KERNEL_STACK_SIZE / PAGE_SIZE);
+        for _ in 0..KERNEL_STACK_SIZE / PAGE_SIZE {
+            pages.push(
+                FrameAllocOptions::new()
+                    .zeroed(false)
+                    .alloc_frame_with(KernelStackMeta)?,
+            );
+        }
         let prop = PageProperty {
             flags: PageFlags::RW,
             cache: CachePolicy::Writeback,
