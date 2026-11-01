@@ -6,6 +6,8 @@ set -e
 
 ./clock_nanosleep/nanosleep_err
 
+./clock_adjust
+
 ./gettimeofday/gettimeofday
 
 ./itimer/setitimer

@@ -15,6 +15,7 @@ use super::{
     chmod::{sys_chmod, sys_fchmod, sys_fchmodat, sys_fchmodat2},
     chown::{sys_chown, sys_fchown, sys_fchownat, sys_lchown},
     chroot::sys_chroot,
+    clock_adjust::{sys_adjtimex, sys_clock_adjtime, sys_clock_settime},
     clock_gettime::sys_clock_gettime,
     clone::{sys_clone, sys_clone3},
     close::{sys_close, sys_close_range},
@@ -324,6 +325,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_ARCH_PRCTL = 158       => sys_arch_prctl(args[..2]);
     SYS_SETRLIMIT = 160        => sys_setrlimit(args[..2]);
     SYS_CHROOT = 161           => sys_chroot(args[..1]);
+    SYS_ADJTIMEX = 159         => sys_adjtimex(args[..1]);
     SYS_SYNC = 162             => sys_sync(args[..0]);
     SYS_MOUNT = 165            => sys_mount(args[..5]);
     SYS_UMOUNT2 = 166          => sys_umount(args[..2]);
@@ -357,6 +359,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_TIMER_SETTIME = 223    => sys_timer_settime(args[..4]);
     SYS_TIMER_GETTIME = 224    => sys_timer_gettime(args[..2]);
     SYS_TIMER_DELETE = 226     => sys_timer_delete(args[..1]);
+    SYS_CLOCK_SETTIME = 227    => sys_clock_settime(args[..2]);
     SYS_CLOCK_GETTIME = 228    => sys_clock_gettime(args[..2]);
     SYS_CLOCK_NANOSLEEP = 230  => sys_clock_nanosleep(args[..4]);
     SYS_EXIT_GROUP = 231       => sys_exit_group(args[..1], &mut user_ctx);
@@ -406,6 +409,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_PREADV = 295           => sys_preadv(args[..5]);
     SYS_PWRITEV = 296          => sys_pwritev(args[..5]);
     SYS_PRLIMIT64 = 302        => sys_prlimit64(args[..4]);
+    SYS_CLOCK_ADJTIME = 305    => sys_clock_adjtime(args[..2]);
     SYS_SYNCFS = 306           => sys_syncfs(args[..1]);
     SYS_SENDMMSG = 307         => sys_sendmmsg(args[..4]);
     SYS_SETNS = 308            => sys_setns(args[..2]);

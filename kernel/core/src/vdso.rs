@@ -39,7 +39,6 @@ const CLOCK_TAI: usize = 11;
 const VDSO_BASES: usize = CLOCK_TAI + 1;
 const DEFAULT_CLOCK_MODE: VdsoClockMode = VdsoClockMode::Tsc;
 
-static START_SECS_COUNT: Once<u64> = Once::new();
 static VDSO: Once<Arc<Vdso>> = Once::new();
 
 #[derive(Clone, Copy, Debug)]
@@ -162,29 +161,32 @@ impl VdsoData {
 
     fn update_high_res_instant(&mut self, instant: Instant, instant_cycles: u64) {
         self.last_cycles = instant_cycles;
+        let (wall_secs, wall_nanos, frequency) = wall_instant(instant);
+        self.set_clock_mode(if frequency == 0 {
+            DEFAULT_CLOCK_MODE
+        } else {
+            VdsoClockMode::None
+        });
         for clock_id in HIGH_RES_CLOCK_IDS {
-            let secs = if clock_id == ClockId::CLOCK_REALTIME {
-                instant.secs() + START_SECS_COUNT.get().unwrap()
+            let (secs, nanos) = if clock_id == ClockId::CLOCK_REALTIME {
+                (wall_secs, wall_nanos)
             } else {
-                instant.secs()
+                (instant.secs(), instant.nanos() as u64)
             };
 
-            self.update_clock_instant(
-                clock_id as usize,
-                secs,
-                (instant.nanos() as u64) << self.shift as u64,
-            );
+            self.update_clock_instant(clock_id as usize, secs, nanos << self.shift as u64);
         }
     }
 
     fn update_coarse_res_instant(&mut self, instant: Instant) {
+        let (wall_secs, wall_nanos, _) = wall_instant(instant);
         for clock_id in COARSE_RES_CLOCK_IDS {
-            let secs = if clock_id == ClockId::CLOCK_REALTIME_COARSE {
-                instant.secs() + START_SECS_COUNT.get().unwrap()
+            let (secs, nanos) = if clock_id == ClockId::CLOCK_REALTIME_COARSE {
+                (wall_secs, wall_nanos)
             } else {
-                instant.secs()
+                (instant.secs(), instant.nanos() as u64)
             };
-            self.update_clock_instant(clock_id as usize, secs, instant.nanos() as u64);
+            self.update_clock_instant(clock_id as usize, secs, nanos);
         }
     }
 }
@@ -291,6 +293,9 @@ impl Vdso {
         self.data_frame
             .write_val(vdso_data_field_offset!(last_cycles), &instant_cycles)
             .unwrap();
+        self.data_frame
+            .write_val(vdso_data_field_offset!(clock_mode), &data.clock_mode)
+            .unwrap();
         for clock_id in HIGH_RES_CLOCK_IDS {
             self.update_data_frame_instant(clock_id, &mut data);
         }
@@ -353,6 +358,30 @@ impl Vdso {
     }
 }
 
+/// Returns the wall time at the monotonic `instant` as seconds and nanoseconds, with the wall
+/// clock's frequency correction.
+fn wall_instant(instant: Instant) -> (u64, u64, i64) {
+    let instant_ns = i128::from(instant.secs()) * 1_000_000_000 + i128::from(instant.nanos());
+    let (offset_ns, frequency) =
+        aster_time::wall_offset_and_frequency(Duration::new(instant.secs(), instant.nanos()));
+    let wall_ns = (instant_ns + offset_ns).max(0);
+    (
+        (wall_ns / 1_000_000_000) as u64,
+        (wall_ns % 1_000_000_000) as u64,
+        frequency,
+    )
+}
+
+/// Publishes the wall clock to user space after it was set or adjusted.
+pub(crate) fn refresh_wall_clock() {
+    let Some(vdso) = VDSO.get() else {
+        return;
+    };
+    let (instant, cycles) = aster_time::default_clocksource().last_record();
+    vdso.update_high_res_instant(instant, cycles);
+    vdso.update_coarse_res_instant(instant);
+}
+
 /// Updates instants with respect to high-resolution clocks in vDSO data.
 fn update_vdso_high_res_instant(instant: Instant, instant_cycles: u64) {
     VDSO.get()
@@ -366,16 +395,6 @@ fn update_vdso_coarse_res_instant(_guard: TimerGuard) {
     VDSO.get().unwrap().update_coarse_res_instant(instant);
 }
 
-/// Initializes the time duration from 1970-01-01 00:00:00 to the start time.
-fn init_start_secs_count() {
-    let time_duration = START_TIME
-        .get()
-        .unwrap()
-        .duration_since(&SystemTime::UNIX_EPOCH)
-        .unwrap();
-    START_SECS_COUNT.call_once(|| time_duration.as_secs());
-}
-
 /// Initializes the vDSO singleton.
 fn init_vdso() {
     let vdso = Vdso::new();
@@ -383,7 +402,6 @@ fn init_vdso() {
 }
 
 pub(super) fn init_in_first_kthread() {
-    init_start_secs_count();
     init_vdso();
 
     aster_time::VDSO_DATA_HIGH_RES_UPDATE_FN.call_once(|| update_vdso_high_res_instant);

@@ -36,6 +36,7 @@ mod chdir;
 mod chmod;
 mod chown;
 mod chroot;
+mod clock_adjust;
 mod clock_gettime;
 mod clone;
 mod close;

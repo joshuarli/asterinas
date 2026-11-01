@@ -9,7 +9,7 @@ use paste::paste;
 use spin::Once;
 
 use crate::time::{
-    self, Clock, SystemTime, system_time::START_TIME_AS_DURATION, timer::TimerManager,
+    self, Clock, SystemTime, timer::TimerManager,
 };
 
 /// The Clock that reads the jiffies, and turn the counter into `Duration`.
@@ -171,7 +171,7 @@ impl Clock for RealTimeCoarseClock {
 
 impl Clock for MonotonicCoarseClock {
     fn read_time(&self) -> Duration {
-        RealTimeCoarseClock::get().read_time() - *START_TIME_AS_DURATION.get().unwrap()
+        read_monotonic_time()
     }
 }
 

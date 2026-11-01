@@ -2,7 +2,7 @@
 
 use core::time::Duration;
 
-use aster_time::{read_monotonic_time, read_start_time};
+use aster_time::read_start_time;
 use spin::Once;
 use time::{Date, Month, PrimitiveDateTime, Time};
 
@@ -20,6 +20,7 @@ pub(super) fn init() {
     START_TIME_AS_DURATION
         .call_once(|| start_time.duration_since(&SystemTime::UNIX_EPOCH).unwrap());
     START_TIME.call_once(|| start_time);
+    aster_time::init_wall_clock(*START_TIME_AS_DURATION.get().unwrap());
 }
 
 impl SystemTime {
@@ -40,11 +41,8 @@ impl SystemTime {
 
     /// Returns the current system time
     pub(crate) fn now() -> Self {
-        // The get real time result should always be valid
-        START_TIME
-            .get()
-            .unwrap()
-            .checked_add(read_monotonic_time())
+        SystemTime::UNIX_EPOCH
+            .checked_add(aster_time::read_wall_time())
             .unwrap()
     }
 
