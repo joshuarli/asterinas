@@ -3,11 +3,8 @@
 use aster_bigtcp::iface::{FrameDirection, FrameKind, LinkFrame, LinkTap};
 use aster_softirq::BottomHalfDisabled;
 
-use super::{ETHERNET_HEADER_LEN, ETH_P_ALL, PacketSocketAddr, PacketType};
+use super::{ETH_P_ALL, PACKET_DEFAULT_BUF_SIZE, PacketSocketAddr, PacketType, options::PacketStatistics};
 use crate::{events::IoEvents, prelude::*, process::signal::Pollee};
-
-/// The number of frame bytes that a packet socket queues before it drops frames.
-const RECEIVE_CAPACITY: usize = 212992;
 
 /// The selection and the receive queue of a packet socket.
 ///
@@ -25,6 +22,9 @@ struct TapState {
     error: Option<Errno>,
     queue: VecDeque<ReceivedFrame>,
     queued_bytes: usize,
+    capacity: usize,
+    ignore_outgoing: bool,
+    statistics: PacketStatistics,
 }
 
 struct ReceivedFrame {
@@ -78,6 +78,9 @@ impl PacketTap {
                 error: None,
                 queue: VecDeque::new(),
                 queued_bytes: 0,
+                capacity: PACKET_DEFAULT_BUF_SIZE,
+                ignore_outgoing: false,
+                statistics: PacketStatistics::default(),
             }),
         })
     }
@@ -114,6 +117,36 @@ impl PacketTap {
             drop(state);
             self.pollee.notify(IoEvents::ERR);
         }
+    }
+
+    /// Sets the number of frame bytes that the receive queue holds before it drops frames.
+    pub(super) fn set_capacity(&self, capacity: usize) {
+        self.state.lock().capacity = capacity;
+    }
+
+    pub(super) fn ignore_outgoing(&self) -> bool {
+        self.state.lock().ignore_outgoing
+    }
+
+    pub(super) fn set_ignore_outgoing(&self, ignore: bool) {
+        self.state.lock().ignore_outgoing = ignore;
+    }
+
+    /// Reports the counters and starts them again, like `PACKET_STATISTICS`.
+    pub(super) fn take_statistics(&self) -> PacketStatistics {
+        let mut state = self.state.lock();
+        let statistics = core::mem::take(&mut state.statistics);
+        PacketStatistics {
+            packets: statistics.packets.wrapping_add(statistics.drops),
+            drops: statistics.drops,
+        }
+    }
+
+    /// Takes the pending error, like reading `SO_ERROR`.
+    pub(super) fn take_error(&self) -> Option<Errno> {
+        let error = self.state.lock().error.take();
+        self.pollee.invalidate();
+        error
     }
 
     /// Takes the next frame, or the pending error, from the receive queue.
@@ -163,7 +196,7 @@ impl LinkTap for PacketTap {
         state.running
             && match direction {
                 FrameDirection::Incoming => state.protocol == ETH_P_ALL || state.protocol == ethertype,
-                FrameDirection::Outgoing => state.protocol == ETH_P_ALL,
+                FrameDirection::Outgoing => state.protocol == ETH_P_ALL && !state.ignore_outgoing,
             }
     }
 
@@ -172,9 +205,11 @@ impl LinkTap for PacketTap {
         if state.ifindex != 0 && state.ifindex as u32 != frame.iface_index {
             return;
         }
-        if state.queued_bytes + frame.bytes.len() > RECEIVE_CAPACITY {
+        if state.queued_bytes + frame.bytes.len() > state.capacity {
+            state.statistics.drops = state.statistics.drops.wrapping_add(1);
             return;
         }
+        state.statistics.packets = state.statistics.packets.wrapping_add(1);
 
         let packet_type = match frame.kind {
             FrameKind::Host => PacketType::Host,

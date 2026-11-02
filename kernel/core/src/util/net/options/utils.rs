@@ -8,6 +8,7 @@ use crate::{
     context::current_userspace,
     net::socket::{
         ip::{options::IpTtl, stream_options::CongestionControl},
+        packet::options::PacketStatistics,
         unix::CUserCred,
         util::{LingerOption, SocketTimeout},
     },
@@ -198,6 +199,12 @@ impl WriteToUser for SockType {
 }
 
 impl WriteToUser for CUserCred {
+    fn write_to_user(&self, addr: Vaddr, max_len: u32) -> Result<usize> {
+        write_partial_pod(self, addr, max_len)
+    }
+}
+
+impl WriteToUser for PacketStatistics {
     fn write_to_user(&self, addr: Vaddr, max_len: u32) -> Result<usize> {
         write_partial_pod(self, addr, max_len)
     }

@@ -10,6 +10,9 @@
 #include <linux/if_addr.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
+#ifndef PACKET_IGNORE_OUTGOING
+#define PACKET_IGNORE_OUTGOING 23
+#endif
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <poll.h>
@@ -331,6 +334,54 @@ FN_TEST(a_blocking_socket_sends)
 			sizeof(address)),
 		 _ret == (ssize_t)length);
 	TEST_SUCC(close(sender));
+}
+END_TEST()
+
+FN_TEST(ignoring_outgoing_frames_hides_the_outgoing_copy)
+{
+	unsigned char frame[FRAME_SIZE];
+	size_t length = build_frame(frame, "quiet");
+	int kinds[4];
+	int sender = TEST_SUCC(open_packet(SOCK_RAW, 0, loopback));
+	int everything = TEST_SUCC(open_packet(SOCK_RAW, ETH_P_ALL, loopback));
+	int one = 1;
+
+	TEST_SUCC(setsockopt(everything, SOL_PACKET, PACKET_IGNORE_OUTGOING, &one,
+			     sizeof(one)));
+	TEST_SUCC(drain_receiver());
+	TEST_RES(send(sender, frame, length, 0), _ret == (ssize_t)length);
+	TEST_RES(collect_frames(everything, kinds, 4), _ret == 1);
+	TEST_RES(kinds[0], _ret == PACKET_HOST);
+	TEST_SUCC(close(sender));
+	TEST_SUCC(close(everything));
+}
+END_TEST()
+
+FN_TEST(a_full_receive_queue_drops_frames_and_counts_them)
+{
+	unsigned char frame[FRAME_SIZE];
+	size_t length = build_frame(frame, "flood");
+	struct tpacket_stats statistics;
+	socklen_t statistics_length = sizeof(statistics);
+	int kinds[512];
+	int small = 2304;
+	int sender = TEST_SUCC(open_packet(SOCK_RAW, 0, loopback));
+	int watcher = TEST_SUCC(open_packet(SOCK_RAW, ETH_P_IP, loopback));
+
+	TEST_SUCC(setsockopt(watcher, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small)));
+	TEST_SUCC(drain_receiver());
+	for (int count = 0; count < 300; count++)
+		TEST_RES(send(sender, frame, length, 0), _ret == (ssize_t)length);
+	TEST_RES(collect_frames(watcher, kinds, 512), _ret > 0 && _ret < 300);
+	TEST_SUCC(getsockopt(watcher, SOL_PACKET, PACKET_STATISTICS, &statistics,
+			     &statistics_length));
+	TEST_RES(statistics.tp_packets, _ret == 300);
+	TEST_RES(statistics.tp_drops, _ret > 0 && _ret < 300);
+	TEST_SUCC(getsockopt(watcher, SOL_PACKET, PACKET_STATISTICS, &statistics,
+			     &statistics_length));
+	TEST_RES(statistics.tp_packets, _ret == 0);
+	TEST_SUCC(close(sender));
+	TEST_SUCC(close(watcher));
 }
 END_TEST()
 

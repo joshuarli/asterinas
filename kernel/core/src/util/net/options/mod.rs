@@ -53,11 +53,13 @@
 
 use ip::new_ip_option;
 use netlink::new_netlink_option;
+use packet::new_packet_option;
 
 use crate::{net::socket::options::SocketOption, prelude::*};
 
 mod ip;
 mod netlink;
+mod packet;
 mod socket;
 mod tcp;
 mod utils;
@@ -171,6 +173,7 @@ pub(crate) fn new_raw_socket_option(
         CSocketOptionLevel::SOL_IP => new_ip_option(name),
         CSocketOptionLevel::SOL_TCP => new_tcp_option(name),
         CSocketOptionLevel::SOL_NETLINK => new_netlink_option(name),
+        CSocketOptionLevel::SOL_PACKET => new_packet_option(name),
         _ => return_errno_with_message!(Errno::EOPNOTSUPP, "unsupported option level"),
     }
 }
@@ -190,5 +193,6 @@ pub(crate) enum CSocketOptionLevel {
     SOL_UDP = 17,
     SOL_IPV6 = 41,
     SOL_RAW = 255,
+    SOL_PACKET = 263,
     SOL_NETLINK = 270,
 }

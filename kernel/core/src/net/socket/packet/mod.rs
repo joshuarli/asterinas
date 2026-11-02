@@ -12,6 +12,7 @@
 //! (`ETH_P_ALL`) sees the frames that the host sends.
 
 mod addr;
+pub(crate) mod options;
 mod tap;
 
 pub(crate) use addr::{MAX_LINK_ADDR_LEN, PacketSocketAddr, PacketType};
@@ -19,6 +20,7 @@ use aster_bigtcp::{
     errors::LinkSendError,
     iface::{InterfaceFlags, LinkTap},
 };
+use options::{IgnoreOutgoing, Statistics};
 use tap::PacketTap;
 
 use crate::{
@@ -29,9 +31,16 @@ use crate::{
         socket::{
             Socket, new_socket_common,
             private::SocketPrivate,
+            options::{
+                Error as SocketError, SocketOption,
+                macros::{sock_option_mut, sock_option_ref},
+            },
             util::{
                 MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
-                options::check_current_net_raw,
+                options::{
+                    GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
+                    check_current_net_raw,
+                },
             },
         },
     },
@@ -43,10 +52,15 @@ use crate::{
 const ETH_P_ALL: u16 = 0x0003;
 const ETHERNET_HEADER_LEN: usize = 14;
 
+/// The default size of the receive queue in bytes.
+pub(in crate::net) const PACKET_DEFAULT_BUF_SIZE: usize = 212992;
+
 pub(crate) struct PacketSocket {
     tap: Arc<PacketTap>,
     registered: Mutex<Vec<Arc<Iface>>>,
     socket_type: SockType,
+    socket_options: RwLock<SocketOptionSet>,
+    timeouts: SocketTimeouts,
 
     pollee: Pollee,
     common: FileCommon,
@@ -71,6 +85,8 @@ impl PacketSocket {
             tap: PacketTap::new(pollee.clone(), protocol),
             registered: Mutex::new(Vec::new()),
             socket_type,
+            socket_options: RwLock::new(SocketOptionSet::new_packet()),
+            timeouts: SocketTimeouts::new(),
             pollee,
             common: new_socket_common(is_nonblocking),
         });
@@ -279,14 +295,84 @@ impl Socket for PacketSocket {
         let (output, addr) = if flags.contains(RecvFlags::MSG_DONTWAIT) {
             self.try_recv(writer, flags)?
         } else {
-            self.block_on(IoEvents::IN, None, || self.try_recv(writer, flags))?
+            self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
+                self.try_recv(writer, flags)
+            })?
         };
 
         Ok((output, MessageHeader::new(Some(addr.into()), Vec::new())))
     }
 
+    fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
+        sock_option_mut!(match option {
+            socket_errors @ SocketError => {
+                socket_errors.set(self.tap.take_error().map(Error::new));
+                return Ok(());
+            }
+            ignore_outgoing @ IgnoreOutgoing => {
+                ignore_outgoing.set(self.tap.ignore_outgoing());
+                return Ok(());
+            }
+            statistics @ Statistics => {
+                statistics.set(self.tap.take_statistics());
+                return Ok(());
+            }
+            _ => (),
+        });
+
+        let level = SocketLevel {
+            socket_type: self.socket_type,
+            timeouts: &self.timeouts,
+        };
+        self.socket_options.read().get_option(option, &level)
+    }
+
+    fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
+        sock_option_ref!(match option {
+            ignore_outgoing @ IgnoreOutgoing => {
+                self.tap.set_ignore_outgoing(*ignore_outgoing.get().unwrap());
+                return Ok(());
+            }
+            _ => (),
+        });
+
+        let level = SocketLevel {
+            socket_type: self.socket_type,
+            timeouts: &self.timeouts,
+        };
+        let mut options = self.socket_options.write();
+        options.set_option(option, &level)?;
+        self.tap.set_capacity(options.recv_buf() as usize);
+        Ok(())
+    }
+
     fn common(&self) -> &FileCommon {
         &self.common
+    }
+}
+
+struct SocketLevel<'a> {
+    socket_type: SockType,
+    timeouts: &'a SocketTimeouts,
+}
+
+impl GetSocketLevelOption for SocketLevel<'_> {
+    fn socket_type(&self) -> SockType {
+        self.socket_type
+    }
+
+    fn is_listening(&self) -> bool {
+        false
+    }
+
+    fn socket_timeouts(&self) -> Option<&SocketTimeouts> {
+        Some(self.timeouts)
+    }
+}
+
+impl SetSocketLevelOption for SocketLevel<'_> {
+    fn socket_timeouts(&self) -> Option<&SocketTimeouts> {
+        Some(self.timeouts)
     }
 }
 

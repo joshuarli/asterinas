@@ -14,6 +14,7 @@ use super::{LingerOption, SocketTimeout};
 use crate::{
     net::socket::{
         netlink::NETLINK_DEFAULT_BUF_SIZE,
+        packet::PACKET_DEFAULT_BUF_SIZE,
         options::{
             AcceptConn, Broadcast, KeepAlive, Linger, PassCred, PeerCred, PeerGroups, Priority,
             RecvBuf, RecvBufForce, RecvTimeout, RecvTimestamp, RecvTimestampNs, ReuseAddr,
@@ -98,6 +99,15 @@ impl SocketOptionSet {
         Self {
             send_buf: UNIX_DATAGRAM_DEFAULT_BUF_SIZE as u32,
             recv_buf: UNIX_DATAGRAM_DEFAULT_BUF_SIZE as u32,
+            ..Default::default()
+        }
+    }
+
+    /// Returns the default socket level options for packet socket.
+    pub(in crate::net) fn new_packet() -> Self {
+        Self {
+            send_buf: PACKET_DEFAULT_BUF_SIZE as u32,
+            recv_buf: PACKET_DEFAULT_BUF_SIZE as u32,
             ..Default::default()
         }
     }
