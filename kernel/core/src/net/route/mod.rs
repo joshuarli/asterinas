@@ -7,8 +7,8 @@
 //! or select an output interface when connecting an unbound socket.
 
 use aster_bigtcp::{
-    iface::InterfaceType,
-    wire::{IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
+    iface::{InterfaceFlags, InterfaceType},
+    wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
 };
 use spin::Once;
 
@@ -28,8 +28,8 @@ mod table;
 
 use entry::{RouteAddressFamily, RouteEntry, RouteMetric, RouteOrigin, RouteTableId};
 
-static IPV4_ROUTE_MANAGER: Once<RouteManager<Ipv4Address>> = Once::new();
-static IPV6_ROUTE_MANAGER: Once<RouteManager<Ipv6Address>> = Once::new();
+static IPV4_ROUTE_MANAGER: Once<RwMutex<RouteManager<Ipv4Address>>> = Once::new();
+static IPV6_ROUTE_MANAGER: Once<RwMutex<RouteManager<Ipv6Address>>> = Once::new();
 
 /// A route lookup key for one address family.
 #[derive(Clone, Debug)]
@@ -59,27 +59,27 @@ pub(super) fn init() {
         let routes = iface::iter_all_ifaces()
             .flat_map(iface_ipv4_routes)
             .collect();
-        RouteManager::new(
+        RwMutex::new(RouteManager::new(
             &[
                 Rule::lookup(LOCAL_RULE_PRIORITY, RouteTableId::LOCAL),
                 Rule::lookup(MAIN_RULE_PRIORITY, RouteTableId::MAIN),
                 Rule::lookup(DEFAULT_RULE_PRIORITY, RouteTableId::DEFAULT),
             ],
             routes,
-        )
+        ))
     });
 
     IPV6_ROUTE_MANAGER.call_once(|| {
         let routes = iface::iter_all_ifaces()
             .flat_map(iface_ipv6_routes)
             .collect();
-        RouteManager::new(
+        RwMutex::new(RouteManager::new(
             &[
                 Rule::lookup(LOCAL_RULE_PRIORITY, RouteTableId::LOCAL),
                 Rule::lookup(MAIN_RULE_PRIORITY, RouteTableId::MAIN),
             ],
             routes,
-        )
+        ))
     });
 }
 
@@ -147,32 +147,19 @@ fn iface_ipv4_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv4Address>> {
         }
     }
 
-    // Currently, an interface's internal routing table
-    // only contains an IPv4 default route (`0.0.0.0/0 via gateway`)
-    // configured for an Ethernet interface.
-    // Import such a route into the global main table as the default route.
-    for route in iface.routes() {
-        let (IpCidr::Ipv4(dst), IpAddress::Ipv4(gateway)) = (route.cidr, route.via_router) else {
-            continue;
-        };
-        let entry = RouteEntry::new(
-            dst,
-            Some(gateway),
-            iface.clone(),
-            RouteTableId::MAIN,
-            RouteMetric::default(),
-            RouteType::Unicast,
-            RouteOrigin {
-                protocol: RouteProtocol::Boot,
-                scope: RouteScope::Universe,
-                preferred_source: None,
-            },
-        )
-        .unwrap();
-        routes.push(entry);
-    }
+    retain_routes_valid_while_down(iface, &mut routes);
 
     routes
+}
+
+/// Keeps only the routes that deliver to the host itself when the interface is down.
+fn retain_routes_valid_while_down<A: RouteAddressFamily>(
+    iface: &Arc<Iface>,
+    routes: &mut Vec<RouteEntry<A>>,
+) {
+    if !iface.flags().contains(InterfaceFlags::UP) {
+        routes.retain(|route| route.origin().scope == RouteScope::Host);
+    }
 }
 
 fn kernel_origin<A: RouteAddressFamily>(scope: RouteScope, preferred_source: A) -> RouteOrigin<A> {
@@ -210,6 +197,7 @@ fn iface_ipv6_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv6Address>> {
     )
     .unwrap();
     routes.push(entry);
+    retain_routes_valid_while_down(iface, &mut routes);
 
     // TODO: Add a main-table route for the connected network of a non-loopback interface.
     // IPv6 doesn't seem to have a connected network(like `127.0.0.0/8` for IPv4)
@@ -221,18 +209,40 @@ fn iface_ipv6_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv6Address>> {
     routes
 }
 
+/// Recomputes the routes of an interface after its link state changed.
+///
+/// Bringing an interface down removes the routes through it that leave the host, as Linux does:
+/// the connected network, broadcast and gateway routes, and every route that user space
+/// installed. The routes that deliver to the host's own addresses stay. Bringing the interface up
+/// restores the routes the kernel derives from its addresses.
+pub(super) fn sync_iface_routes(iface: &Arc<Iface>) {
+    let up = iface.flags().contains(InterfaceFlags::UP);
+    IPV4_ROUTE_MANAGER
+        .get()
+        .unwrap()
+        .write()
+        .replace_iface_routes(iface.index(), up, iface_ipv4_routes(iface));
+    IPV6_ROUTE_MANAGER
+        .get()
+        .unwrap()
+        .write()
+        .replace_iface_routes(iface.index(), up, iface_ipv6_routes(iface));
+}
+
 /// Looks up the output interface for an IP destination.
 pub(super) fn lookup_iface(dst: IpAddress) -> Result<Arc<Iface>> {
     let iface = match dst {
         IpAddress::Ipv4(dst) => IPV4_ROUTE_MANAGER
             .get()
             .unwrap()
+            .read()
             .lookup_entry(&RouteLookupKey::new(dst))?
             .output_iface()
             .clone(),
         IpAddress::Ipv6(dst) => IPV6_ROUTE_MANAGER
             .get()
             .unwrap()
+            .read()
             .lookup_entry(&RouteLookupKey::new(dst))?
             .output_iface()
             .clone(),
@@ -247,6 +257,7 @@ pub(super) fn lookup_local_iface(address: IpAddress) -> Result<Arc<Iface>> {
             let entry = IPV4_ROUTE_MANAGER
                 .get()
                 .unwrap()
+                .read()
                 .lookup_in_local_table(&RouteLookupKey::new(address))
                 .ok_or_else(|| {
                     Error::with_message(
@@ -260,6 +271,7 @@ pub(super) fn lookup_local_iface(address: IpAddress) -> Result<Arc<Iface>> {
             let entry = IPV6_ROUTE_MANAGER
                 .get()
                 .unwrap()
+                .read()
                 .lookup_in_local_table(&RouteLookupKey::new(address))
                 .ok_or_else(|| {
                     Error::with_message(
@@ -296,6 +308,7 @@ pub(super) fn is_broadcast_endpoint(endpoint: &IpEndpoint) -> bool {
         || IPV4_ROUTE_MANAGER
             .get()
             .unwrap()
+            .read()
             .lookup_entry(&RouteLookupKey::new(address))
             .is_ok_and(|entry| entry.type_() == RouteType::Broadcast)
 }

@@ -8,7 +8,7 @@ use crate::{
 
 /// Policy-rule attributes.
 ///
-/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/fib_rules.h#L26>.
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/fib_rules.h>.
 #[expect(non_camel_case_types)]
 #[expect(clippy::upper_case_acronyms)]
 #[repr(u16)]

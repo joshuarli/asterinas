@@ -40,7 +40,7 @@ pub struct IfaceCommon<E: Ext> {
     index: u32,
     name: InterfaceName,
     type_: InterfaceType,
-    flags: InterfaceFlags,
+    flags: AtomicU32,
 
     interface: SpinLock<PollableIface<E>, BottomHalfDisabled>,
     used_ports: SpinLock<PortTable, BottomHalfDisabled>,
@@ -116,7 +116,7 @@ impl<E: Ext> IfaceCommon<E> {
             index,
             name,
             type_,
-            flags,
+            flags: AtomicU32::new(flags.bits()),
             interface: SpinLock::new(PollableIface::new(interface)),
             used_ports: SpinLock::new(PortTable::new()),
             sockets: SpinLock::new(SocketTable::new()),
@@ -137,7 +137,16 @@ impl<E: Ext> IfaceCommon<E> {
     }
 
     pub(super) fn flags(&self) -> InterfaceFlags {
-        self.flags
+        InterfaceFlags::from_bits_truncate(self.flags.load(Ordering::Relaxed))
+    }
+
+    pub(super) fn set_administratively_up(&self, up: bool) {
+        let link_up_flags = (InterfaceFlags::UP | InterfaceFlags::RUNNING | InterfaceFlags::LOWER_UP).bits();
+        if up {
+            self.flags.fetch_or(link_up_flags, Ordering::Relaxed);
+        } else {
+            self.flags.fetch_and(!link_up_flags, Ordering::Relaxed);
+        }
     }
 
     pub(super) fn ipv4_cidr(&self) -> Option<Ipv4Cidr> {
@@ -255,6 +264,11 @@ impl<E: Ext> IfaceCommon<E> {
     fn do_poll(&self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) -> Option<u64> {
         let mut interface = self.interface();
         interface.context_mut().now = get_network_timestamp();
+
+        if !self.flags().contains(InterfaceFlags::UP) {
+            while device.receive().is_ok() {}
+            return None;
+        }
 
         let mut sockets = self.sockets.lock();
         let mut socket_actions = Vec::new();

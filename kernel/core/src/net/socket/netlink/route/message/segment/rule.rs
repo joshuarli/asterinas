@@ -18,7 +18,7 @@ impl SegmentBody for RuleSegmentBody {
 
 /// `fib_rule_hdr` in Linux.
 ///
-/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/fib_rules.h#L16>.
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/fib_rules.h>.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(crate) struct CFibRuleHdr {

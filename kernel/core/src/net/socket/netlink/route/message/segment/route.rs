@@ -18,7 +18,7 @@ impl SegmentBody for RouteSegmentBody {
 
 /// `rtmsg` in Linux.
 ///
-/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L237>.
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h>.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(crate) struct CRtMsg {

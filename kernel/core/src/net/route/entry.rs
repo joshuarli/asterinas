@@ -19,7 +19,7 @@ pub(super) struct RouteEntry<A: RouteAddressFamily> {
 
 /// Where a route came from and how it reaches its destination.
 ///
-/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L276>.
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h>.
 #[derive(Clone, Copy)]
 pub(super) struct RouteOrigin<A: RouteAddressFamily> {
     pub(super) protocol: RouteProtocol,
@@ -174,7 +174,7 @@ impl RouteMetric {
 
 /// The protocol that installed a route.
 ///
-/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L276>.
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h>.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::net) enum RouteProtocol {
     /// Installed by the kernel.
@@ -185,7 +185,7 @@ pub(in crate::net) enum RouteProtocol {
 
 /// The distance to the destination of a route.
 ///
-/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L320>.
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h>.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::net) enum RouteScope {
     /// Reachable through a gateway.
@@ -198,7 +198,7 @@ pub(in crate::net) enum RouteScope {
 
 /// The forwarding behavior of a route.
 ///
-/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L261>.
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h>.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::net) enum RouteType {
     /// Forwards packets to a destination.

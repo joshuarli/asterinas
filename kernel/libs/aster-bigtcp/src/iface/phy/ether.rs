@@ -8,7 +8,7 @@ use smoltcp::{
     iface::{Config, Context},
     wire::{
         self, ArpOperation, ArpRepr, EthernetAddress, EthernetProtocol, EthernetRepr, IpAddress,
-        Ipv4Address, Ipv4AddressExt, Ipv4Cidr,
+        Ipv4Address, Ipv4AddressExt,
     },
 };
 
@@ -36,8 +36,6 @@ impl<D: WithDevice, E: Ext> EtherIface<D, E> {
     pub fn new(
         driver: D,
         ether_addr: EthernetAddress,
-        ip_cidr: Ipv4Cidr,
-        gateway: Ipv4Address,
         name: InterfaceName,
         sched_poll: E::ScheduleNextPoll,
         flags: InterfaceFlags,
@@ -46,16 +44,7 @@ impl<D: WithDevice, E: Ext> EtherIface<D, E> {
             let config = Config::new(wire::HardwareAddress::Ethernet(ether_addr));
             let now = get_network_timestamp();
 
-            let mut interface = new_interface(config, device.capabilities(), now);
-            interface.update_ip_addrs(|ip_addrs| {
-                debug_assert!(ip_addrs.is_empty());
-                ip_addrs.push(wire::IpCidr::Ipv4(ip_cidr)).unwrap();
-            });
-            interface
-                .routes_mut()
-                .add_default_ipv4_route(gateway)
-                .unwrap();
-            interface
+            new_interface(config, device.capabilities(), now)
         });
 
         let common = IfaceCommon::new(name, InterfaceType::ETHER, flags, interface, sched_poll);

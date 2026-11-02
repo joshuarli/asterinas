@@ -80,6 +80,13 @@ impl<E: Ext> dyn Iface<E> {
         self.common().flags()
     }
 
+    /// Brings the interface up or down.
+    ///
+    /// A down interface drops the packets it receives and sends none.
+    pub fn set_administratively_up(&self, up: bool) {
+        self.common().set_administratively_up(up)
+    }
+
     // FIXME: Linux and smoltcp allow multiple IP CIDRs per interface, while the
     // address-related APIs below only account for the first CIDR of each family.
 

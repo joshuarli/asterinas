@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{
-    RouteAddressFamily, RouteEntry, RouteLookupKey, RouteTableId,
+    RouteAddressFamily, RouteEntry, RouteLookupKey, RouteProtocol, RouteTableId,
     rule::{Rule, RuleAction, RulePriority},
     table::RouteTable,
 };
@@ -27,10 +27,37 @@ impl<A: RouteAddressFamily> RouteManager<A> {
 
         for route in routes {
             let table_id = route.table_id();
-            tables.get_mut(&table_id).unwrap().insert(route);
+            tables
+                .entry(table_id)
+                .or_insert_with(RouteTable::new)
+                .insert(route);
         }
 
         Self { rules, tables }
+    }
+
+    /// Replaces the routes of an interface.
+    ///
+    /// The kernel-derived routes of the interface are replaced by `derived_routes`. Routes that
+    /// user space installed through the interface are kept only if `keep_user_routes` is set.
+    pub(super) fn replace_iface_routes(
+        &mut self,
+        iface_index: u32,
+        keep_user_routes: bool,
+        derived_routes: Vec<RouteEntry<A>>,
+    ) {
+        for table in self.tables.values_mut() {
+            table.retain(|entry| {
+                entry.output_iface().index() != iface_index
+                    || (keep_user_routes && entry.origin().protocol != RouteProtocol::Kernel)
+            });
+        }
+        for route in derived_routes {
+            self.tables
+                .entry(route.table_id())
+                .or_insert_with(RouteTable::new)
+                .insert(route);
+        }
     }
 
     pub(super) fn entries(&self) -> impl Iterator<Item = &RouteEntry<A>> {

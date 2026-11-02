@@ -10,7 +10,7 @@ use crate::{
 
 /// Route-related attributes.
 ///
-/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L381>.
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h>.
 #[expect(non_camel_case_types)]
 #[expect(clippy::upper_case_acronyms)]
 #[repr(u16)]

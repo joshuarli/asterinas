@@ -42,10 +42,10 @@ pub(in crate::net) struct RuleRecord {
 pub(in crate::net) fn dump_routes(ipv4: bool, ipv6: bool) -> Vec<RouteRecord> {
     let mut records = Vec::new();
     if ipv4 {
-        records.extend(manager_records(IPV4_ROUTE_MANAGER.get().unwrap()));
+        records.extend(manager_records(&IPV4_ROUTE_MANAGER.get().unwrap().read()));
     }
     if ipv6 {
-        records.extend(manager_records(IPV6_ROUTE_MANAGER.get().unwrap()));
+        records.extend(manager_records(&IPV6_ROUTE_MANAGER.get().unwrap().read()));
     }
     records
 }
@@ -54,10 +54,10 @@ pub(in crate::net) fn dump_routes(ipv4: bool, ipv6: bool) -> Vec<RouteRecord> {
 pub(in crate::net) fn dump_rules(ipv4: bool, ipv6: bool) -> Vec<RuleRecord> {
     let mut records = Vec::new();
     if ipv4 {
-        records.extend(manager_rules(IPV4_ROUTE_MANAGER.get().unwrap(), true));
+        records.extend(manager_rules(&IPV4_ROUTE_MANAGER.get().unwrap().read(), true));
     }
     if ipv6 {
-        records.extend(manager_rules(IPV6_ROUTE_MANAGER.get().unwrap(), false));
+        records.extend(manager_rules(&IPV6_ROUTE_MANAGER.get().unwrap().read(), false));
     }
     records
 }

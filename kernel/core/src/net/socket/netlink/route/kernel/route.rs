@@ -68,8 +68,8 @@ fn record_to_new_route(request_header: &CMsgSegHdr, record: &RouteRecord) -> Rou
     // `RTA_TABLE`, `RTA_DST`, `RTA_PRIORITY`, `RTA_PREFSRC`, `RTA_GATEWAY`, `RTA_OIF` for IPv4,
     // and `RTA_TABLE`, `RTA_DST`, `RTA_PRIORITY`, `RTA_GATEWAY`, `RTA_OIF`,
     // `RTA_CACHEINFO`, `RTA_PREF` for IPv6.
-    // Reference: <https://elixir.bootlin.com/linux/v7.1/source/net/ipv4/fib_semantics.c#L1744>
-    // and <https://elixir.bootlin.com/linux/v7.1/source/net/ipv6/route.c#L5800>.
+    // Reference: <https://elixir.bootlin.com/linux/v7.1/source/net/ipv4/fib_semantics.c>
+    // and <https://elixir.bootlin.com/linux/v7.1/source/net/ipv6/route.c>.
     let mut attrs = vec![RouteAttr::Table(record.table)];
     if record.destination_prefix_len > 0 {
         attrs.push(RouteAttr::Dst(record.destination));

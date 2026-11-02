@@ -66,7 +66,7 @@ fn record_to_new_rule(request_header: &CMsgSegHdr, record: &RuleRecord) -> RuleS
         action: ACTION_TO_TABLE,
     };
 
-    // Reference: <https://elixir.bootlin.com/linux/v7.1/source/net/core/fib_rules.c#L1086>.
+    // Reference: <https://elixir.bootlin.com/linux/v7.1/source/net/core/fib_rules.c>.
     let mut attrs = vec![
         RuleAttr::Table(table),
         RuleAttr::SuppressPrefixLen(NO_SUPPRESSED_PREFIX_LEN),

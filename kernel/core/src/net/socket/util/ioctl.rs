@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
-    iface::{InterfaceName, InterfaceType},
+    iface::{InterfaceFlags, InterfaceName, InterfaceType},
     wire::{EthernetAddress, Ipv4Address},
 };
 use ostd::task::Task;
@@ -10,7 +10,8 @@ use crate::{
     dispatch_ioctl,
     net::{
         iface::{DEFAULT_TX_QUEUE_LEN, Iface, iter_all_ifaces},
-        socket::Socket,
+        route,
+        socket::{Socket, util::options::check_current_privileged},
     },
     prelude::*,
     util::{ioctl::RawIoctl, net::CSocketAddrFamily},
@@ -24,6 +25,7 @@ mod ioctl_defs {
     pub(super) type GetIfName       = ioc!(SIOCGIFNAME,     0x8910, InOutData<CIfReq>);
     pub(super) type GetIfConf       = ioc!(SIOCGIFCONF,     0x8912, InOutData<CIfConf>);
     pub(super) type GetIfFlags      = ioc!(SIOCGIFFLAGS,    0x8913, InOutData<CIfReq>);
+    pub(super) type SetIfFlags      = ioc!(SIOCSIFFLAGS,    0x8914, InOutData<CIfReq>);
     pub(super) type GetIfMetric     = ioc!(SIOCGIFMETRIC,   0x891D, InOutData<CIfReq>);
     pub(super) type GetIfMtu        = ioc!(SIOCGIFMTU,      0x8921, InOutData<CIfReq>);
     pub(super) type GetIfHwAddr     = ioc!(SIOCGIFHWADDR,   0x8927, InOutData<CIfReq>);
@@ -80,6 +82,12 @@ fn network_device_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
             cmd.write(&ifreq)?;
             Ok(0)
         }
+        cmd @ SetIfFlags => {
+            check_current_privileged()?;
+            let ifreq = cmd.read()?;
+            set_iface_flags(&ifreq)?;
+            Ok(0)
+        }
         cmd @ GetIfMetric => {
             let mut ifreq = cmd.read()?;
             ifreq.get_iface_by_name()?;
@@ -120,6 +128,45 @@ fn network_device_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
         }
         _ => return_errno_with_message!(Errno::ENOTTY, "the socket ioctl command is unknown"),
     })
+}
+
+/// Flags that user space can request to change on a Linux network device.
+///
+/// Reference: `dev_change_flags` in <https://elixir.bootlin.com/linux/v7.1/source/net/core/dev.c>.
+const USER_CHANGEABLE_FLAGS: InterfaceFlags = InterfaceFlags::UP
+    .union(InterfaceFlags::DEBUG)
+    .union(InterfaceFlags::NOTRAILERS)
+    .union(InterfaceFlags::NOARP)
+    .union(InterfaceFlags::DYNAMIC)
+    .union(InterfaceFlags::MULTICAST)
+    .union(InterfaceFlags::PORTSEL)
+    .union(InterfaceFlags::AUTOMEDIA)
+    .union(InterfaceFlags::PROMISC)
+    .union(InterfaceFlags::ALLMULTI);
+
+/// Applies the requested flags of `SIOCSIFFLAGS`.
+///
+/// Only `IFF_UP` can change; a request that changes any other user-changeable flag fails
+/// instead of being ignored.
+fn set_iface_flags(ifreq: &CIfReq) -> Result<()> {
+    let mut ifreq = *ifreq;
+    let iface = ifreq.get_iface_by_name()?;
+    let requested = InterfaceFlags::from_bits_truncate(u32::from(*ifreq.data.flags() as u16));
+    let current = iface.flags();
+
+    let changed = (requested ^ current) & USER_CHANGEABLE_FLAGS;
+    if !(changed - InterfaceFlags::UP).is_empty() {
+        return_errno_with_message!(
+            Errno::EOPNOTSUPP,
+            "only the up flag of an interface can be changed"
+        );
+    }
+    if changed.contains(InterfaceFlags::UP) {
+        iface.set_administratively_up(requested.contains(InterfaceFlags::UP));
+        route::sync_iface_routes(iface);
+    }
+
+    Ok(())
 }
 
 /// `struct ifconf` in Linux.

@@ -26,6 +26,10 @@ impl<A: RouteAddressFamily> RouteTable<A> {
         self.entries.insert((*entry.dst(), entry.metric()), entry);
     }
 
+    pub(super) fn retain(&mut self, mut keep: impl FnMut(&RouteEntry<A>) -> bool) {
+        self.entries.retain(|_, entry| keep(entry));
+    }
+
     pub(super) fn entries(&self) -> impl Iterator<Item = &RouteEntry<A>> {
         self.entries.values()
     }

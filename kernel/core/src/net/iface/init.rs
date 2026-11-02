@@ -97,14 +97,7 @@ fn new_loopback() -> Arc<Iface> {
 }
 
 fn new_virtio() -> Option<Arc<Iface>> {
-    use aster_bigtcp::{
-        iface::EtherIface,
-        wire::{Ipv4Address, Ipv4Cidr},
-    };
-
-    const VIRTIO_ADDRESS: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
-    const VIRTIO_ADDRESS_PREFIX_LEN: u8 = 24; // mask: 255.255.255.0
-    const VIRTIO_GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
+    use aster_bigtcp::iface::EtherIface;
 
     let virtio_net = aster_network::get_device(VIRTIO_DEVICE_NAME)?;
 
@@ -124,19 +117,13 @@ fn new_virtio() -> Option<Arc<Iface>> {
         }
     }
 
-    // FIXME: These flags are currently hardcoded.
-    // In the future, we should set appropriate values.
-    let flags = InterfaceFlags::UP
-        | InterfaceFlags::BROADCAST
-        | InterfaceFlags::RUNNING
-        | InterfaceFlags::MULTICAST
-        | InterfaceFlags::LOWER_UP;
+    // Like a Linux Ethernet device, the interface starts down and without any address or route.
+    // User space brings it up and configures it.
+    let flags = InterfaceFlags::BROADCAST | InterfaceFlags::MULTICAST;
 
     Some(EtherIface::new(
         Wrapper(virtio_net),
         ether_addr,
-        Ipv4Cidr::new(VIRTIO_ADDRESS, VIRTIO_ADDRESS_PREFIX_LEN),
-        VIRTIO_GATEWAY,
         InterfaceName::from_str_truncated("eth0"),
         PollScheduler::new(),
         flags,
