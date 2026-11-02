@@ -27,12 +27,12 @@ use super::{
     poll::{PollContext, SocketTableAction},
     poll_iface::PollableIface,
     port::BindPortConfig,
-    tap::{LinkTap, LinkTaps},
+    tap::{FrameDirection, LinkTap, LinkTaps},
     time::get_network_timestamp,
 };
 use crate::{
     device::{AnyNetworkDevice, WithDevice},
-    errors::{AddressTableFull, BindError, RouteTableFull},
+    errors::{AddressTableFull, BindError, LinkSendError, RouteTableFull},
     ext::Ext,
     iface::ScheduleNextPoll,
     packet::{FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TxPacket},
@@ -90,6 +90,9 @@ pub(super) trait PollPhy {
 
     /// Copies a link-layer frame, adding an Ethernet header if the link has none.
     fn copy_ethernet_frame(&self, frame: VmReader<'_, Infallible>) -> Vec<u8>;
+
+    /// Takes a frame that was sent to the interface itself and has to be received again.
+    fn take_looped_frame(&self) -> Option<RxPacket<LinkLayer>>;
 }
 
 /// A normalized IP address for binding purposes.
@@ -168,6 +171,26 @@ impl<E: Ext> IfaceCommon<E> {
         if was_up != up {
             self.taps.link_changed(up);
         }
+    }
+
+    /// Fails unless the interface is up.
+    pub(in crate::iface) fn ensure_up(&self) -> Result<(), LinkSendError> {
+        if self.flags().contains(InterfaceFlags::UP) {
+            Ok(())
+        } else {
+            Err(LinkSendError::Down)
+        }
+    }
+
+    /// Hands an outgoing frame to the taps other than the one that sent it.
+    pub(in crate::iface) fn tap_outgoing(
+        &self,
+        phy: &dyn PollPhy,
+        origin: Option<&Arc<dyn LinkTap>>,
+        packet: &TxPacket<LinkLayer>,
+    ) {
+        self.taps
+            .deliver(phy, FrameDirection::Outgoing, origin, || packet.reader());
     }
 
     pub(super) fn add_link_tap(&self, tap: Arc<dyn LinkTap>) {
@@ -311,6 +334,7 @@ impl<E: Ext> IfaceCommon<E> {
 
         if !self.flags().contains(InterfaceFlags::UP) {
             while device.receive().is_ok() {}
+            while phy.take_looped_frame().is_some() {}
             return None;
         }
 
@@ -713,4 +737,16 @@ bitflags! {
         /// Echo sent packets
         const ECHO			    = 1<<18;
     }
+}
+
+/// Builds a link-layer packet holding `bytes`.
+pub(super) fn link_packet_from_bytes<D: AnyNetworkDevice>(
+    bytes: &[u8],
+) -> Result<TxPacket<LinkLayer>, LinkSendError> {
+    let mut builder = D::alloc_tx_buffer(bytes.len())
+        .map_err(|_| LinkSendError::NoMemory)?
+        .to_builder_at_layer::<LinkLayer>();
+    let written_len = builder.append_writer().write(&mut VmReader::from(bytes));
+    builder.commit(written_len);
+    Ok(builder.build())
 }

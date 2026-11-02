@@ -98,6 +98,7 @@ impl LinkTaps {
         &self,
         phy: &dyn PollPhy,
         direction: FrameDirection,
+        origin: Option<&Arc<dyn LinkTap>>,
         reader: impl Fn() -> VmReader<'a, Infallible>,
     ) {
         let taps = self.taps.lock();
@@ -110,6 +111,9 @@ impl LinkTaps {
 
         let mut bytes: Option<Vec<u8>> = None;
         for tap in taps.iter() {
+            if origin.is_some_and(|origin| Arc::ptr_eq(origin, tap)) {
+                continue;
+            }
             if !tap.accepts(direction, ethertype) {
                 continue;
             }

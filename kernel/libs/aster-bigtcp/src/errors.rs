@@ -9,6 +9,23 @@ pub enum BindError {
     InUse,
 }
 
+/// An error describing the reason why a link-layer frame could not be sent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkSendError {
+    /// The interface is down.
+    Down,
+    /// The frame is shorter than a link-layer header.
+    TooShort,
+    /// The frame is longer than the interface sends.
+    TooLong,
+    /// The interface cannot carry frames of this EtherType.
+    UnsupportedProtocol,
+    /// The device cannot take another frame now.
+    Busy,
+    /// There is no memory for the frame.
+    NoMemory,
+}
+
 /// An error returned when an interface cannot hold the requested IPv4 addresses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AddressTableFull;

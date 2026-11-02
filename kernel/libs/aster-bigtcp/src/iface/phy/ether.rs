@@ -17,10 +17,14 @@ use smoltcp::{
 
 use crate::{
     device::{AnyNetworkDevice, WithDevice, new_interface},
+    errors::LinkSendError,
     ext::Ext,
     iface::{
-        Iface, InterfaceFlags, InterfaceName,
-        common::{IfaceCommon, InterfaceType, PhyProcessResult, PollPhy, TxPacketWithDst},
+        Iface, InterfaceFlags, InterfaceName, LinkTap,
+        common::{
+            IfaceCommon, InterfaceType, PhyProcessResult, PollPhy, TxPacketWithDst,
+            link_packet_from_bytes,
+        },
         iface::internal::IfaceInternal,
         time::get_network_timestamp,
         wire::{arp, ether},
@@ -82,6 +86,31 @@ impl<D: WithDevice + 'static, E: Ext> Iface<E> for EtherIface<D, E> {
 
     fn flush_neighbors(&self) {
         self.arp_table.lock().clear();
+    }
+
+    fn send_link_frame(
+        &self,
+        frame: &[u8],
+        origin: Option<&Arc<dyn LinkTap>>,
+    ) -> Result<(), LinkSendError> {
+        const HEADER_LEN: usize = 14;
+
+        self.common.ensure_up()?;
+        if frame.len() < HEADER_LEN {
+            return Err(LinkSendError::TooShort);
+        }
+        if frame.len() > self.driver.with(|device| device.mtu()) + HEADER_LEN {
+            return Err(LinkSendError::TooLong);
+        }
+
+        let packet = link_packet_from_bytes::<D::Device>(frame)?;
+        self.driver.with(|device| {
+            if !device.can_send() {
+                return Err(LinkSendError::Busy);
+            }
+            self.common.tap_outgoing(self, origin, &packet);
+            device.send(packet).map_err(|_| LinkSendError::Busy)
+        })
     }
 }
 
@@ -148,6 +177,10 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
         let mut bytes = vec![0u8; frame.remain()];
         frame.read(&mut VmWriter::from(bytes.as_mut_slice()));
         bytes
+    }
+
+    fn take_looped_frame(&self) -> Option<RxPacket<LinkLayer>> {
+        None
     }
 }
 

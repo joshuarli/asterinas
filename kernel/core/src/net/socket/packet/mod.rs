@@ -15,7 +15,10 @@ mod addr;
 mod tap;
 
 pub(crate) use addr::{MAX_LINK_ADDR_LEN, PacketSocketAddr, PacketType};
-use aster_bigtcp::iface::LinkTap;
+use aster_bigtcp::{
+    errors::LinkSendError,
+    iface::{InterfaceFlags, LinkTap},
+};
 use tap::PacketTap;
 
 use crate::{
@@ -116,6 +119,37 @@ impl PacketSocket {
     }
 }
 
+fn no_such_device() -> Error {
+    Error::with_message(Errno::ENXIO, "there is no such interface")
+}
+
+fn link_send_error(error: LinkSendError) -> Error {
+    match error {
+        LinkSendError::Down => Error::with_message(Errno::ENETDOWN, "the interface is down"),
+        LinkSendError::TooShort => {
+            Error::with_message(Errno::EINVAL, "the frame is shorter than a link-layer header")
+        }
+        LinkSendError::TooLong => Error::with_message(Errno::EMSGSIZE, "the frame is too long"),
+        LinkSendError::UnsupportedProtocol => Error::with_message(
+            Errno::EOPNOTSUPP,
+            "the interface does not carry frames of this EtherType",
+        ),
+        LinkSendError::Busy | LinkSendError::NoMemory => {
+            Error::with_message(Errno::ENOBUFS, "the interface cannot take the frame now")
+        }
+    }
+}
+
+/// Reads `len` bytes into a buffer that starts with `header_len` bytes of room for a header.
+fn read_all(reader: &mut dyn MultiRead, len: usize, header_len: usize) -> Result<Vec<u8>> {
+    let mut frame = vec![0u8; header_len + len];
+    let read_len = reader
+        .read(&mut VmWriter::from(&mut frame[header_len..]))
+        .map_err(|(err, _)| err)?;
+    frame.truncate(header_len + read_len);
+    Ok(frame)
+}
+
 fn find_iface(ifindex: i32) -> Option<&'static Arc<Iface>> {
     iter_all_ifaces().find(|iface| iface.index() as i32 == ifindex)
 }
@@ -165,11 +199,76 @@ impl Socket for PacketSocket {
 
     fn sendmsg(
         &self,
-        _reader: &mut dyn MultiRead,
-        _message_header: MessageHeader,
+        reader: &mut dyn MultiRead,
+        message_header: MessageHeader,
         _flags: SendFlags,
     ) -> Result<usize> {
-        return_errno_with_message!(Errno::EOPNOTSUPP, "sending on packet sockets is not supported");
+        let MessageHeader {
+            addr,
+            control_messages,
+        } = message_header;
+        if !control_messages.is_empty() {
+            warn!("sending control message is not supported");
+        }
+
+        let (iface, protocol, destination) = match addr {
+            None => (
+                find_iface(self.tap.ifindex()).ok_or_else(no_such_device)?,
+                self.tap.protocol(),
+                None,
+            ),
+            Some(addr) => {
+                let addr = PacketSocketAddr::try_from(addr)?;
+                if addr.link_addr_len() as usize > MAX_LINK_ADDR_LEN {
+                    return_errno_with_message!(
+                        Errno::EINVAL,
+                        "the link-layer address in the socket address is too long"
+                    );
+                }
+                (
+                    find_iface(addr.ifindex()).ok_or_else(no_such_device)?,
+                    addr.protocol(),
+                    Some(addr),
+                )
+            }
+        };
+        if !iface.flags().contains(InterfaceFlags::UP) {
+            return_errno_with_message!(Errno::ENETDOWN, "the interface is down");
+        }
+
+        let payload_len = reader.sum_lens();
+        let frame = match self.socket_type {
+            SockType::SOCK_RAW => {
+                if payload_len > iface.mtu() + ETHERNET_HEADER_LEN {
+                    return_errno_with_message!(Errno::EMSGSIZE, "the frame is too long");
+                }
+                read_all(reader, payload_len, 0)?
+            }
+            _ => {
+                if payload_len > iface.mtu() {
+                    return_errno_with_message!(Errno::EMSGSIZE, "the frame is too long");
+                }
+                let Some(destination) = destination else {
+                    return_errno_with_message!(
+                        Errno::EINVAL,
+                        "a cooked packet socket needs a destination address"
+                    );
+                };
+                let mut frame = read_all(reader, payload_len, ETHERNET_HEADER_LEN)?;
+                frame[..6].copy_from_slice(&destination.link_addr()[..6]);
+                frame[6..12].copy_from_slice(&iface.ethernet_addr().map_or([0u8; 6], |addr| addr.0));
+                frame[12..ETHERNET_HEADER_LEN].copy_from_slice(&protocol.to_be_bytes());
+                frame
+            }
+        };
+
+        let tap: Arc<dyn LinkTap> = self.tap.clone();
+        iface
+            .send_link_frame(&frame, Some(&tap))
+            .map_err(link_send_error)?;
+        iface.poll();
+
+        Ok(payload_len)
     }
 
     fn recvmsg(

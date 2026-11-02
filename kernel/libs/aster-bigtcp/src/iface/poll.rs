@@ -37,7 +37,7 @@ fn send_frame(
     taps: &LinkTaps,
     packet: TxPacket<LinkLayer>,
 ) -> Result<(), NetError> {
-    taps.deliver(phy, FrameDirection::Outgoing, || packet.reader());
+    taps.deliver(phy, FrameDirection::Outgoing, None, || packet.reader());
     device.send(packet)
 }
 
@@ -81,14 +81,17 @@ impl<E: Ext> PollContext<'_, E> {
         loop {
             let rx_packet = match device.receive() {
                 Ok(packet) => packet,
-                Err(NetError::NotReady) => break,
+                Err(NetError::NotReady) => match phy.take_looped_frame() {
+                    Some(packet) => packet,
+                    None => break,
+                },
                 Err(err) => {
                     ostd::error!("failed to receive a network packet: {:?}", err);
                     break;
                 }
             };
 
-            taps.deliver(phy, FrameDirection::Incoming, || rx_packet.reader());
+            taps.deliver(phy, FrameDirection::Incoming, None, || rx_packet.reader());
 
             let Some(processed) = phy.process(rx_packet, self.iface.context_mut(), ipv4_cidrs) else {
                 continue;

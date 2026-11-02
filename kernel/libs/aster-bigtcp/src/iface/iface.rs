@@ -12,7 +12,7 @@ use super::{
     LinkTap,
 };
 use crate::{
-    errors::{AddressTableFull, BindError, RouteTableFull},
+    errors::{AddressTableFull, BindError, LinkSendError, RouteTableFull},
     ext::Ext,
 };
 
@@ -34,6 +34,16 @@ pub trait Iface<E>: internal::IfaceInternal<E> + Send + Sync {
 
     /// Forgets the link-layer addresses learned from neighbors.
     fn flush_neighbors(&self);
+
+    /// Sends a link-layer frame that starts with an Ethernet header.
+    ///
+    /// The taps other than `origin` see the frame as an outgoing one. An interface without
+    /// link-layer framing sends the payload of the frame and receives it again.
+    fn send_link_frame(
+        &self,
+        frame: &[u8],
+        origin: Option<&Arc<dyn LinkTap>>,
+    ) -> Result<(), LinkSendError>;
 }
 
 impl<E: Ext> dyn Iface<E> {
