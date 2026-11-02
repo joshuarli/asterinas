@@ -17,7 +17,10 @@ pub(super) use self::{
     entry::{RouteProtocol, RouteScope, RouteType},
 };
 use self::{manager::RouteManager, rule::Rule};
-use super::iface::{self, Iface};
+use super::iface::{
+    self, Iface,
+    config::{self, InterfaceAddress},
+};
 use crate::prelude::*;
 
 mod dump;
@@ -57,7 +60,7 @@ pub(super) fn init() {
 
     IPV4_ROUTE_MANAGER.call_once(|| {
         let routes = iface::iter_all_ifaces()
-            .flat_map(iface_ipv4_routes)
+            .flat_map(|iface| iface_ipv4_routes(iface, &config::ipv4_addresses(iface)))
             .collect();
         RwMutex::new(RouteManager::new(
             &[
@@ -83,73 +86,107 @@ pub(super) fn init() {
     });
 }
 
-fn iface_ipv4_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv4Address>> {
+fn iface_ipv4_routes(
+    iface: &Arc<Iface>,
+    addresses: &[InterfaceAddress],
+) -> Vec<RouteEntry<Ipv4Address>> {
     let mut routes = Vec::new();
 
-    // Derive up to three routes from the interface's IPv4 configuration.
-    // They cover its own address, connected network, and broadcast address.
-    if let Some(iface_cidr) = iface.ipv4_cidr() {
-        let iface_addr = iface_cidr.address();
+    for address in addresses {
+        let cidr = address.cidr();
+        let primary = addresses
+            .iter()
+            .find(|candidate| !candidate.is_secondary() && is_on_network_of(candidate, address))
+            .unwrap_or(address);
+        let preferred_source = primary.address();
 
-        // Add a local-table route for the interface's own address.
+        // Add a local-table route for the address itself.
         let entry = RouteEntry::new(
-            Ipv4Cidr::new(iface_addr, 32),
+            Ipv4Cidr::new(cidr.address(), 32),
             None,
             iface.clone(),
             RouteTableId::LOCAL,
             RouteMetric::default(),
             RouteType::Local,
-            kernel_origin(RouteScope::Host, iface_addr),
+            kernel_origin(RouteScope::Host, preferred_source),
         )
         .unwrap();
         routes.push(entry);
 
-        // Add a route for the interface's connected network.
-        if iface_cidr.prefix_len() < 32 {
-            let (table_id, type_) = if iface.type_() == InterfaceType::LOOPBACK {
-                (RouteTableId::LOCAL, RouteType::Local)
-            } else {
-                (RouteTableId::MAIN, RouteType::Unicast)
-            };
-            let entry = RouteEntry::new(
-                iface_cidr.network(),
-                None,
-                iface.clone(),
-                table_id,
-                RouteMetric::default(),
-                type_,
-                kernel_origin(
-                    if type_ == RouteType::Local {
-                        RouteScope::Host
-                    } else {
-                        RouteScope::Link
-                    },
-                    iface_addr,
-                ),
-            )
-            .unwrap();
-            routes.push(entry);
+        // Add the broadcast address that user space assigned.
+        if let Some(broadcast) = address.broadcast()
+            && !broadcast.is_broadcast()
+        {
+            routes.push(broadcast_route(iface, broadcast, preferred_source));
         }
 
-        // Add a local-table route for the interface's broadcast address.
-        if let Some(broadcast_addr) = iface.broadcast_addr() {
-            let entry = RouteEntry::new(
-                Ipv4Cidr::new(broadcast_addr, 32),
-                None,
-                iface.clone(),
-                RouteTableId::LOCAL,
-                RouteMetric::default(),
-                RouteType::Broadcast,
-                kernel_origin(RouteScope::Link, iface_addr),
-            )
-            .unwrap();
-            routes.push(entry);
+        // Secondary addresses share the connected network of their primary address.
+        let network = cidr.network();
+        let has_connected_network = !address.is_secondary()
+            && !network.address().is_unspecified()
+            && (network.address() != cidr.address() || cidr.prefix_len() < 32);
+        if !has_connected_network {
+            continue;
+        }
+
+        // Add a route for the connected network.
+        let (table_id, type_) = if iface.type_() == InterfaceType::LOOPBACK {
+            (RouteTableId::LOCAL, RouteType::Local)
+        } else {
+            (RouteTableId::MAIN, RouteType::Unicast)
+        };
+        let entry = RouteEntry::new(
+            network,
+            None,
+            iface.clone(),
+            table_id,
+            RouteMetric::default(),
+            type_,
+            kernel_origin(
+                if type_ == RouteType::Local {
+                    RouteScope::Host
+                } else {
+                    RouteScope::Link
+                },
+                preferred_source,
+            ),
+        )
+        .unwrap();
+        routes.push(entry);
+
+        // Add a local-table route for the broadcast address of the connected network.
+        if cidr.prefix_len() < 31
+            && let Some(broadcast) = cidr.broadcast()
+        {
+            routes.push(broadcast_route(iface, broadcast, preferred_source));
         }
     }
 
     retain_routes_valid_while_down(iface, &mut routes);
 
     routes
+}
+
+fn is_on_network_of(candidate: &InterfaceAddress, address: &InterfaceAddress) -> bool {
+    candidate.cidr().prefix_len() == address.cidr().prefix_len()
+        && candidate.cidr().network() == address.cidr().network()
+}
+
+fn broadcast_route(
+    iface: &Arc<Iface>,
+    broadcast: Ipv4Address,
+    preferred_source: Ipv4Address,
+) -> RouteEntry<Ipv4Address> {
+    RouteEntry::new(
+        Ipv4Cidr::new(broadcast, 32),
+        None,
+        iface.clone(),
+        RouteTableId::LOCAL,
+        RouteMetric::default(),
+        RouteType::Broadcast,
+        kernel_origin(RouteScope::Link, preferred_source),
+    )
+    .unwrap()
 }
 
 /// Keeps only the routes that deliver to the host itself when the interface is down.
@@ -215,13 +252,13 @@ fn iface_ipv6_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv6Address>> {
 /// the connected network, broadcast and gateway routes, and every route that user space
 /// installed. The routes that deliver to the host's own addresses stay. Bringing the interface up
 /// restores the routes the kernel derives from its addresses.
-pub(super) fn sync_iface_routes(iface: &Arc<Iface>) {
+pub(super) fn sync_iface_routes(iface: &Arc<Iface>, addresses: &[InterfaceAddress]) {
     let up = iface.flags().contains(InterfaceFlags::UP);
     IPV4_ROUTE_MANAGER
         .get()
         .unwrap()
         .write()
-        .replace_iface_routes(iface.index(), up, iface_ipv4_routes(iface));
+        .replace_iface_routes(iface.index(), up, iface_ipv4_routes(iface, addresses));
     IPV6_ROUTE_MANAGER
         .get()
         .unwrap()

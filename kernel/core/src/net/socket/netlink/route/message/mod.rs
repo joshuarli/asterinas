@@ -11,7 +11,7 @@ mod attr;
 mod segment;
 
 pub(super) use attr::{
-    addr::{AddrAttr, AddrProtocol},
+    addr::{AddrAttr, AddrCacheInfo, AddrProtocol, INFINITE_LIFETIME},
     link::{LinkAttr, OperState},
     route::RouteAttr,
     rule::RuleAttr,

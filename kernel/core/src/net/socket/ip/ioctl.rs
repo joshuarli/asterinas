@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_bigtcp::{iface::InterfaceFlags, wire::Ipv4Address};
+use aster_bigtcp::wire::Ipv4Address;
 
-use crate::{dispatch_ioctl, net::socket::util::ioctl::CIfReq, prelude::*, util::ioctl::RawIoctl};
+use crate::{
+    dispatch_ioctl,
+    net::{iface::config, socket::util::ioctl::CIfReq},
+    prelude::*,
+    util::ioctl::RawIoctl,
+};
 
 mod ioctl_defs {
     use super::CIfReq;
@@ -22,10 +27,8 @@ pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
         cmd @ GetIfAddr => {
             let mut ifreq = cmd.read()?;
             let iface = ifreq.get_iface_by_name()?;
-            let ipv4_addr = iface
-                .ipv4_cidr()
-                .ok_or_else(|| Error::with_message(Errno::EADDRNOTAVAIL, "no IPv4 address found"))?
-                .address();
+            let ipv4_addr = config::primary_ipv4_address(iface)
+                .ok_or_else(|| Error::with_message(Errno::EADDRNOTAVAIL, "no IPv4 address found"))?;
             ifreq.set_sockaddr_ipv4(ipv4_addr);
             cmd.write(&ifreq)?;
             Ok(0)
@@ -35,10 +38,8 @@ pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
             let iface = ifreq.get_iface_by_name()?;
             // Asterinas does not yet support point-to-point interfaces,
             // so we report the local IPv4 address instead, consistent with Linux's behavior.
-            let ipv4_addr = iface
-                .ipv4_cidr()
-                .ok_or_else(|| Error::with_message(Errno::EADDRNOTAVAIL, "no IPv4 address found"))?
-                .address();
+            let ipv4_addr = config::primary_ipv4_address(iface)
+                .ok_or_else(|| Error::with_message(Errno::EADDRNOTAVAIL, "no IPv4 address found"))?;
             ifreq.set_sockaddr_ipv4(ipv4_addr);
             cmd.write(&ifreq)?;
             Ok(0)
@@ -46,13 +47,10 @@ pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
         cmd @ GetIfBrdAddr => {
             let mut ifreq = cmd.read()?;
             let iface = ifreq.get_iface_by_name()?;
-            let broadcast_addr = if iface.flags().contains(InterfaceFlags::BROADCAST)
-                && let Some(broadcast_addr) = iface.broadcast_addr()
-            {
-                broadcast_addr
-            } else {
-                Ipv4Address::UNSPECIFIED
-            };
+            let broadcast_addr = config::ipv4_addresses(iface)
+                .first()
+                .and_then(|address| address.broadcast())
+                .unwrap_or(Ipv4Address::UNSPECIFIED);
             ifreq.set_sockaddr_ipv4(broadcast_addr);
             cmd.write(&ifreq)?;
             Ok(0)
@@ -60,9 +58,10 @@ pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
         cmd @ GetIfNetmask => {
             let mut ifreq = cmd.read()?;
             let iface = ifreq.get_iface_by_name()?;
-            let netmask = iface
-                .ipv4_cidr()
+            let netmask = config::ipv4_addresses(iface)
+                .first()
                 .ok_or_else(|| Error::with_message(Errno::EADDRNOTAVAIL, "no IPv4 address found"))?
+                .cidr()
                 .netmask();
             ifreq.set_sockaddr_ipv4(netmask);
             cmd.write(&ifreq)?;

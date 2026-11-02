@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+pub(super) mod config;
 mod ext;
 mod init;
 mod poll;

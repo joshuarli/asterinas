@@ -61,6 +61,7 @@ impl<'a, E: Ext> PollContext<'a, E> {
 
 impl<E: Ext> PollContext<'_, E> {
     pub(super) fn poll_ingress(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
+        let ipv4_cidrs = self.iface.ipv4_cidrs();
         loop {
             let rx_packet = match device.receive() {
                 Ok(packet) => packet,
@@ -71,7 +72,7 @@ impl<E: Ext> PollContext<'_, E> {
                 }
             };
 
-            let Some(processed) = phy.process(rx_packet, self.iface.context_mut()) else {
+            let Some(processed) = phy.process(rx_packet, self.iface.context_mut(), ipv4_cidrs) else {
                 continue;
             };
             let (packet, ip_version) = match processed {
@@ -87,7 +88,7 @@ impl<E: Ext> PollContext<'_, E> {
             };
 
             if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version)
-                && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut())
+                && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
                 && let Err(err) = device.send(tx_packet)
             {
                 ostd::error!("failed to send a network packet: {:?}", err);
@@ -106,9 +107,8 @@ impl<E: Ext> PollContext<'_, E> {
         let (packet, ip_repr) = ip::parse(packet, ip_version, checksum_caps.ipv4.rx())?;
 
         let can_process = {
-            let cx = self.iface.context();
             let dst_addr = ip_repr.inner.dst_addr();
-            cx.is_broadcast(&dst_addr) || cx.is_unicast_local(dst_addr)
+            self.iface.context().is_broadcast(&dst_addr) || self.iface.is_unicast_local(dst_addr)
         };
         if !can_process {
             return self.generate_icmp_unreachable(
@@ -163,7 +163,7 @@ impl<E: Ext> PollContext<'_, E> {
         let (mut ip_repr, mut tcp_repr) = self.process_tcp(ip_repr, tcp_repr, payload)?;
 
         loop {
-            if !self.iface.context().is_unicast_local(ip_repr.dst_addr()) {
+            if !self.iface.is_unicast_local(ip_repr.dst_addr()) {
                 return Some((ip_repr, tcp_repr));
             }
 
@@ -336,7 +336,7 @@ impl<E: Ext> PollContext<'_, E> {
             return None;
         }
 
-        if self.iface.context().is_unicast_local(ip_repr.src_addr()) {
+        if self.iface.is_unicast_local(ip_repr.src_addr()) {
             // In this case, the generating ICMP message will have a local IP address as the
             // destination. However, since we don't have the ability to handle ICMP messages, we'll
             // just skip the generation.
@@ -448,11 +448,12 @@ impl<E: Ext> PollContext<'_, E> {
 
 impl<E: Ext> PollContext<'_, E> {
     pub(super) fn poll_egress(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
+        let ipv4_cidrs = self.iface.ipv4_cidrs();
         while device.can_send() {
             let (did_something, packet) = self.dispatch_ip(phy);
 
             if let Some(packet) = packet
-                && let Some(tx_packet) = phy.dispatch(packet, self.iface.context_mut())
+                && let Some(tx_packet) = phy.dispatch(packet, self.iface.context_mut(), ipv4_cidrs)
                 && let Err(err) = device.send(tx_packet)
             {
                 ostd::error!("failed to send a network packet: {:?}", err);
@@ -496,7 +497,7 @@ impl<E: Ext> PollContext<'_, E> {
                 TcpConnectionBg::dispatch(&socket, &mut self.iface, |iface, ip_repr, tcp_repr| {
                     let mut this = PollContext::new(iface, self.sockets, self.actions);
 
-                    if !this.iface.context().is_unicast_local(ip_repr.dst_addr()) {
+                    if !this.iface.is_unicast_local(ip_repr.dst_addr()) {
                         tx_packet = this.emit_tcp(phy, ip_repr, tcp_repr);
                         return None;
                     }
@@ -537,7 +538,7 @@ impl<E: Ext> PollContext<'_, E> {
                     }
                 }
                 (None, Some((ip_repr, tcp_repr)))
-                    if !self.iface.context().is_unicast_local(ip_repr.dst_addr()) =>
+                    if !self.iface.is_unicast_local(ip_repr.dst_addr()) =>
                 {
                     tx_packet = self.emit_tcp(phy, &ip_repr, &tcp_repr);
                 }
@@ -578,13 +579,13 @@ impl<E: Ext> PollContext<'_, E> {
 
             let mut deferred = None;
 
-            let (cx, pending) = self.iface.inner_mut();
+            let (cx, pending, ipv4_cidrs) = self.iface.inner_mut();
             socket.dispatch(cx, |cx, ip_repr, udp_repr, udp_payload| {
-                let iface = PollableIfaceMut::new(cx, pending);
+                let iface = PollableIfaceMut::new(cx, pending, ipv4_cidrs);
                 let mut this = PollContext::new(iface, self.sockets, &mut actions);
 
                 let is_broadcast = this.iface.context().is_broadcast(&ip_repr.dst_addr());
-                if is_broadcast || !this.iface.context().is_unicast_local(ip_repr.dst_addr()) {
+                if is_broadcast || !this.iface.is_unicast_local(ip_repr.dst_addr()) {
                     tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload);
                     if !is_broadcast {
                         return;

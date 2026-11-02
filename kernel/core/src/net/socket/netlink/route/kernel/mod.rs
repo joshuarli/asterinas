@@ -9,7 +9,7 @@ use super::message::{RtnlMessage, RtnlSegment};
 use crate::{
     net::socket::netlink::{
         addr::PortNum,
-        message::{ErrorSegment, ProtocolSegment},
+        message::{CMsgSegHdr, ErrorSegment, ProtocolSegment, SegHdrCommonFlags},
         table::{NetlinkRouteProtocol, SupportedNetlinkProtocol},
     },
     prelude::*,
@@ -40,6 +40,12 @@ impl NetlinkRouteKernelSocket {
         let response_segments = match request {
             RtnlSegment::GetLink(request_segment) => link::do_get_link(request_segment),
             RtnlSegment::GetAddr(request_segment) => addr::do_get_addr(request_segment),
+            RtnlSegment::NewAddr(request_segment) => {
+                addr::do_new_addr(request_segment).map(|()| acknowledgement(request_header))
+            }
+            RtnlSegment::DelAddr(request_segment) => {
+                addr::do_del_addr(request_segment).map(|()| acknowledgement(request_header))
+            }
             RtnlSegment::GetRoute(request_segment) => route::do_get_route(request_segment),
             RtnlSegment::GetRule(request_segment) => rule::do_get_rule(request_segment),
             _ => Err(Error::with_message(
@@ -91,6 +97,19 @@ impl NetlinkRouteKernelSocket {
         debug!("netlink route error: {:?}", response);
 
         NetlinkRouteProtocol::unicast(dst_port, response).unwrap();
+    }
+}
+
+/// The reply to a request that succeeded: Linux acknowledges it only if the request asked for it.
+fn acknowledgement(request_header: &CMsgSegHdr) -> Vec<RtnlSegment> {
+    if SegHdrCommonFlags::from_bits_truncate(request_header.flags).contains(SegHdrCommonFlags::ACK)
+    {
+        vec![RtnlSegment::Error(ErrorSegment::new_from_request(
+            request_header,
+            None,
+        ))]
+    } else {
+        Vec::new()
     }
 }
 

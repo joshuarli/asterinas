@@ -28,7 +28,7 @@ use super::{
 };
 use crate::{
     device::{AnyNetworkDevice, WithDevice},
-    errors::BindError,
+    errors::{AddressTableFull, BindError},
     ext::Ext,
     iface::ScheduleNextPoll,
     packet::{FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TxPacket},
@@ -65,12 +65,14 @@ pub(super) trait PollPhy {
         &self,
         packet: RxPacket<LinkLayer>,
         iface_cx: &mut Context,
+        ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<PhyProcessResult>;
 
     fn dispatch(
         &self,
         packet: TxPacketWithDst,
         iface_cx: &mut Context,
+        ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<TxPacket<LinkLayer>>;
 
     fn alloc_tx_buffer(&self, payload_len: usize) -> Result<FreshTxPacket, ostd::Error>;
@@ -151,6 +153,14 @@ impl<E: Ext> IfaceCommon<E> {
 
     pub(super) fn ipv4_cidr(&self) -> Option<Ipv4Cidr> {
         self.interface.lock().ipv4_cidr()
+    }
+
+    pub(super) fn ipv4_cidrs(&self) -> Vec<Ipv4Cidr> {
+        self.interface.lock().ipv4_cidrs()
+    }
+
+    pub(super) fn set_ipv4_cidrs(&self, cidrs: &[Ipv4Cidr]) -> Result<(), AddressTableFull> {
+        self.interface.lock().set_ipv4_cidrs(cidrs)
     }
 
     pub(super) fn ipv6_cidr(&self) -> Option<Ipv6Cidr> {

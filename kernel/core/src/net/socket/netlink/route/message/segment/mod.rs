@@ -57,6 +57,7 @@ pub(crate) enum RtnlSegment {
     GetLink(LinkSegment),
     NewAddr(AddrSegment),
     GetAddr(AddrSegment),
+    DelAddr(AddrSegment),
     NewRoute(RouteSegment),
     GetRoute(RouteSegment),
     NewRule(RuleSegment),
@@ -71,9 +72,9 @@ impl ProtocolSegment for RtnlSegment {
             RtnlSegment::NewLink(link_segment) | RtnlSegment::GetLink(link_segment) => {
                 link_segment.header()
             }
-            RtnlSegment::NewAddr(addr_segment) | RtnlSegment::GetAddr(addr_segment) => {
-                addr_segment.header()
-            }
+            RtnlSegment::NewAddr(addr_segment)
+            | RtnlSegment::GetAddr(addr_segment)
+            | RtnlSegment::DelAddr(addr_segment) => addr_segment.header(),
             RtnlSegment::NewRoute(route_segment) | RtnlSegment::GetRoute(route_segment) => {
                 route_segment.header()
             }
@@ -90,9 +91,9 @@ impl ProtocolSegment for RtnlSegment {
             RtnlSegment::NewLink(link_segment) | RtnlSegment::GetLink(link_segment) => {
                 link_segment.header_mut()
             }
-            RtnlSegment::NewAddr(addr_segment) | RtnlSegment::GetAddr(addr_segment) => {
-                addr_segment.header_mut()
-            }
+            RtnlSegment::NewAddr(addr_segment)
+            | RtnlSegment::GetAddr(addr_segment)
+            | RtnlSegment::DelAddr(addr_segment) => addr_segment.header_mut(),
             RtnlSegment::NewRoute(route_segment) | RtnlSegment::GetRoute(route_segment) => {
                 route_segment.header_mut()
             }
@@ -115,6 +116,12 @@ impl ProtocolSegment for RtnlSegment {
             }
             Ok(CSegmentType::GETADDR) => {
                 AddrSegment::read_from(&header, reader)?.map(RtnlSegment::GetAddr)
+            }
+            Ok(CSegmentType::NEWADDR) => {
+                AddrSegment::read_from(&header, reader)?.map(RtnlSegment::NewAddr)
+            }
+            Ok(CSegmentType::DELADDR) => {
+                AddrSegment::read_from(&header, reader)?.map(RtnlSegment::DelAddr)
             }
             Ok(CSegmentType::GETROUTE) => {
                 RouteSegment::read_from(&header, reader)?.map(RtnlSegment::GetRoute)
@@ -144,6 +151,7 @@ impl ProtocolSegment for RtnlSegment {
             RtnlSegment::Done(done_segment) => done_segment.write_to(writer)?,
             RtnlSegment::Error(error_segment) => error_segment.write_to(writer)?,
             RtnlSegment::GetAddr(_)
+            | RtnlSegment::DelAddr(_)
             | RtnlSegment::GetLink(_)
             | RtnlSegment::GetRoute(_)
             | RtnlSegment::GetRule(_) => {

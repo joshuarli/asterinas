@@ -768,10 +768,10 @@ impl<E: Ext> TcpConnectionBg<E> {
         let mut events = SocketEvents::empty();
 
         let mut reply = None;
-        let (cx, pending) = iface.inner_mut();
+        let (cx, pending, ipv4_cidrs) = iface.inner_mut();
         socket
             .dispatch(cx, |cx, (ip_repr, tcp_repr)| {
-                reply = dispatch(PollableIfaceMut::new(cx, pending), &ip_repr, &tcp_repr);
+                reply = dispatch(PollableIfaceMut::new(cx, pending, ipv4_cidrs), &ip_repr, &tcp_repr);
                 Ok::<(), ()>(())
             })
             .unwrap();

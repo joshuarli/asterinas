@@ -83,6 +83,7 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for IpIface<D, E> {
         &self,
         packet: RxPacket<LinkLayer>,
         _iface_cx: &mut Context,
+        _ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<PhyProcessResult> {
         Some(PhyProcessResult::Ip(packet.peel(0)))
     }
@@ -91,6 +92,7 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for IpIface<D, E> {
         &self,
         packet: TxPacketWithDst,
         _iface_cx: &mut Context,
+        _ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<TxPacket<LinkLayer>> {
         Some(packet.packet.pack(0))
     }

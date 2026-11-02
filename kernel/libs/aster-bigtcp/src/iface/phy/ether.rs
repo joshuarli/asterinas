@@ -8,7 +8,7 @@ use smoltcp::{
     iface::{Config, Context},
     wire::{
         self, ArpOperation, ArpRepr, EthernetAddress, EthernetProtocol, EthernetRepr, IpAddress,
-        Ipv4Address, Ipv4AddressExt,
+        Ipv4Address, Ipv4AddressExt, Ipv4Cidr,
     },
 };
 
@@ -83,6 +83,7 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
         &self,
         packet: RxPacket<LinkLayer>,
         iface_cx: &mut Context,
+        ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<PhyProcessResult> {
         // Parse the Ethernet header. Ignore the packet if the header is ill-formed.
         let (packet, repr) = ether::parse(packet)?;
@@ -98,7 +99,7 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
             EthernetProtocol::Ipv6 => Some(PhyProcessResult::Ipv6(packet)),
             EthernetProtocol::Arp => {
                 let (_, arp_repr) = arp::parse(packet)?;
-                let reply = self.process_arp(&arp_repr, iface_cx)?;
+                let reply = self.process_arp(&arp_repr, iface_cx, ipv4_cidrs)?;
                 match self.alloc_tx_buffer(0) {
                     Ok(buffer) => Self::emit_arp(&reply, buffer).map(PhyProcessResult::Tx),
                     Err(err) => {
@@ -115,8 +116,9 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
         &self,
         packet: TxPacketWithDst,
         iface_cx: &mut Context,
+        ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<TxPacket<LinkLayer>> {
-        match self.resolve_ether_or_generate_arp(packet.dst_addr, iface_cx) {
+        match self.resolve_ether_or_generate_arp(packet.dst_addr, iface_cx, ipv4_cidrs) {
             Ok(ether_repr) => Some(ether::emit(packet.packet, &ether_repr)),
             Err(Some(arp_repr)) => Self::emit_arp(&arp_repr, packet.packet.reset_to_fresh()),
             Err(None) => None,
@@ -128,8 +130,22 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
     }
 }
 
+/// Picks the address that asks for `target`: the one on the same network, else the first one.
+fn arp_source_address(ipv4_cidrs: &[Ipv4Cidr], target: Ipv4Address) -> Ipv4Address {
+    ipv4_cidrs
+        .iter()
+        .find(|cidr| cidr.contains_addr(&target))
+        .or(ipv4_cidrs.first())
+        .map_or(Ipv4Address::UNSPECIFIED, |cidr| cidr.address())
+}
+
 impl<D, E: Ext> EtherIface<D, E> {
-    fn process_arp(&self, arp_repr: &ArpRepr, iface_cx: &mut Context) -> Option<ArpRepr> {
+    fn process_arp(
+        &self,
+        arp_repr: &ArpRepr,
+        iface_cx: &mut Context,
+        ipv4_cidrs: &[Ipv4Cidr],
+    ) -> Option<ArpRepr> {
         match arp_repr {
             ArpRepr::EthernetIpv4 {
                 operation: ArpOperation::Reply,
@@ -166,9 +182,9 @@ impl<D, E: Ext> EtherIface<D, E> {
                 }
 
                 // Ignore the ARP packet if we do not own the target address.
-                if iface_cx
-                    .ipv4_addr()
-                    .is_none_or(|addr| addr != *target_protocol_addr)
+                if !ipv4_cidrs
+                    .iter()
+                    .any(|cidr| cidr.address() == *target_protocol_addr)
                 {
                     return None;
                 }
@@ -189,6 +205,7 @@ impl<D, E: Ext> EtherIface<D, E> {
         &self,
         dst_addr: IpAddress,
         iface_cx: &mut Context,
+        ipv4_cidrs: &[Ipv4Cidr],
     ) -> Result<EthernetRepr, Option<ArpRepr>> {
         // Resolve the next-hop IP address.
         let next_hop_ip = match iface_cx.route(&dst_addr, iface_cx.now()) {
@@ -214,7 +231,7 @@ impl<D, E: Ext> EtherIface<D, E> {
             return Err(Some(ArpRepr::EthernetIpv4 {
                 operation: ArpOperation::Request,
                 source_hardware_addr: self.ether_addr,
-                source_protocol_addr: iface_cx.ipv4_addr().unwrap_or(Ipv4Address::UNSPECIFIED),
+                source_protocol_addr: arp_source_address(ipv4_cidrs, next_hop_ip),
                 target_hardware_addr: EthernetAddress::BROADCAST,
                 target_protocol_addr: next_hop_ip,
             }));

@@ -10,7 +10,10 @@ use smoltcp::{
 use super::{
     BindPortConfig, BoundTcpPort, BoundUdpPort, InterfaceFlags, InterfaceName, InterfaceType,
 };
-use crate::{errors::BindError, ext::Ext};
+use crate::{
+    errors::{AddressTableFull, BindError},
+    ext::Ext,
+};
 
 /// A network interface.
 ///
@@ -93,6 +96,18 @@ impl<E: Ext> dyn Iface<E> {
     /// Gets the IPv4 CIDR of the iface, if any.
     pub fn ipv4_cidr(&self) -> Option<Ipv4Cidr> {
         self.common().ipv4_cidr()
+    }
+
+    /// Gets all IPv4 CIDRs of the iface, primary addresses first.
+    pub fn ipv4_cidrs(&self) -> Vec<Ipv4Cidr> {
+        self.common().ipv4_cidrs()
+    }
+
+    /// Replaces the IPv4 CIDRs of the iface.
+    ///
+    /// The first CIDR is the one the iface uses as its source address when it must pick one.
+    pub fn set_ipv4_cidrs(&self, cidrs: &[Ipv4Cidr]) -> Result<(), AddressTableFull> {
+        self.common().set_ipv4_cidrs(cidrs)
     }
 
     /// Gets the IPv6 CIDR of the iface, if any.

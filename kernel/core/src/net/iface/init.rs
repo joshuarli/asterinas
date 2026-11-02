@@ -46,6 +46,8 @@ pub(in crate::net) fn init() {
         aster_network::register_send_callback(VIRTIO_DEVICE_NAME, callback);
     }
 
+    super::config::init();
+
     poll_ifaces();
 }
 

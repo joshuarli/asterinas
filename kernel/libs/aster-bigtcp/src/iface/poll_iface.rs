@@ -9,6 +9,7 @@ use core::{
 use smoltcp::iface::Route;
 
 use crate::{
+    errors::AddressTableFull,
     ext::Ext,
     socket::{NeedIfacePoll, TcpConnectionBg},
 };
@@ -20,13 +21,27 @@ use crate::{
 pub(crate) struct PollableIface<E: Ext> {
     interface: smoltcp::iface::Interface,
     pending_conns: PendingConnSet<E>,
+    /// The IPv4 addresses of the interface, primary first.
+    ///
+    /// `smoltcp` keeps its own copy, but exposes only the first IPv4 address while it is
+    /// borrowed for polling.
+    ipv4_cidrs: Vec<smoltcp::wire::Ipv4Cidr>,
 }
 
 impl<E: Ext> PollableIface<E> {
     pub(super) fn new(interface: smoltcp::iface::Interface) -> Self {
+        let ipv4_cidrs = interface
+            .ip_addrs()
+            .iter()
+            .filter_map(|cidr| match cidr {
+                smoltcp::wire::IpCidr::Ipv4(ipv4_cidr) => Some(*ipv4_cidr),
+                smoltcp::wire::IpCidr::Ipv6(_) => None,
+            })
+            .collect();
         Self {
             interface,
             pending_conns: PendingConnSet::new(),
+            ipv4_cidrs,
         }
     }
 
@@ -34,6 +49,7 @@ impl<E: Ext> PollableIface<E> {
         PollableIfaceMut {
             context: self.interface.context(),
             pending_conns: &mut self.pending_conns,
+            ipv4_cidrs: &self.ipv4_cidrs,
         }
     }
 
@@ -45,6 +61,31 @@ impl<E: Ext> PollableIface<E> {
                 None
             }
         })
+    }
+
+    pub(super) fn ipv4_cidrs(&self) -> Vec<smoltcp::wire::Ipv4Cidr> {
+        self.ipv4_cidrs.clone()
+    }
+
+    /// Replaces all IPv4 addresses of the interface and keeps its IPv6 addresses.
+    pub(super) fn set_ipv4_cidrs(
+        &mut self,
+        cidrs: &[smoltcp::wire::Ipv4Cidr],
+    ) -> Result<(), AddressTableFull> {
+        let ipv6_count = self.interface.ip_addrs().len() - self.ipv4_cidrs.len();
+        if ipv6_count + cidrs.len() > smoltcp::config::IFACE_MAX_ADDR_COUNT {
+            return Err(AddressTableFull);
+        }
+        self.interface.update_ip_addrs(|ip_addrs| {
+            ip_addrs.retain(|cidr| !matches!(cidr, smoltcp::wire::IpCidr::Ipv4(_)));
+            for cidr in cidrs {
+                ip_addrs
+                    .push(smoltcp::wire::IpCidr::Ipv4(*cidr))
+                    .expect("the address table capacity was checked");
+            }
+        });
+        self.ipv4_cidrs = cidrs.to_vec();
+        Ok(())
     }
 
     pub(super) fn ipv6_cidr(&self) -> Option<smoltcp::wire::Ipv6Cidr> {
@@ -104,8 +145,10 @@ impl<E: Ext> PollableIface<E> {
         use smoltcp::wire::IpAddress;
 
         if let IpAddress::Ipv4(addr_v4) = addr
-            && let Some(cidr_v4) = self.ipv4_cidr()
-            && cidr_v4.broadcast() == Some(addr_v4)
+            && let Some(cidr_v4) = self
+                .ipv4_cidrs
+                .iter()
+                .find(|cidr| cidr.broadcast() == Some(addr_v4))
         {
             return IpAddress::Ipv4(cidr_v4.address());
         }
@@ -122,6 +165,7 @@ impl<E: Ext> PollableIface<E> {
 pub(crate) struct PollableIfaceMut<'a, E: Ext> {
     context: &'a mut smoltcp::iface::Context,
     pending_conns: &'a mut PendingConnSet<E>,
+    ipv4_cidrs: &'a [smoltcp::wire::Ipv4Cidr],
 }
 
 // FIXME: We provide `new()` and `inner_mut()` as `pub(crate)` methods because it's necessary to
@@ -131,15 +175,28 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
     pub(crate) fn new(
         context: &'a mut smoltcp::iface::Context,
         pending_conns: &'a mut PendingConnSet<E>,
+        ipv4_cidrs: &'a [smoltcp::wire::Ipv4Cidr],
     ) -> Self {
         Self {
             context,
             pending_conns,
+            ipv4_cidrs,
         }
     }
 
-    pub(crate) fn inner_mut(&mut self) -> (&mut smoltcp::iface::Context, &mut PendingConnSet<E>) {
-        (self.context, self.pending_conns)
+    pub(crate) fn inner_mut(
+        &mut self,
+    ) -> (
+        &mut smoltcp::iface::Context,
+        &mut PendingConnSet<E>,
+        &'a [smoltcp::wire::Ipv4Cidr],
+    ) {
+        (self.context, self.pending_conns, self.ipv4_cidrs)
+    }
+
+    /// Returns the IPv4 addresses of the interface, primary first.
+    pub(crate) fn ipv4_cidrs(&self) -> &'a [smoltcp::wire::Ipv4Cidr] {
+        self.ipv4_cidrs
     }
 }
 
@@ -151,6 +208,25 @@ impl<E: Ext> PollableIfaceMut<'_, E> {
 }
 
 impl<E: Ext> PollableIfaceMut<'_, E> {
+    /// Returns whether `dst_addr` is an address of this interface.
+    ///
+    /// Note: "local" means that the IP address belongs to the local interface, not to be confused
+    /// with the localhost IP (`127.0.0.1`).
+    pub(crate) fn is_unicast_local(&self, dst_addr: smoltcp::wire::IpAddress) -> bool {
+        use smoltcp::wire::IpAddress;
+
+        match dst_addr {
+            IpAddress::Ipv4(dst_addr) => self.ipv4_cidrs.iter().any(|cidr| {
+                let addr = cidr.address();
+                // All IPv4 loopback addresses are handled by the same loopback interface.
+                // Treating them as local allows direct socket delivery without traversing the
+                // device queues.
+                addr == dst_addr || (addr.is_loopback() && dst_addr.is_loopback())
+            }),
+            IpAddress::Ipv6(dst_addr) => self.context.ipv6_addr().is_some_and(|addr| addr == dst_addr),
+        }
+    }
+
     /// Returns an immutable reference to the `smoltcp` context.
     pub(crate) fn context(&self) -> &smoltcp::iface::Context {
         self.context
@@ -350,34 +426,10 @@ pub(super) trait IsUnicast {
     /// Note: This excludes broadcast addresses, link-local broadcast addresses, and multicast
     /// addresses.
     fn is_unicast(&self, dst_addr: smoltcp::wire::IpAddress) -> bool;
-
-    /// Returns whether the destination address is a local unicast address of an interface.
-    ///
-    /// For example, if the interface is configured with the address `10.0.2.15/24`, this method
-    ///  - will return true for `10.0.2.15`, and
-    ///  - will return false for `10.0.2.14`, `10.0.2.255`, and `255.255.255.255`.
-    ///
-    /// Note: "local" means that the IP address belongs to the local interface, not to be confused
-    /// with the localhost IP (`127.0.0.1`).
-    fn is_unicast_local(&self, dst_addr: smoltcp::wire::IpAddress) -> bool;
 }
 
 impl IsUnicast for smoltcp::iface::Context {
     fn is_unicast(&self, dst_addr: smoltcp::wire::IpAddress) -> bool {
         !self.is_broadcast(&dst_addr) && !dst_addr.is_multicast()
-    }
-
-    fn is_unicast_local(&self, dst_addr: smoltcp::wire::IpAddress) -> bool {
-        use smoltcp::wire::IpAddress;
-
-        match dst_addr {
-            IpAddress::Ipv4(dst_addr) => self.ipv4_addr().is_some_and(|addr| {
-                // All IPv4 loopback addresses are handled by the same loopback interface.
-                // Treating them as local allows direct socket delivery without traversing the
-                // device queues.
-                addr == dst_addr || (addr.is_loopback() && dst_addr.is_loopback())
-            }),
-            IpAddress::Ipv6(dst_addr) => self.ipv6_addr().is_some_and(|addr| addr == dst_addr),
-        }
     }
 }

@@ -9,8 +9,7 @@ use ostd::task::Task;
 use crate::{
     dispatch_ioctl,
     net::{
-        iface::{DEFAULT_TX_QUEUE_LEN, Iface, iter_all_ifaces},
-        route,
+        iface::{DEFAULT_TX_QUEUE_LEN, Iface, config, iter_all_ifaces},
         socket::{Socket, util::options::check_current_privileged},
     },
     prelude::*,
@@ -162,8 +161,7 @@ fn set_iface_flags(ifreq: &CIfReq) -> Result<()> {
         );
     }
     if changed.contains(InterfaceFlags::UP) {
-        iface.set_administratively_up(requested.contains(InterfaceFlags::UP));
-        route::sync_iface_routes(iface);
+        config::set_administratively_up(iface, requested.contains(InterfaceFlags::UP));
     }
 
     Ok(())
@@ -182,17 +180,12 @@ struct CIfConf {
 
 impl CIfConf {
     fn write_ifreqs(&mut self) -> Result<()> {
-        let ifreqs = iter_all_ifaces().filter_map(|iface| {
-            let address = {
-                let ipv4_addr = iface.ipv4_cidr()?.address();
-                CSocketAddr::new_ipv4(ipv4_addr)
-            };
-
-            Some(CIfReq {
-                name: *iface.name(),
-                data: CIfReqData::new_addr(address),
-            })
-        });
+        let ifreqs = iter_all_ifaces()
+            .flat_map(config::ipv4_addresses)
+            .map(|address| CIfReq {
+                name: *address.label(),
+                data: CIfReqData::new_addr(CSocketAddr::new_ipv4(address.address())),
+            });
 
         if self.data == 0 {
             let count = ifreqs.count();
