@@ -476,6 +476,14 @@ impl<E: Ext> PollContext<'_, E> {
     ) {
         let ipv4_cidrs = self.iface.ipv4_cidrs();
         while device.can_send() {
+            if let Some(frame) = phy.take_neighbor_frame(self.iface.context_mut(), ipv4_cidrs) {
+                if let Err(err) = send_frame(device, phy, taps, frame) {
+                    ostd::error!("failed to send a network packet: {:?}", err);
+                    break;
+                }
+                continue;
+            }
+
             let (did_something, packet) = self.dispatch_ip(phy);
 
             if let Some(packet) = packet

@@ -80,6 +80,19 @@ pub(super) trait PollPhy {
         ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<TxPacket<LinkLayer>>;
 
+    /// Returns the next frame owed to the neighbors of the interface: a packet released by an
+    /// address resolution, or a repeated address resolution request.
+    ///
+    /// Packets of a neighbor that never answers are dropped here.
+    fn take_neighbor_frame(
+        &self,
+        iface_cx: &mut Context,
+        ipv4_cidrs: &[Ipv4Cidr],
+    ) -> Option<TxPacket<LinkLayer>>;
+
+    /// Returns when the neighbors of the interface need the next poll, in milliseconds.
+    fn next_neighbor_poll_ms(&self) -> Option<u64>;
+
     fn alloc_tx_buffer(&self, payload_len: usize) -> Result<FreshTxPacket, ostd::Error>;
 
     /// Returns the link-layer address of the interface; zero if it has none.
@@ -358,9 +371,12 @@ impl<E: Ext> IfaceCommon<E> {
             }
         }
 
-        // Note that only TCP connections can have timers set, so as far as the time to poll is
-        // concerned, we only need to consider TCP connections.
-        interface.next_poll_at_ms()
+        // Besides the timers of TCP connections, only the retries of address resolution need a
+        // poll at a given time.
+        [interface.next_poll_at_ms(), phy.next_neighbor_poll_ms()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 }
 

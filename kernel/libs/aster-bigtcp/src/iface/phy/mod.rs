@@ -2,6 +2,7 @@
 
 mod ether;
 mod ip;
+mod neighbors;
 
 pub use ether::EtherIface;
 pub use ip::IpIface;

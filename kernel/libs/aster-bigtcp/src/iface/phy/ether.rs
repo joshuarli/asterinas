@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec, vec::Vec};
+use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
 
 use aster_softirq::BottomHalfDisabled;
 use ostd::{
@@ -27,16 +27,18 @@ use crate::{
         },
         iface::internal::IfaceInternal,
         time::get_network_timestamp,
+        phy::neighbors::{Due, Neighbors, Queued},
         wire::{arp, ether},
     },
-    packet::{FreshTxPacket, LinkLayer, RxPacket, TransportLayer, TxPacket},
+    packet::{FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
 };
 
 pub struct EtherIface<D, E: Ext> {
     driver: D,
     common: IfaceCommon<E>,
     ether_addr: EthernetAddress,
-    arp_table: SpinLock<BTreeMap<Ipv4Address, EthernetAddress>, BottomHalfDisabled>,
+    neighbors: SpinLock<Neighbors<TxPacket<NetworkLayer>>, BottomHalfDisabled>,
+    released: SpinLock<VecDeque<TxPacket<LinkLayer>>, BottomHalfDisabled>,
 }
 
 impl<D: WithDevice, E: Ext> EtherIface<D, E> {
@@ -60,7 +62,8 @@ impl<D: WithDevice, E: Ext> EtherIface<D, E> {
             driver,
             common,
             ether_addr,
-            arp_table: SpinLock::new(BTreeMap::new()),
+            neighbors: SpinLock::new(Neighbors::new()),
+            released: SpinLock::new(VecDeque::new()),
         })
     }
 }
@@ -85,7 +88,8 @@ impl<D: WithDevice + 'static, E: Ext> Iface<E> for EtherIface<D, E> {
     }
 
     fn flush_neighbors(&self) {
-        self.arp_table.lock().clear();
+        self.neighbors.lock().clear();
+        self.released.lock().clear();
     }
 
     fn send_link_frame(
@@ -154,11 +158,76 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
         iface_cx: &mut Context,
         ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<TxPacket<LinkLayer>> {
-        match self.resolve_ether_or_generate_arp(packet.dst_addr, iface_cx, ipv4_cidrs) {
-            Ok(ether_repr) => Some(ether::emit(packet.packet, &ether_repr)),
-            Err(Some(arp_repr)) => Self::emit_arp(&arp_repr, packet.packet.reset_to_fresh()),
-            Err(None) => None,
+        let next_hop_ip = match iface_cx.route(&packet.dst_addr, iface_cx.now()) {
+            Some(IpAddress::Ipv4(next_hop_ip)) => next_hop_ip,
+            Some(IpAddress::Ipv6(_)) => {
+                // FIXME: Currently, we drop outbound IPv6 packets because neighbor discovery is not
+                // implemented and we have no way to resolve the next-hop link-layer address.
+                ostd::debug!("IPv6 neighbor discovery is not implemented for Ethernet interfaces");
+                return None;
+            }
+            None => return None,
+        };
+
+        let next_hop_ether = if next_hop_ip.is_broadcast() {
+            EthernetAddress::BROADCAST
+        } else if let Some(next_hop_ether) = self.neighbors.lock().resolved(next_hop_ip) {
+            next_hop_ether
+        } else {
+            let len = packet.packet.len();
+            let now_ms = iface_cx.now().total_millis();
+            let queued = self
+                .neighbors
+                .lock()
+                .queue(next_hop_ip, packet.packet, len, now_ms);
+            return match queued {
+                Queued::ProbeNow => self.arp_request(next_hop_ip, ipv4_cidrs),
+                Queued::Waiting | Queued::Dropped => None,
+            };
+        };
+
+        Some(ether::emit(
+            packet.packet,
+            &EthernetRepr {
+                src_addr: self.ether_addr,
+                dst_addr: next_hop_ether,
+                ethertype: EthernetProtocol::Ipv4,
+            },
+        ))
+    }
+
+    fn take_neighbor_frame(
+        &self,
+        iface_cx: &mut Context,
+        ipv4_cidrs: &[Ipv4Cidr],
+    ) -> Option<TxPacket<LinkLayer>> {
+        if let Some(frame) = self.released.lock().pop_front() {
+            return Some(frame);
         }
+
+        let now_ms = iface_cx.now().total_millis();
+        loop {
+            let due = self.neighbors.lock().due(now_ms)?;
+            match due {
+                Due::Probe(address) => {
+                    if let Some(frame) = self.arp_request(address, ipv4_cidrs) {
+                        return Some(frame);
+                    }
+                }
+                Due::Failed(address, packets) => {
+                    ostd::debug!(
+                        "{} packets for the unreachable neighbor {} were dropped",
+                        packets.len(),
+                        address
+                    );
+                }
+            }
+        }
+    }
+
+    fn next_neighbor_poll_ms(&self) -> Option<u64> {
+        let deadline = self.neighbors.lock().next_deadline_ms()?;
+        Some(deadline.max(0) as u64)
     }
 
     fn alloc_tx_buffer(&self, payload_len: usize) -> Result<FreshTxPacket, ostd::Error> {
@@ -181,6 +250,32 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
 
     fn take_looped_frame(&self) -> Option<RxPacket<LinkLayer>> {
         None
+    }
+}
+
+impl<D: WithDevice + 'static, E: Ext> EtherIface<D, E> {
+    fn arp_request(
+        &self,
+        target: Ipv4Address,
+        ipv4_cidrs: &[Ipv4Cidr],
+    ) -> Option<TxPacket<LinkLayer>> {
+        let buffer = match self.alloc_tx_buffer(0) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                ostd::error!("failed to allocate a network packet: {:?}", err);
+                return None;
+            }
+        };
+        Self::emit_arp(
+            &ArpRepr::EthernetIpv4 {
+                operation: ArpOperation::Request,
+                source_hardware_addr: self.ether_addr,
+                source_protocol_addr: arp_source_address(ipv4_cidrs, target),
+                target_hardware_addr: EthernetAddress::BROADCAST,
+                target_protocol_addr: target,
+            },
+            buffer,
+        )
     }
 }
 
@@ -214,12 +309,25 @@ impl<D, E: Ext> EtherIface<D, E> {
                     return None;
                 }
 
-                // Insert the mapping between the Ethernet address and the IP address.
+                // Insert the mapping between the Ethernet address and the IP address, and send the
+                // packets that waited for it.
                 //
                 // TODO: Remove the mapping if it expires.
-                self.arp_table
+                let waiting = self
+                    .neighbors
                     .lock()
-                    .insert(*source_protocol_addr, *source_hardware_addr);
+                    .learn(*source_protocol_addr, *source_hardware_addr);
+                let mut released = self.released.lock();
+                for packet in waiting {
+                    released.push_back(ether::emit(
+                        packet,
+                        &EthernetRepr {
+                            src_addr: self.ether_addr,
+                            dst_addr: *source_hardware_addr,
+                            ethertype: EthernetProtocol::Ipv4,
+                        },
+                    ));
+                }
 
                 None
             }
@@ -253,49 +361,6 @@ impl<D, E: Ext> EtherIface<D, E> {
             }
             _ => None,
         }
-    }
-
-    fn resolve_ether_or_generate_arp(
-        &self,
-        dst_addr: IpAddress,
-        iface_cx: &mut Context,
-        ipv4_cidrs: &[Ipv4Cidr],
-    ) -> Result<EthernetRepr, Option<ArpRepr>> {
-        // Resolve the next-hop IP address.
-        let next_hop_ip = match iface_cx.route(&dst_addr, iface_cx.now()) {
-            Some(IpAddress::Ipv4(next_hop_ip)) => next_hop_ip,
-            Some(IpAddress::Ipv6(_)) => {
-                // FIXME: Currently, we drop outbound IPv6 packets because neighbor discovery is not
-                // implemented and we have no way to resolve the next-hop link-layer address.
-                ostd::debug!("IPv6 neighbor discovery is not implemented for Ethernet interfaces");
-                return Err(None);
-            }
-            None => return Err(None),
-        };
-
-        // Resolve the next-hop Ethernet address.
-        let next_hop_ether = if next_hop_ip.is_broadcast() {
-            EthernetAddress::BROADCAST
-        } else if let Some(next_hop_ether) = self.arp_table.lock().get(&next_hop_ip) {
-            *next_hop_ether
-        } else {
-            // If the next-hop Ethernet address cannot be resolved, we drop the original packet and
-            // send an ARP packet instead. The upper layer should be responsible for detecting the
-            // packet loss and retrying later to see if the Ethernet address is ready.
-            return Err(Some(ArpRepr::EthernetIpv4 {
-                operation: ArpOperation::Request,
-                source_hardware_addr: self.ether_addr,
-                source_protocol_addr: arp_source_address(ipv4_cidrs, next_hop_ip),
-                target_hardware_addr: EthernetAddress::BROADCAST,
-                target_protocol_addr: next_hop_ip,
-            }));
-        };
-
-        Ok(EthernetRepr {
-            src_addr: self.ether_addr,
-            dst_addr: next_hop_ether,
-            ethertype: EthernetProtocol::Ipv4,
-        })
     }
 
     fn emit_arp(arp_repr: &ArpRepr, packet: FreshTxPacket) -> Option<TxPacket<LinkLayer>> {
