@@ -74,8 +74,7 @@ impl<D: WithDevice + 'static, E: Ext> Iface<E> for IpIface<D, E> {
     }
 
     fn mtu(&self) -> usize {
-        self.driver
-            .with(|device| device.capabilities().max_transmission_unit)
+        self.driver.with(|device| device.mtu())
     }
 }
 

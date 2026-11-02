@@ -9,12 +9,22 @@ use crate::{net::iface::Iface, prelude::*};
 #[derive(Clone)]
 pub(super) struct RouteEntry<A: RouteAddressFamily> {
     dst: A::Cidr,
-    #[expect(dead_code)]
     gateway: Option<A>,
     output_iface: Arc<Iface>,
     table_id: RouteTableId,
     metric: RouteMetric,
     type_: RouteType,
+    origin: RouteOrigin<A>,
+}
+
+/// Where a route came from and how it reaches its destination.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L276>.
+#[derive(Clone, Copy)]
+pub(super) struct RouteOrigin<A: RouteAddressFamily> {
+    pub(super) protocol: RouteProtocol,
+    pub(super) scope: RouteScope,
+    pub(super) preferred_source: Option<A>,
 }
 
 impl<A: RouteAddressFamily> RouteEntry<A> {
@@ -26,6 +36,7 @@ impl<A: RouteAddressFamily> RouteEntry<A> {
         table_id: RouteTableId,
         metric: RouteMetric,
         type_: RouteType,
+        origin: RouteOrigin<A>,
     ) -> Result<Self> {
         if dst != A::network(&dst) {
             return_errno_with_message!(Errno::EINVAL, "the route destination is not canonical");
@@ -38,6 +49,7 @@ impl<A: RouteAddressFamily> RouteEntry<A> {
             table_id,
             metric,
             type_,
+            origin,
         })
     }
 
@@ -47,8 +59,7 @@ impl<A: RouteAddressFamily> RouteEntry<A> {
     }
 
     /// Returns the next-hop gateway.
-    #[expect(dead_code)]
-    const fn gateway(&self) -> Option<A> {
+    pub(super) const fn gateway(&self) -> Option<A> {
         self.gateway
     }
 
@@ -70,6 +81,11 @@ impl<A: RouteAddressFamily> RouteEntry<A> {
     /// Returns the route type.
     pub(super) const fn type_(&self) -> RouteType {
         self.type_
+    }
+
+    /// Returns the origin of the route.
+    pub(super) const fn origin(&self) -> &RouteOrigin<A> {
+        &self.origin
     }
 
     pub(super) fn matches_lookup(&self, key: &RouteLookupKey<A>) -> bool {
@@ -139,6 +155,10 @@ impl RouteTableId {
     /// The table ID of the local table,
     /// which manages routes for addresses assigned locally.
     pub(super) const LOCAL: Self = Self(255);
+
+    pub(super) const fn get(self) -> u32 {
+        self.0
+    }
 }
 
 /// A route metric used to prefer routes with equal prefix lengths;
@@ -146,15 +166,45 @@ impl RouteTableId {
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct RouteMetric(u32);
 
+impl RouteMetric {
+    pub(super) const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// The protocol that installed a route.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L276>.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::net) enum RouteProtocol {
+    /// Installed by the kernel.
+    Kernel = 2,
+    /// Installed during boot.
+    Boot = 3,
+}
+
+/// The distance to the destination of a route.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L320>.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::net) enum RouteScope {
+    /// Reachable through a gateway.
+    Universe = 0,
+    /// Reachable on the attached link.
+    Link = 253,
+    /// Reachable on this host.
+    Host = 254,
+}
+
 /// The forwarding behavior of a route.
 ///
 /// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h#L261>.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RouteType {
+pub(in crate::net) enum RouteType {
     /// Forwards packets to a destination.
-    Unicast,
+    Unicast = 1,
     /// Delivers packets locally.
-    Local,
+    Local = 2,
     /// Delivers IPv4 broadcasts.
-    Broadcast,
+    Broadcast = 3,
 }

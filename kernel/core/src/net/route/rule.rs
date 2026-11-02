@@ -32,6 +32,12 @@ impl Rule {
 pub(super) struct RulePriority(u32);
 
 impl RulePriority {
+    pub(super) const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl RulePriority {
     pub(super) const fn new(priority: u32) -> Self {
         Self(priority)
     }

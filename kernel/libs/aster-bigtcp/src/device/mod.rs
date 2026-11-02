@@ -34,6 +34,14 @@ pub trait AnyNetworkDevice: Send + Sync + Any + Debug {
     fn mac_addr(&self) -> EthernetAddress;
     fn capabilities(&self) -> DeviceCapabilities;
 
+    /// Returns the link MTU that user space observes.
+    ///
+    /// This is the largest network-layer payload of one frame, which differs from
+    /// [`DeviceCapabilities::max_transmission_unit`] for Ethernet because smoltcp counts the
+    /// Ethernet header in the latter, and for loopback because an IPv4 packet cannot exceed
+    /// 65535 bytes.
+    fn mtu(&self) -> usize;
+
     // ================ Device Operation ===================
 
     fn can_receive(&self) -> bool;

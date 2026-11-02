@@ -269,6 +269,10 @@ impl NetworkDevice {
     }
 }
 
+/// The size of an Ethernet header, which smoltcp counts in the maximum transmission unit of an
+/// Ethernet device.
+const ETHERNET_HEADER_LEN: usize = 14;
+
 fn init_caps(features: &NetworkFeatures, config: &VirtioNetConfig) -> DeviceCapabilities {
     let mut caps = DeviceCapabilities::default();
 
@@ -277,7 +281,7 @@ fn init_caps(features: &NetworkFeatures, config: &VirtioNetConfig) -> DeviceCapa
 
     if features.contains(NetworkFeatures::VIRTIO_NET_F_MTU) {
         // If `VIRTIO_NET_F_MTU` is negotiated, the MTU is decided by the device.
-        caps.max_transmission_unit = config.mtu as usize;
+        caps.max_transmission_unit = config.mtu as usize + ETHERNET_HEADER_LEN;
     } else {
         // We do not support these features,
         // so this asserts that they are _not_ negotiated.
@@ -289,7 +293,7 @@ fn init_caps(features: &NetworkFeatures, config: &VirtioNetConfig) -> DeviceCapa
                 && !features.contains(NetworkFeatures::VIRTIO_NET_F_GUEST_TSO6)
                 && !features.contains(NetworkFeatures::VIRTIO_NET_F_GUEST_UFO)
         );
-        caps.max_transmission_unit = 1514;
+        caps.max_transmission_unit = 1500 + ETHERNET_HEADER_LEN;
     }
 
     // We do not support checksum offloading.
@@ -315,6 +319,10 @@ impl AnyNetworkDevice for NetworkDevice {
 
     fn capabilities(&self) -> DeviceCapabilities {
         self.caps.clone()
+    }
+
+    fn mtu(&self) -> usize {
+        self.caps.max_transmission_unit - ETHERNET_HEADER_LEN
     }
 
     fn can_receive(&self) -> bool {

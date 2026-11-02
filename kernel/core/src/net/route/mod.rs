@@ -12,16 +12,21 @@ use aster_bigtcp::{
 };
 use spin::Once;
 
+pub(super) use self::{
+    dump::{RouteRecord, RuleOutcome, RuleRecord, dump_routes, dump_rules},
+    entry::{RouteProtocol, RouteScope, RouteType},
+};
 use self::{manager::RouteManager, rule::Rule};
 use super::iface::{self, Iface};
 use crate::prelude::*;
 
+mod dump;
 mod entry;
 mod manager;
 mod rule;
 mod table;
 
-use entry::{RouteAddressFamily, RouteEntry, RouteMetric, RouteTableId, RouteType};
+use entry::{RouteAddressFamily, RouteEntry, RouteMetric, RouteOrigin, RouteTableId};
 
 static IPV4_ROUTE_MANAGER: Once<RouteManager<Ipv4Address>> = Once::new();
 static IPV6_ROUTE_MANAGER: Once<RouteManager<Ipv6Address>> = Once::new();
@@ -94,6 +99,7 @@ fn iface_ipv4_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv4Address>> {
             RouteTableId::LOCAL,
             RouteMetric::default(),
             RouteType::Local,
+            kernel_origin(RouteScope::Host, iface_addr),
         )
         .unwrap();
         routes.push(entry);
@@ -112,6 +118,14 @@ fn iface_ipv4_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv4Address>> {
                 table_id,
                 RouteMetric::default(),
                 type_,
+                kernel_origin(
+                    if type_ == RouteType::Local {
+                        RouteScope::Host
+                    } else {
+                        RouteScope::Link
+                    },
+                    iface_addr,
+                ),
             )
             .unwrap();
             routes.push(entry);
@@ -126,6 +140,7 @@ fn iface_ipv4_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv4Address>> {
                 RouteTableId::LOCAL,
                 RouteMetric::default(),
                 RouteType::Broadcast,
+                kernel_origin(RouteScope::Link, iface_addr),
             )
             .unwrap();
             routes.push(entry);
@@ -147,12 +162,25 @@ fn iface_ipv4_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv4Address>> {
             RouteTableId::MAIN,
             RouteMetric::default(),
             RouteType::Unicast,
+            RouteOrigin {
+                protocol: RouteProtocol::Boot,
+                scope: RouteScope::Universe,
+                preferred_source: None,
+            },
         )
         .unwrap();
         routes.push(entry);
     }
 
     routes
+}
+
+fn kernel_origin<A: RouteAddressFamily>(scope: RouteScope, preferred_source: A) -> RouteOrigin<A> {
+    RouteOrigin {
+        protocol: RouteProtocol::Kernel,
+        scope,
+        preferred_source: Some(preferred_source),
+    }
 }
 
 fn iface_ipv6_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv6Address>> {
@@ -174,6 +202,11 @@ fn iface_ipv6_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv6Address>> {
         RouteTableId::LOCAL,
         RouteMetric::default(),
         RouteType::Local,
+        RouteOrigin {
+            protocol: RouteProtocol::Kernel,
+            scope: RouteScope::Universe,
+            preferred_source: None,
+        },
     )
     .unwrap();
     routes.push(entry);

@@ -33,6 +33,14 @@ impl<A: RouteAddressFamily> RouteManager<A> {
         Self { rules, tables }
     }
 
+    pub(super) fn entries(&self) -> impl Iterator<Item = &RouteEntry<A>> {
+        self.tables.values().flat_map(RouteTable::entries)
+    }
+
+    pub(super) fn rules(&self) -> impl Iterator<Item = &Rule> {
+        self.rules.values().flatten()
+    }
+
     pub(super) fn lookup_entry(&self, key: &RouteLookupKey<A>) -> Result<RouteEntry<A>> {
         for rules in self.rules.values() {
             for rule in rules {

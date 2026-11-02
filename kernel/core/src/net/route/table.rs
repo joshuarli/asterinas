@@ -26,6 +26,10 @@ impl<A: RouteAddressFamily> RouteTable<A> {
         self.entries.insert((*entry.dst(), entry.metric()), entry);
     }
 
+    pub(super) fn entries(&self) -> impl Iterator<Item = &RouteEntry<A>> {
+        self.entries.values()
+    }
+
     pub(super) fn lookup(&self, key: &RouteLookupKey<A>) -> Option<RouteEntry<A>> {
         let mut best: Option<&RouteEntry<A>> = None;
 

@@ -36,6 +36,11 @@ impl AnyNetworkDevice for Loopback {
         capabilities
     }
 
+    fn mtu(&self) -> usize {
+        // Reference: <https://elixir.bootlin.com/linux/v7.1/source/drivers/net/loopback.c#L190>.
+        65536
+    }
+
     fn can_receive(&self) -> bool {
         false
     }

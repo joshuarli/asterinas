@@ -115,5 +115,9 @@ pub(crate) enum CSegmentType {
     NEWROUTE = 24,
     DELROUTE = 25,
     GETROUTE = 26,
+
+    NEWRULE = 32,
+    DELRULE = 33,
+    GETRULE = 34,
     // TODO: The list is not exhaustive.
 }

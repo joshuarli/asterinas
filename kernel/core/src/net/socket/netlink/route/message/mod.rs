@@ -13,11 +13,15 @@ mod segment;
 pub(super) use attr::{
     addr::{AddrAttr, AddrProtocol},
     link::LinkAttr,
+    route::RouteAttr,
+    rule::RuleAttr,
 };
 pub(super) use segment::{
     RtnlSegment,
     addr::{AddrMessageFlags, AddrSegment, AddrSegmentBody, RtScope},
     link::{LinkSegment, LinkSegmentBody},
+    route::{RouteSegment, RouteSegmentBody},
+    rule::{RuleSegment, RuleSegmentBody},
 };
 
 use crate::net::socket::netlink::message::Message;
