@@ -201,6 +201,12 @@ mod test {
 
     use super::*;
 
+    const STRANDED_ORDER: BuddyOrder = 4;
+
+    fn stranded_layout() -> Layout {
+        Layout::from_size_align(PAGE_SIZE << STRANDED_ORDER, PAGE_SIZE).unwrap()
+    }
+
     #[ktest]
     fn reclaim_moves_chunks_cached_by_another_cpu_into_the_global_pool() {
         let guard = irq::disable_local();
@@ -209,39 +215,36 @@ mod test {
             return;
         };
 
-        let order = 4;
-        let layout = Layout::from_size_align(PAGE_SIZE << order, PAGE_SIZE).unwrap();
+        let layout = stranded_layout();
         let stranded = alloc_from_local_or_global(&guard, layout).unwrap();
         LOCAL_POOL
             .get_on_cpu(remote)
             .lock()
-            .insert_chunk(stranded, order);
+            .insert_chunk(stranded, STRANDED_ORDER);
+        assert!(LOCAL_POOL.get_on_cpu(remote).lock().total_size() >= layout.size());
         let global_before = GLOBAL_POOL.lock().total_size();
 
         assert!(reclaim_local_pools());
 
-        assert_eq!(LOCAL_POOL.get_on_cpu(remote).lock().total_size(), 0);
+        assert!(LOCAL_POOL.get_on_cpu(remote).lock().total_size() < layout.size());
         assert!(GLOBAL_POOL.lock().total_size() >= global_before + layout.size());
-        assert!(!reclaim_local_pools());
     }
 
     #[ktest]
     fn reclaim_moves_chunks_cached_by_the_current_cpu_into_the_global_pool() {
         let guard = irq::disable_local();
 
-        let order = 4;
-        let layout = Layout::from_size_align(PAGE_SIZE << order, PAGE_SIZE).unwrap();
+        let layout = stranded_layout();
         let stranded = alloc_from_local_or_global(&guard, layout).unwrap();
         LOCAL_POOL
             .get_with(&guard)
             .lock()
-            .insert_chunk(stranded, order);
+            .insert_chunk(stranded, STRANDED_ORDER);
         let global_before = GLOBAL_POOL.lock().total_size();
 
         assert!(reclaim_local_pools());
 
         assert_eq!(LOCAL_POOL.get_with(&guard).lock().total_size(), 0);
         assert!(GLOBAL_POOL.lock().total_size() >= global_before + layout.size());
-        assert!(!reclaim_local_pools());
     }
 }

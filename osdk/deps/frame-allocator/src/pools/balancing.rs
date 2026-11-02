@@ -141,11 +141,26 @@ mod test {
 
     #[ktest]
     fn plan_moves_nothing_when_the_global_pool_is_almost_exhausted() {
+        assert_eq!(plan(0, 0), Rebalance::Keep);
+        assert_eq!(plan(PAGE_SIZE, 0), Rebalance::Keep);
+
         let cpus = num_cpus();
         for global_pages in 0..(4 * cpus * CACHE_EXPECTED_PORTION) {
             let global_size = global_pages * PAGE_SIZE;
+            let expected = cache_expected_size(global_size);
             for local_pages in 0..(4 * cpus * CACHE_EXPECTED_PORTION) {
-                plan(global_size, local_pages * PAGE_SIZE);
+                let local_size = local_pages * PAGE_SIZE;
+                match plan(global_size, local_size) {
+                    Rebalance::Keep => {}
+                    Rebalance::ToLocal(order) => {
+                        assert!(size_of_order(order) <= expected - local_size);
+                        assert!(expected - local_size >= PAGE_SIZE);
+                    }
+                    Rebalance::ToGlobal(order) => {
+                        assert!(size_of_order(order) <= local_size - expected);
+                        assert!(local_size - expected >= PAGE_SIZE);
+                    }
+                }
             }
         }
     }
