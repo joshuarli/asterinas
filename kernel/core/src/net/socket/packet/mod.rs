@@ -251,6 +251,9 @@ impl Socket for PacketSocket {
         if !iface.flags().contains(InterfaceFlags::UP) {
             return_errno_with_message!(Errno::ENETDOWN, "the interface is down");
         }
+        if let Some(errno) = self.tap.take_error() {
+            return Err(Error::with_message(errno, "the packet socket has a pending error"));
+        }
 
         let payload_len = reader.sum_lens();
         let frame = match self.socket_type {

@@ -112,6 +112,24 @@ FN_TEST(taking_the_interface_down_fails_the_next_receive_once)
 }
 END_TEST()
 
+FN_TEST(a_send_after_the_interface_returns_reports_the_pending_error_once)
+{
+	unsigned char frame[ETH_HLEN + 20] = { 0 };
+	int fd = TEST_SUCC(open_packet(SOCK_RAW, ETH_P_IP, loopback));
+
+	frame[12] = 0x08;
+	frame[ETH_HLEN] = 0x45;
+	frame[ETH_HLEN + 3] = 20;
+	TEST_SUCC(set_loopback_up(0));
+	TEST_SUCC(set_loopback_up(1));
+	TEST_RES(events_of(fd), _ret == POLLERR);
+	TEST_ERRNO(send(fd, frame, sizeof(frame), 0), ENETDOWN);
+	TEST_RES(events_of(fd), _ret == 0);
+	TEST_RES(send(fd, frame, sizeof(frame), 0), _ret == (ssize_t)sizeof(frame));
+	TEST_SUCC(close(fd));
+}
+END_TEST()
+
 FN_TEST(a_second_down_does_not_fail_the_socket_again)
 {
 	int fd = TEST_SUCC(open_packet(SOCK_RAW, ETH_P_IP, loopback));
