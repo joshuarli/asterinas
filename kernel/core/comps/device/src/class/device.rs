@@ -3,6 +3,7 @@
 //! Devices in a class.
 
 use alloc::{
+    string::String,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -131,6 +132,10 @@ impl<C: Class> DeviceInternals for ClassDevice<C> {
 
     fn wants_device_link(&self) -> bool {
         self.declared.has_device_link()
+    }
+
+    fn class_uevent_environment(&self) -> Vec<(String, String)> {
+        self.class.class().uevent_environment(self)
     }
 }
 

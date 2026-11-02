@@ -116,6 +116,15 @@ impl Uevent {
         }
     }
 
+    /// Creates the uevent that announces a newly registered device.
+    pub(super) fn new_addition(
+        devpath: String,
+        subsystem: String,
+        envs: Vec<(String, String)>,
+    ) -> Self {
+        Self::new(SysObjAction::Add, devpath, subsystem, envs)
+    }
+
     /// Creates a new uevent from synthetic uevent.
     pub(super) fn new_from_syn(
         synth_uevent: SyntheticUevent,

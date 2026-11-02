@@ -26,7 +26,7 @@
 mod device;
 mod observer;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 
 use ostd::sync::Mutex;
 
@@ -55,6 +55,11 @@ pub trait Class: Sized + Send + Sync + 'static {
     /// Overrides the `/dev` node name or mode of a device.
     fn devnode(&self, _dev: &ClassDevice<Self>) -> Option<DevNode> {
         None
+    }
+
+    /// Returns the `KEY=VALUE` pairs a device adds to its uevents beyond the device number, name and type.
+    fn uevent_environment(&self, _dev: &ClassDevice<Self>) -> Vec<(String, String)> {
+        Vec::new()
     }
 
     /// Returns the attributes shared by all devices on this class.

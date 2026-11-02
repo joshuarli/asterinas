@@ -234,7 +234,7 @@ fn bus_device_registration_and_probe() {
     assert_eq!(utils::read_attr(disk_path, "size"), "8\n");
     assert_eq!(
         utils::read_attr(disk_path, "uevent"),
-        "MAJOR=200\nMINOR=3\nDEVNAME=td3\n"
+        "MAJOR=200\nMINOR=3\nDEVNAME=td3\nDEVMODE=0660\nTOYSECTORS=8\n"
     );
     assert_eq!(utils::attr_names(disk_path).len(), 3);
     assert_eq!(observer.added.load(Ordering::Relaxed), 1);

@@ -45,6 +45,11 @@ pub trait DeviceInternals {
     fn wants_device_link(&self) -> bool {
         true
     }
+
+    /// Returns the `KEY=VALUE` pairs the device's class adds to its uevents.
+    fn class_uevent_environment(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// The properties and registration status shared by all devices.

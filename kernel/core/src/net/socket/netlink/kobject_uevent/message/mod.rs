@@ -49,6 +49,16 @@ impl UeventMessage {
         Ok(Self::new(uevent, NetlinkSocketAddr::new_unspecified()))
     }
 
+    /// Creates the message the registration of a device produces.
+    pub(crate) fn from_device_addition(
+        devpath: String,
+        subsystem: String,
+        envs: Vec<(String, String)>,
+    ) -> Self {
+        let uevent = Uevent::new_addition(devpath, subsystem, envs);
+        Self::new(uevent, NetlinkSocketAddr::new_unspecified())
+    }
+
     /// Creates a message from the bytes a user-space socket sent to a multicast group.
     pub(crate) fn from_user_bytes(bytes: Vec<u8>, src_addr: NetlinkSocketAddr) -> Result<Self> {
         let uevent = String::from_utf8(bytes)

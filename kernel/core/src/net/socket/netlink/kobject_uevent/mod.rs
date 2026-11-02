@@ -29,3 +29,13 @@ pub(crate) fn broadcast_synthetic_uevent(
     let message = UeventMessage::from_synthetic_command(command, devpath, subsystem, envs)?;
     NetlinkUeventProtocol::multicast(GroupIdSet::new(KERNEL_UEVENT_GROUPS), message)
 }
+
+/// Delivers the `add` uevent of a registered device to every socket listening for kernel uevents.
+pub(crate) fn broadcast_add_uevent(
+    devpath: String,
+    subsystem: String,
+    envs: Vec<(String, String)>,
+) -> Result<()> {
+    let message = UeventMessage::from_device_addition(devpath, subsystem, envs);
+    NetlinkUeventProtocol::multicast(GroupIdSet::new(KERNEL_UEVENT_GROUPS), message)
+}

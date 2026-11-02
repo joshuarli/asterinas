@@ -5,7 +5,7 @@
 
 use aster_device::{
     common::DevKind,
-    hooks::{self, DevNodeRequest, HookError, KernelHooks, UeventRequest},
+    hooks::{self, DevNodeRequest, HookError, KernelHooks, UeventOrigin, UeventRequest},
 };
 
 use crate::{
@@ -38,12 +38,22 @@ impl KernelHooks for Hooks {
     }
 
     fn emit_uevent(&self, request: &UeventRequest) -> core::result::Result<(), HookError> {
-        crate::net::socket::netlink::broadcast_synthetic_uevent(
-            &request.command,
-            request.devpath.clone(),
-            request.subsystem.clone(),
-            request.environment.clone(),
-        )
+        let devpath = request.devpath.clone();
+        let subsystem = request.subsystem.clone();
+        let environment = request.environment.clone();
+        match &request.origin {
+            UeventOrigin::Written(command) => crate::net::socket::netlink::broadcast_synthetic_uevent(
+                command,
+                devpath,
+                subsystem,
+                environment,
+            ),
+            UeventOrigin::Registered => crate::net::socket::netlink::broadcast_add_uevent(
+                devpath,
+                subsystem,
+                environment,
+            ),
+        }
         .map_err(|_| HookError)
     }
 

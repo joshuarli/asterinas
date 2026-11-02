@@ -129,6 +129,13 @@ impl Class for ToyBlock {
             mode: Some(0o660),
         })
     }
+
+    fn uevent_environment(&self, dev: &ClassDevice<Self>) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)> {
+        alloc::vec![(
+            alloc::string::String::from("TOYSECTORS"),
+            alloc::format!("{}", dev.sectors),
+        )]
+    }
 }
 
 pub(super) struct CountingObserver {

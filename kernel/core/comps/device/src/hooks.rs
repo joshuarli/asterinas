@@ -40,17 +40,27 @@ pub trait KernelHooks: Send + Sync + 'static {
     /// The request is the one that created the node.
     fn delete_devnode(&self, request: &DevNodeRequest) -> core::result::Result<(), HookError>;
 
-    /// Delivers the event a write to a device's `uevent` attribute asks for.
+    /// Delivers the uevent of a device: the event a write to its `uevent` attribute asks for,
+    /// or the `add` event of its registration.
     ///
-    /// Fails when the command is not a valid synthetic uevent.
+    /// Fails when the command of a [`UeventOrigin::Written`] request is not a valid synthetic uevent.
     fn emit_uevent(&self, request: &UeventRequest) -> core::result::Result<(), HookError>;
 }
 
-/// A request to deliver a synthetic uevent for a device.
+/// What caused a uevent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UeventOrigin {
+    /// A write to the device's `uevent` attribute: an action, an optional token, and `KEY=VALUE` pairs.
+    Written(String),
+    /// The registration of the device.
+    Registered,
+}
+
+/// A request to deliver a uevent for a device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UeventRequest {
-    /// The text written to the `uevent` attribute: an action, an optional token, and `KEY=VALUE` pairs.
-    pub command: String,
+    /// What caused the event.
+    pub origin: UeventOrigin,
     /// The device's absolute path under sysfs, such as `/devices/virtual/block/vda`.
     pub devpath: String,
     /// The name of the subsystem that owns the device.
@@ -84,6 +94,13 @@ pub(crate) fn delete_devnode(request: &DevNodeRequest) -> Result<()> {
 
 pub(crate) fn emit_uevent(request: &UeventRequest) -> Result<()> {
     HOOKS.emit_uevent(request)
+}
+
+/// Announces a registered device to the listeners of kernel uevents, if the hooks are installed.
+///
+/// Before the hooks exist nothing can listen, so there is nobody to announce to.
+pub(crate) fn announce_registered(request: &UeventRequest) -> Result<()> {
+    HOOKS.announce_registered(request)
 }
 
 /// The hooks, once installed, and the requests waiting for them.
@@ -134,6 +151,13 @@ impl HookSlot {
         match self.hooks.get() {
             Some(hooks) => hooks.emit_uevent(request).map_err(|_| Error::InvalidValue),
             None => Err(Error::Hook),
+        }
+    }
+
+    pub(crate) fn announce_registered(&self, request: &UeventRequest) -> Result<()> {
+        match self.hooks.get() {
+            Some(hooks) => hooks.emit_uevent(request).map_err(|_| Error::Hook),
+            None => Ok(()),
         }
     }
 

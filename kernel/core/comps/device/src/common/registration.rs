@@ -213,6 +213,13 @@ fn add_steps(this: &Arc<dyn AnyDevice>) -> Result<()> {
         ops.on_added(this);
     }
 
+    // 7. Announce the device to the listeners of kernel uevents.
+    if subsystem.name().is_some()
+        && let Err(error) = hooks::announce_registered(&uevent_request(this.as_ref(), hooks::UeventOrigin::Registered))
+    {
+        ostd::warn!("failed to announce device {}: {:?}", base.name(), error);
+    }
+
     Ok(())
 }
 
@@ -384,10 +391,14 @@ fn uevent_environment(dev: &dyn AnyDevice) -> Vec<(String, String)> {
             None => String::from(dev.base().name().replace('!', "/")),
         };
         environment.push((String::from("DEVNAME"), devname));
+        if let Some(mode) = dev.devnode_override().and_then(|node| node.mode) {
+            environment.push((String::from("DEVMODE"), alloc::format!("0{:o}", mode)));
+        }
     }
     if let Some(devtype) = dev.type_name() {
         environment.push((String::from("DEVTYPE"), String::from(devtype)));
     }
+    environment.extend(dev.class_uevent_environment());
     environment
 }
 
@@ -398,12 +409,16 @@ fn show_uevent(dev: &dyn AnyDevice, w: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-fn store_uevent(dev: &dyn AnyDevice, text: &str) -> Result<()> {
-    let request = hooks::UeventRequest {
-        command: String::from(text.trim_end_matches('\n')),
+fn uevent_request(dev: &dyn AnyDevice, origin: hooks::UeventOrigin) -> hooks::UeventRequest {
+    hooks::UeventRequest {
+        origin,
         devpath: dev.base().tree_path(),
         subsystem: String::from(dev.subsystem().name().unwrap_or_default()),
         environment: uevent_environment(dev),
-    };
-    hooks::emit_uevent(&request)
+    }
+}
+
+fn store_uevent(dev: &dyn AnyDevice, text: &str) -> Result<()> {
+    let command = String::from(text.trim_end_matches('\n'));
+    hooks::emit_uevent(&uevent_request(dev, hooks::UeventOrigin::Written(command)))
 }
