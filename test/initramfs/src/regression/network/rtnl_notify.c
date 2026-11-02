@@ -509,6 +509,16 @@ FN_TEST(group_membership_is_joined_and_left_by_group_number)
 }
 END_TEST()
 
+FN_TEST(a_receive_with_dont_wait_does_not_block_on_an_idle_socket)
+{
+	char buffer[256];
+	int listener = CHECK(rtnl_open(RTMGRP_IPV4_ROUTE));
+
+	TEST_ERRNO(recv(listener, buffer, sizeof(buffer), MSG_DONTWAIT), EAGAIN);
+	close(listener);
+}
+END_TEST()
+
 FN_TEST(a_full_receive_queue_reports_one_overrun_and_keeps_its_messages)
 {
 	int listener = CHECK(rtnl_open(RTMGRP_IPV4_ROUTE));
