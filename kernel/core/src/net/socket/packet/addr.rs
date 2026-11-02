@@ -5,6 +5,19 @@ use crate::{net::socket::util::SocketAddr, prelude::*};
 /// The maximum length of a link-layer address in a packet socket address.
 pub(crate) const MAX_LINK_ADDR_LEN: usize = 8;
 
+/// The kind of a frame as a packet socket reports it.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v6.0.9/source/include/uapi/linux/if_packet.h#L26>.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PacketType {
+    Host = 0,
+    Broadcast = 1,
+    Multicast = 2,
+    OtherHost = 3,
+    Outgoing = 4,
+}
+
 /// The address of a packet socket (`struct sockaddr_ll`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PacketSocketAddr {
@@ -16,6 +29,11 @@ pub(crate) struct PacketSocketAddr {
     packet_type: u8,
     link_addr_len: u8,
     link_addr: [u8; MAX_LINK_ADDR_LEN],
+    /// Whether the address is reported with the full size of `struct sockaddr_ll`.
+    ///
+    /// Linux reports an address received with a frame that way and the address of a socket
+    /// only up to the end of its link-layer address.
+    full_length: bool,
 }
 
 impl PacketSocketAddr {
@@ -34,7 +52,18 @@ impl PacketSocketAddr {
             packet_type,
             link_addr_len,
             link_addr,
+            full_length: false,
         }
+    }
+
+    /// Reports the address with the full size of `struct sockaddr_ll`.
+    pub(crate) const fn with_full_length(mut self) -> Self {
+        self.full_length = true;
+        self
+    }
+
+    pub(crate) const fn has_full_length(&self) -> bool {
+        self.full_length
     }
 
     pub(crate) const fn protocol(&self) -> u16 {

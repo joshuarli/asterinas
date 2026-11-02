@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{collections::btree_map::BTreeMap, sync::Arc};
+use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec, vec::Vec};
 
 use aster_softirq::BottomHalfDisabled;
-use ostd::sync::SpinLock;
+use ostd::{
+    mm::{Infallible, VmReader, VmWriter},
+    sync::SpinLock,
+};
 use smoltcp::{
     iface::{Config, Context},
     wire::{
@@ -76,6 +79,10 @@ impl<D: WithDevice + 'static, E: Ext> Iface<E> for EtherIface<D, E> {
     fn mtu(&self) -> usize {
         self.driver.with(|device| device.mtu())
     }
+
+    fn flush_neighbors(&self) {
+        self.arp_table.lock().clear();
+    }
 }
 
 impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
@@ -127,6 +134,20 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
 
     fn alloc_tx_buffer(&self, payload_len: usize) -> Result<FreshTxPacket, ostd::Error> {
         D::Device::alloc_tx_buffer(payload_len)
+    }
+
+    fn hardware_addr(&self) -> [u8; 6] {
+        self.ether_addr.0
+    }
+
+    fn peek_ethertype(&self, frame: VmReader<'_, Infallible>) -> Option<u16> {
+        ether::peek_ethertype(frame)
+    }
+
+    fn copy_ethernet_frame(&self, mut frame: VmReader<'_, Infallible>) -> Vec<u8> {
+        let mut bytes = vec![0u8; frame.remain()];
+        frame.read(&mut VmWriter::from(bytes.as_mut_slice()));
+        bytes
     }
 }
 

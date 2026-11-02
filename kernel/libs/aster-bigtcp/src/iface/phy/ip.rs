@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec, vec::Vec};
+
+use ostd::mm::{Infallible, VmReader, VmWriter};
 
 use smoltcp::{
     iface::{Config, Context},
@@ -76,6 +78,8 @@ impl<D: WithDevice + 'static, E: Ext> Iface<E> for IpIface<D, E> {
     fn mtu(&self) -> usize {
         self.driver.with(|device| device.mtu())
     }
+
+    fn flush_neighbors(&self) {}
 }
 
 impl<D: WithDevice + 'static, E: Ext> PollPhy for IpIface<D, E> {
@@ -99,5 +103,34 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for IpIface<D, E> {
 
     fn alloc_tx_buffer(&self, payload_len: usize) -> Result<FreshTxPacket, ostd::Error> {
         D::Device::alloc_tx_buffer(payload_len)
+    }
+
+    fn hardware_addr(&self) -> [u8; 6] {
+        [0; 6]
+    }
+
+    fn peek_ethertype(&self, mut frame: VmReader<'_, Infallible>) -> Option<u16> {
+        ethertype_of_ip_packet(frame.read_val::<u8>().ok()?)
+    }
+
+    fn copy_ethernet_frame(&self, mut frame: VmReader<'_, Infallible>) -> Vec<u8> {
+        const HEADER_LEN: usize = 14;
+
+        let mut bytes = vec![0u8; HEADER_LEN + frame.remain()];
+        frame.read(&mut VmWriter::from(&mut bytes[HEADER_LEN..]));
+        let ethertype = ethertype_of_ip_packet(bytes[HEADER_LEN]).unwrap_or(0);
+        bytes[HEADER_LEN - 2..HEADER_LEN].copy_from_slice(&ethertype.to_be_bytes());
+        bytes
+    }
+}
+
+fn ethertype_of_ip_packet(first_byte: u8) -> Option<u16> {
+    const ETHERTYPE_IPV4: u16 = 0x0800;
+    const ETHERTYPE_IPV6: u16 = 0x86dd;
+
+    match first_byte >> 4 {
+        4 => Some(ETHERTYPE_IPV4),
+        6 => Some(ETHERTYPE_IPV6),
+        _ => None,
     }
 }

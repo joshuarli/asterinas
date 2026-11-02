@@ -9,6 +9,7 @@ mod poll;
 mod poll_iface;
 mod port;
 mod sched;
+mod tap;
 mod time;
 mod wire;
 
@@ -22,3 +23,4 @@ pub use phy::{EtherIface, IpIface};
 pub(crate) use poll_iface::{PollKey, PollableIfaceMut};
 pub use port::BindPortConfig;
 pub use sched::ScheduleNextPoll;
+pub use tap::{FrameDirection, FrameKind, LinkFrame, LinkTap};

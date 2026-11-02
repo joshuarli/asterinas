@@ -283,7 +283,7 @@ pub(crate) fn write_socket_addr_with_max_len(
         }
         SocketAddr::Packet(addr) => {
             let c_socket_addr = CSocketAddrPacket::from(*addr);
-            let actual_len = CSocketAddrPacket::len_with_link_addr(addr.link_addr_len());
+            let actual_len = CSocketAddrPacket::reported_len(addr);
             let written_len = min(actual_len, max_len as usize);
             current_userspace!().write_bytes(dest, &c_socket_addr.as_bytes()[..written_len])?;
             actual_len

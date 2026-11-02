@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use ostd::mm::{Infallible, VmReader};
 use smoltcp::wire::{EthernetAddress, EthernetRepr};
 
 use crate::{
@@ -18,6 +19,11 @@ pub(in crate::iface) fn parse(
         ethertype: u16::from(header.typ).into(),
     };
     Some((pkt.peel(size_of::<Header>()), repr))
+}
+
+pub(in crate::iface) fn peek_ethertype(mut frame: VmReader<'_, Infallible>) -> Option<u16> {
+    let header = frame.read_val::<Header>().ok()?;
+    Some(u16::from(header.typ))
 }
 
 pub(in crate::iface) fn emit(

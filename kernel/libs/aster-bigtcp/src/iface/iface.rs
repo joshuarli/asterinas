@@ -9,6 +9,7 @@ use smoltcp::{
 
 use super::{
     BindPortConfig, BoundTcpPort, BoundUdpPort, InterfaceFlags, InterfaceName, InterfaceType,
+    LinkTap,
 };
 use crate::{
     errors::{AddressTableFull, BindError, RouteTableFull},
@@ -30,6 +31,9 @@ pub trait Iface<E>: internal::IfaceInternal<E> + Send + Sync {
 
     /// Returns the maximum transmission unit.
     fn mtu(&self) -> usize;
+
+    /// Forgets the link-layer addresses learned from neighbors.
+    fn flush_neighbors(&self);
 }
 
 impl<E: Ext> dyn Iface<E> {
@@ -73,6 +77,16 @@ impl<E: Ext> dyn Iface<E> {
         self.common().name()
     }
 
+    /// Registers an observer of the link-layer frames of the iface.
+    pub fn add_link_tap(&self, tap: Arc<dyn LinkTap>) {
+        self.common().add_link_tap(tap)
+    }
+
+    /// Unregisters an observer of the link-layer frames of the iface.
+    pub fn remove_link_tap(&self, tap: &Arc<dyn LinkTap>) {
+        self.common().remove_link_tap(tap)
+    }
+
     /// Returns the interface type.
     pub fn type_(&self) -> InterfaceType {
         self.common().type_()
@@ -86,8 +100,13 @@ impl<E: Ext> dyn Iface<E> {
     /// Brings the interface up or down.
     ///
     /// A down interface drops the packets it receives and sends none.
+    ///
+    /// Taking an interface down also forgets the neighbors it has learned, as Linux does.
     pub fn set_administratively_up(&self, up: bool) {
-        self.common().set_administratively_up(up)
+        self.common().set_administratively_up(up);
+        if !up {
+            self.flush_neighbors();
+        }
     }
 
     // FIXME: Linux and smoltcp allow multiple IP CIDRs per interface, while the

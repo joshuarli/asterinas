@@ -13,7 +13,10 @@ use core::{
 use aster_softirq::BottomHalfDisabled;
 use bitflags::bitflags;
 use int_to_c_enum::TryFromInt;
-use ostd::sync::{SpinLock, SpinLockGuard};
+use ostd::{
+    mm::{Infallible, VmReader},
+    sync::{SpinLock, SpinLockGuard},
+};
 use smoltcp::{
     iface::{Context, Route},
     wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
@@ -24,6 +27,7 @@ use super::{
     poll::{PollContext, SocketTableAction},
     poll_iface::PollableIface,
     port::BindPortConfig,
+    tap::{LinkTap, LinkTaps},
     time::get_network_timestamp,
 };
 use crate::{
@@ -45,6 +49,7 @@ pub struct IfaceCommon<E: Ext> {
     interface: SpinLock<PollableIface<E>, BottomHalfDisabled>,
     used_ports: SpinLock<PortTable, BottomHalfDisabled>,
     sockets: SpinLock<SocketTable<E>, BottomHalfDisabled>,
+    taps: LinkTaps,
     sched_poll: E::ScheduleNextPoll,
 }
 
@@ -76,6 +81,15 @@ pub(super) trait PollPhy {
     ) -> Option<TxPacket<LinkLayer>>;
 
     fn alloc_tx_buffer(&self, payload_len: usize) -> Result<FreshTxPacket, ostd::Error>;
+
+    /// Returns the link-layer address of the interface; zero if it has none.
+    fn hardware_addr(&self) -> [u8; 6];
+
+    /// Returns the EtherType of a link-layer frame, if it has a known network protocol.
+    fn peek_ethertype(&self, frame: VmReader<'_, Infallible>) -> Option<u16>;
+
+    /// Copies a link-layer frame, adding an Ethernet header if the link has none.
+    fn copy_ethernet_frame(&self, frame: VmReader<'_, Infallible>) -> Vec<u8>;
 }
 
 /// A normalized IP address for binding purposes.
@@ -122,6 +136,7 @@ impl<E: Ext> IfaceCommon<E> {
             interface: SpinLock::new(PollableIface::new(interface)),
             used_ports: SpinLock::new(PortTable::new()),
             sockets: SpinLock::new(SocketTable::new()),
+            taps: LinkTaps::new(index, type_),
             sched_poll,
         }
     }
@@ -144,11 +159,23 @@ impl<E: Ext> IfaceCommon<E> {
 
     pub(super) fn set_administratively_up(&self, up: bool) {
         let link_up_flags = (InterfaceFlags::UP | InterfaceFlags::RUNNING | InterfaceFlags::LOWER_UP).bits();
-        if up {
-            self.flags.fetch_or(link_up_flags, Ordering::Relaxed);
+        let previous = if up {
+            self.flags.fetch_or(link_up_flags, Ordering::Relaxed)
         } else {
-            self.flags.fetch_and(!link_up_flags, Ordering::Relaxed);
+            self.flags.fetch_and(!link_up_flags, Ordering::Relaxed)
+        };
+        let was_up = previous & InterfaceFlags::UP.bits() != 0;
+        if was_up != up {
+            self.taps.link_changed(up);
         }
+    }
+
+    pub(super) fn add_link_tap(&self, tap: Arc<dyn LinkTap>) {
+        self.taps.add(tap);
+    }
+
+    pub(super) fn remove_link_tap(&self, tap: &Arc<dyn LinkTap>) {
+        self.taps.remove(tap);
     }
 
     pub(super) fn ipv4_cidr(&self) -> Option<Ipv4Cidr> {
@@ -291,8 +318,8 @@ impl<E: Ext> IfaceCommon<E> {
         let mut socket_actions = Vec::new();
 
         let mut context = PollContext::new(interface.as_mut(), &sockets, &mut socket_actions);
-        context.poll_ingress(device, phy);
-        context.poll_egress(device, phy);
+        context.poll_ingress(device, phy, &self.taps);
+        context.poll_egress(device, phy, &self.taps);
 
         // Insert new connections and remove dead connections.
         for action in socket_actions.into_iter() {

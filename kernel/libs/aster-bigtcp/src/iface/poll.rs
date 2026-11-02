@@ -15,6 +15,7 @@ use super::{
     common::{PhyProcessResult, PollPhy, TxPacketWithDst},
     packet_slice::PacketSlice,
     poll_iface::PollableIfaceMut,
+    tap::{FrameDirection, LinkTaps},
     wire::{
         icmp,
         ip::{self, IpReprWithLen},
@@ -25,10 +26,20 @@ use crate::{
     device::{AnyNetworkDevice, NetError},
     ext::Ext,
     iface::poll_iface::IsUnicast,
-    packet::{ApplicationLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
+    packet::{ApplicationLayer, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
     socket::{TcpConnectionBg, TcpProcessResult},
     socket_table::{ConnectionKey, ListenerKey, SocketTable},
 };
+
+fn send_frame(
+    device: &mut dyn AnyNetworkDevice,
+    phy: &dyn PollPhy,
+    taps: &LinkTaps,
+    packet: TxPacket<LinkLayer>,
+) -> Result<(), NetError> {
+    taps.deliver(phy, FrameDirection::Outgoing, || packet.reader());
+    device.send(packet)
+}
 
 pub(super) struct PollContext<'a, E: Ext> {
     iface: PollableIfaceMut<'a, E>,
@@ -60,7 +71,12 @@ impl<'a, E: Ext> PollContext<'a, E> {
 }
 
 impl<E: Ext> PollContext<'_, E> {
-    pub(super) fn poll_ingress(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
+    pub(super) fn poll_ingress(
+        &mut self,
+        device: &mut dyn AnyNetworkDevice,
+        phy: &dyn PollPhy,
+        taps: &LinkTaps,
+    ) {
         let ipv4_cidrs = self.iface.ipv4_cidrs();
         loop {
             let rx_packet = match device.receive() {
@@ -72,6 +88,8 @@ impl<E: Ext> PollContext<'_, E> {
                 }
             };
 
+            taps.deliver(phy, FrameDirection::Incoming, || rx_packet.reader());
+
             let Some(processed) = phy.process(rx_packet, self.iface.context_mut(), ipv4_cidrs) else {
                 continue;
             };
@@ -80,7 +98,7 @@ impl<E: Ext> PollContext<'_, E> {
                 PhyProcessResult::Ipv4(packet) => (packet, Some(ip::Version::V4)),
                 PhyProcessResult::Ipv6(packet) => (packet, Some(ip::Version::V6)),
                 PhyProcessResult::Tx(packet) => {
-                    if let Err(err) = device.send(packet) {
+                    if let Err(err) = send_frame(device, phy, taps, packet) {
                         ostd::error!("failed to send a network packet: {:?}", err);
                     }
                     continue;
@@ -89,7 +107,7 @@ impl<E: Ext> PollContext<'_, E> {
 
             if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version)
                 && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
-                && let Err(err) = device.send(tx_packet)
+                && let Err(err) = send_frame(device, phy, taps, tx_packet)
             {
                 ostd::error!("failed to send a network packet: {:?}", err);
             }
@@ -447,14 +465,19 @@ impl<E: Ext> PollContext<'_, E> {
 }
 
 impl<E: Ext> PollContext<'_, E> {
-    pub(super) fn poll_egress(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) {
+    pub(super) fn poll_egress(
+        &mut self,
+        device: &mut dyn AnyNetworkDevice,
+        phy: &dyn PollPhy,
+        taps: &LinkTaps,
+    ) {
         let ipv4_cidrs = self.iface.ipv4_cidrs();
         while device.can_send() {
             let (did_something, packet) = self.dispatch_ip(phy);
 
             if let Some(packet) = packet
                 && let Some(tx_packet) = phy.dispatch(packet, self.iface.context_mut(), ipv4_cidrs)
-                && let Err(err) = device.send(tx_packet)
+                && let Err(err) = send_frame(device, phy, taps, tx_packet)
             {
                 ostd::error!("failed to send a network packet: {:?}", err);
                 break;

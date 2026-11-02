@@ -22,9 +22,14 @@ pub(crate) struct CSocketAddrPacket {
 }
 
 impl CSocketAddrPacket {
-    /// The length of the address when it carries `link_addr_len` link-layer address bytes.
-    pub(crate) fn len_with_link_addr(link_addr_len: u8) -> usize {
-        core::mem::offset_of!(Self, sll_addr) + (link_addr_len as usize).min(MAX_LINK_ADDR_LEN)
+    /// The length that the address is reported with.
+    pub(crate) fn reported_len(addr: &PacketSocketAddr) -> usize {
+        if addr.has_full_length() {
+            size_of::<Self>()
+        } else {
+            core::mem::offset_of!(Self, sll_addr)
+                + (addr.link_addr_len() as usize).min(MAX_LINK_ADDR_LEN)
+        }
     }
 }
 
