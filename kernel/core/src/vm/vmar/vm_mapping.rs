@@ -111,6 +111,9 @@ impl Interval<Vaddr> for VmMapping {
 
 /***************************** Basic methods *********************************/
 
+/// The number of pages around an anonymous page fault that are mapped together.
+const ANONYMOUS_FAULT_AROUND_PAGES: usize = 16;
+
 impl VmMapping {
     pub(super) fn new(
         map_size: NonZeroUsize,
@@ -407,6 +410,13 @@ impl VmMapping {
             }
 
             return res;
+        } else if matches!(&self.mapped_mem, MappedMemory::Anonymous) {
+            return self.handle_anonymous_page_faults_around(
+                vm_space,
+                page_aligned_addr,
+                page_fault_info.required_perms,
+                rss_delta,
+            );
         } else if let MappedMemory::Device(ref mapped_obj) = self.mapped_mem {
             let handle = MapHandle {
                 vm_mapping: self,
@@ -626,6 +636,72 @@ impl VmMapping {
         } else {
             VmoMapMode::SharedWrite
         }
+    }
+
+    /// Handles a page fault in an anonymous mapping and maps the other missing pages of the
+    /// aligned window around it.
+    ///
+    /// Each fault pays for locking the page table once, which costs more than allocating and
+    /// mapping a page, so serving a window with one cursor makes sequential touching cheaper.
+    /// Only the faulting page can fail the fault: running out of memory while mapping the
+    /// others ends the window. A fault on a page that is already mapped (copy-on-write, or a
+    /// fault another thread served) takes the single page path.
+    fn handle_anonymous_page_faults_around(
+        &self,
+        vm_space: &VmSpace,
+        page_aligned_addr: Vaddr,
+        required_perms: VmPerms,
+        rss_delta: &mut RssDelta,
+    ) -> Result<()> {
+        const WINDOW_PAGES: usize = ANONYMOUS_FAULT_AROUND_PAGES;
+        const WINDOW_ADDR_MASK: usize = !(WINDOW_PAGES * PAGE_SIZE - 1);
+
+        let start_addr = max(page_aligned_addr & WINDOW_ADDR_MASK, self.map_to_addr);
+        let end_addr = min(
+            (page_aligned_addr & WINDOW_ADDR_MASK) + WINDOW_PAGES * PAGE_SIZE,
+            self.map_end(),
+        );
+
+        let preempt_guard = disable_preempt();
+        let mut cursor = vm_space.cursor_mut(&preempt_guard, &(start_addr..end_addr))?;
+
+        cursor.jump(page_aligned_addr).unwrap();
+        if cursor.query().unwrap().1.is_some() {
+            drop(cursor);
+            drop(preempt_guard);
+            return self.handle_single_page_fault(vm_space, page_aligned_addr, required_perms, rss_delta);
+        }
+
+        let is_write = required_perms.contains(VmPerms::WRITE);
+        let mut mapped_pages: isize = 0;
+        let mut addr = start_addr;
+        while addr < end_addr {
+            let faulting = addr == page_aligned_addr;
+            cursor.jump(addr).unwrap();
+            if cursor.query().unwrap().1.is_none() {
+                match FrameAllocOptions::new().alloc_frame() {
+                    Ok(frame) => {
+                        let mut page_flags: PageFlags = self.perms.into();
+                        page_flags |= PageFlags::ACCESSED;
+                        if faulting && is_write {
+                            page_flags |= PageFlags::DIRTY;
+                        }
+                        let map_prop = PageProperty::new_user(page_flags, CachePolicy::Writeback);
+                        cursor.map(frame.into(), map_prop);
+                        mapped_pages += 1;
+                    }
+                    Err(err) if faulting => {
+                        rss_delta.add(self.rss_type(), mapped_pages);
+                        return Err(err.into());
+                    }
+                    Err(_) => break,
+                }
+            }
+            addr += PAGE_SIZE;
+        }
+
+        rss_delta.add(self.rss_type(), mapped_pages);
+        Ok(())
     }
 
     /// Handles a page fault and maps additional surrounding pages.
