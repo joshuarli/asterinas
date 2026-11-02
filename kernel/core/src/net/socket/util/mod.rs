@@ -2,6 +2,7 @@
 
 pub(super) mod datagram_common;
 pub(super) mod ioctl;
+mod bound_device;
 mod linger_option;
 mod message_flags;
 mod message_header;
@@ -12,6 +13,7 @@ mod shutdown_cmd;
 mod socket_addr;
 mod socket_timeout;
 
+pub(crate) use bound_device::BoundDevice;
 pub(crate) use linger_option::LingerOption;
 pub(crate) use message_flags::{RecvFlags, SendFlags};
 pub(super) use message_header::CControlHeader;

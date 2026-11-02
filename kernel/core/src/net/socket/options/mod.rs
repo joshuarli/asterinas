@@ -2,7 +2,7 @@
 
 use macros::impl_socket_options;
 
-use super::util::{LingerOption, SocketTimeout};
+use super::util::{BoundDevice, LingerOption, SocketTimeout};
 use crate::{net::socket::unix::CUserCred, prelude::*, process::Gid, util::net::SockType};
 
 pub(in crate::net) mod macros;
@@ -36,4 +36,5 @@ impl_socket_options!(
     pub(crate) struct SendBufForce(u32);
     pub(crate) struct RecvBufForce(u32);
     pub(crate) struct PeerGroups(Arc<[Gid]>);
+    pub(crate) struct BindToDevice(BoundDevice);
 );

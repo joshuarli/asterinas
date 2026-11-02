@@ -2,6 +2,7 @@
 
 use core::time::Duration;
 
+use aster_bigtcp::iface::InterfaceName;
 use ostd::mm::VmIo;
 
 use crate::{
@@ -10,7 +11,7 @@ use crate::{
         ip::{options::IpTtl, stream_options::CongestionControl},
         packet::options::PacketStatistics,
         unix::CUserCred,
-        util::{LingerOption, SocketTimeout},
+        util::{BoundDevice, LingerOption, SocketTimeout},
     },
     prelude::*,
     time::timeval_t,
@@ -154,6 +155,34 @@ impl WriteToUser for SocketTimeout {
     fn write_to_user(&self, addr: Vaddr, max_len: u32) -> Result<usize> {
         let timeval = timeval_t::from(self.duration().unwrap_or_default());
         write_partial_pod(&timeval, addr, max_len)
+    }
+}
+
+const IFNAMSIZ: u32 = 16;
+
+impl ReadFromUser for BoundDevice {
+    fn read_from_user(addr: Vaddr, max_len: u32) -> Result<Self> {
+        let mut name = [0u8; IFNAMSIZ as usize];
+        let read_len = (IFNAMSIZ - 1).min(max_len) as usize;
+        current_userspace!().read_bytes(addr, &mut name[..read_len])?;
+
+        BoundDevice::from_name(&InterfaceName::from_bytes_until_nul(&name))
+    }
+}
+
+impl WriteToUser for BoundDevice {
+    fn write_to_user(&self, addr: Vaddr, max_len: u32) -> Result<usize> {
+        let Some(name) = self.name()? else {
+            return Ok(0);
+        };
+
+        let bytes = name.as_bytes_with_nul();
+        if (max_len as usize) < bytes.len() {
+            return_errno_with_message!(Errno::EINVAL, "the buffer is too small for the name");
+        }
+
+        current_userspace!().write_bytes(addr, bytes)?;
+        Ok(bytes.len())
     }
 }
 

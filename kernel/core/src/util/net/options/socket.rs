@@ -6,7 +6,7 @@ use super::{RawSocketOption, impl_raw_sock_option_get_only, impl_raw_socket_opti
 use crate::{
     context::current_userspace,
     net::socket::options::{
-        AcceptConn, Broadcast, Error, KeepAlive, Linger, PassCred, PeerCred, PeerGroups, Priority,
+        AcceptConn, BindToDevice, Broadcast, Error, KeepAlive, Linger, PassCred, PeerCred, PeerGroups, Priority,
         RecvBuf, RecvBufForce, RecvTimeout, RecvTimestamp, RecvTimestampNs, ReuseAddr, ReusePort,
         SendBuf, SendBufForce, SendTimeout, SocketOption, SocketType, Timestamping,
     },
@@ -41,6 +41,7 @@ enum CSocketOptionName {
     PEERCRED = 17,
     RCVTIMEO_OLD = 20,
     SNDTIMEO_OLD = 21,
+    BINDTODEVICE = 25,
     ATTACH_FILTER = 26,
     DETACH_FILTER = 27,
     TIMESTAMP_OLD = 29,
@@ -62,6 +63,7 @@ pub(crate) fn new_socket_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
         CSocketOptionName::TYPE => Ok(Box::new(SocketType::new())),
         CSocketOptionName::ERROR => Ok(Box::new(Error::new())),
         CSocketOptionName::BROADCAST => Ok(Box::new(Broadcast::new())),
+        CSocketOptionName::BINDTODEVICE => Ok(Box::new(BindToDevice::new())),
         CSocketOptionName::SNDBUF => Ok(Box::new(SendBuf::new())),
         CSocketOptionName::RCVBUF => Ok(Box::new(RecvBuf::new())),
         CSocketOptionName::KEEPALIVE => Ok(Box::new(KeepAlive::new())),
@@ -94,6 +96,7 @@ impl_raw_socket_option!(ReuseAddr);
 impl_raw_sock_option_get_only!(SocketType);
 impl_raw_sock_option_get_only!(Error);
 impl_raw_socket_option!(Broadcast);
+impl_raw_socket_option!(BindToDevice);
 impl_raw_socket_option!(SendBuf);
 impl_raw_socket_option!(RecvBuf);
 impl_raw_socket_option!(KeepAlive);

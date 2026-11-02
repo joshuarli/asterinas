@@ -18,18 +18,22 @@ use crate::{
         socket::{
             Socket,
             ip::{
-                common::map_unspecified_to_localhost,
+                common::{get_ephemeral_endpoint_on, map_unspecified_to_localhost},
                 options::{IpOptionSet, SetIpLevelOption},
             },
             new_socket_common,
-            options::{Error as SocketError, SocketOption, macros::sock_option_mut},
+            options::{
+                BindToDevice, Error as SocketError, SocketOption,
+                macros::{sock_option_mut, sock_option_ref},
+            },
             private::SocketPrivate,
             util::{
-                ControlMessage, MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
+                BoundDevice, ControlMessage, MessageHeader, RecvFlags, RecvOutput, SendFlags,
+                SocketAddr,
                 datagram_common::{Inner, select_remote_and_bind},
                 options::{
                     GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
-                    timestamping,
+                    check_current_net_raw, timestamping,
                 },
             },
         },
@@ -58,6 +62,7 @@ pub(crate) struct DatagramSocket {
 struct OptionSet {
     socket: SocketOptionSet,
     ip: IpOptionSet,
+    device: BoundDevice,
     // TODO: UDP option set
 }
 
@@ -65,7 +70,11 @@ impl OptionSet {
     fn new() -> Self {
         let socket = SocketOptionSet::new_udp();
         let ip = IpOptionSet::new_udp();
-        OptionSet { socket, ip }
+        OptionSet {
+            socket,
+            ip,
+            device: BoundDevice::NONE,
+        }
     }
 }
 
@@ -177,9 +186,7 @@ impl DatagramSocket {
                         "the destination address is not specified",
                     )
                 })?;
-                self.inner
-                    .write()
-                    .bind_ephemeral(remote_endpoint, &self.pollee)
+                self.bind_ephemeral(remote_endpoint)
             },
             |bound_datagram, remote_endpoint| {
                 let sent_bytes = bound_datagram.try_send_tagged(reader, remote_endpoint, tx_tag)?;
@@ -196,6 +203,55 @@ impl DatagramSocket {
 }
 
 impl DatagramSocket {
+    /// Binds an unbound socket to an ephemeral endpoint that reaches `remote_endpoint`.
+    ///
+    /// A socket restricted to a device sends through that device whatever the routes say.
+    fn bind_ephemeral(&self, remote_endpoint: &IpEndpoint) -> Result<()> {
+        let device = self.options.read().device;
+        let mut inner = self.inner.write();
+
+        let is_unbound = matches!(&*inner, Inner::Unbound(_));
+
+        match device.iface()? {
+            Some(iface) if is_unbound => {
+                let endpoint = get_ephemeral_endpoint_on(
+                    iface,
+                    &map_unspecified_to_localhost(*remote_endpoint),
+                )?;
+                inner.bind(
+                    &endpoint,
+                    &self.pollee,
+                    BindOptions {
+                        can_reuse: false,
+                        device,
+                    },
+                )
+            }
+            _ => inner.bind_ephemeral(remote_endpoint, &self.pollee),
+        }
+    }
+
+    fn set_bound_device(&self, device: BoundDevice) -> Result<()> {
+        let inner = self.inner.read();
+        let mut options = self.options.write();
+
+        if options.device == device {
+            return Ok(());
+        }
+        if options.device.is_bound() {
+            check_current_net_raw()?;
+        }
+        if matches!(&*inner, Inner::Bound(_)) {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "a bound socket cannot change the device it is restricted to"
+            );
+        }
+
+        options.device = device;
+        Ok(())
+    }
+
     /// Returns the tag that asks for a transmit timestamp, or zero when none is requested.
     ///
     /// The tag is the timestamp key plus one, so that it is never zero.
@@ -237,11 +293,16 @@ impl SocketPrivate for DatagramSocket {
 impl Socket for DatagramSocket {
     fn bind(&self, socket_addr: SocketAddr) -> Result<()> {
         let endpoint = socket_addr.try_into()?;
-        let can_reuse = self.options.read().socket.reuse_addr();
+        let (can_reuse, device) = {
+            let options = self.options.read();
+            (options.socket.reuse_addr(), options.device)
+        };
 
-        self.inner
-            .write()
-            .bind(&endpoint, &self.pollee, BindOptions { can_reuse })
+        self.inner.write().bind(
+            &endpoint,
+            &self.pollee,
+            BindOptions { can_reuse, device },
+        )
     }
 
     fn connect(&self, socket_addr: SocketAddr) -> Result<()> {
@@ -254,6 +315,7 @@ impl Socket for DatagramSocket {
             );
         }
 
+        self.bind_ephemeral(&endpoint)?;
         self.inner.write().connect(&endpoint, &self.pollee)
     }
 
@@ -348,6 +410,10 @@ impl Socket for DatagramSocket {
                 socket_errors.set(None);
                 return Ok(());
             }
+            bind_to_device @ BindToDevice => {
+                bind_to_device.set(self.options.read().device);
+                return Ok(());
+            }
             _ => (),
         });
 
@@ -368,6 +434,13 @@ impl Socket for DatagramSocket {
     }
 
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
+        sock_option_ref!(match option {
+            bind_to_device @ BindToDevice => {
+                return self.set_bound_device(*bind_to_device.get().unwrap());
+            }
+            _ => (),
+        });
+
         let inner = self.inner.read();
         let mut options = self.options.write();
 

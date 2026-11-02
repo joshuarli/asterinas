@@ -8,7 +8,7 @@ use ostd::sync::SpinLock;
 use smoltcp::{
     iface::Context,
     socket::udp::UdpMetadata,
-    wire::{IpRepr, UdpRepr},
+    wire::{IpListenEndpoint, IpRepr, UdpRepr},
 };
 
 use super::{
@@ -102,7 +102,9 @@ impl<E: Ext> UdpSocketBg<E> {
         //
         // `RawUdpSocket::accepts` accepts all incoming broadcast and multicast packets, which is not
         // what we want.
-        ip_repr.dst_addr() == *self.bound.addr() && udp_repr.dst_port == self.bound.port()
+        let bound_addr = self.bound.addr();
+        (bound_addr.is_unspecified() || ip_repr.dst_addr() == *bound_addr)
+            && udp_repr.dst_port == self.bound.port()
     }
 
     /// Tries to generate an outgoing packet and dispatches the generated packet.
@@ -173,7 +175,11 @@ impl<E: Ext> UdpSocket<E> {
         let socket = {
             let mut socket = new_udp_socket();
 
-            if let Err(err) = socket.bind(local_endpoint) {
+            let listen_endpoint = IpListenEndpoint {
+                addr: (!local_endpoint.addr.is_unspecified()).then_some(local_endpoint.addr),
+                port: local_endpoint.port,
+            };
+            if let Err(err) = socket.bind(listen_endpoint) {
                 return Err((bound, err));
             }
 

@@ -10,8 +10,9 @@ use crate::{
         socket::{
             ip::common::{
                 get_ephemeral_endpoint, map_unspecified_to_localhost, resolve_bind_iface_and_config,
+                resolve_device_bind_iface_and_config,
             },
-            util::datagram_common,
+            util::{BoundDevice, datagram_common},
         },
     },
     prelude::*,
@@ -30,6 +31,7 @@ impl UnboundDatagram {
 
 pub(super) struct BindOptions {
     pub(super) can_reuse: bool,
+    pub(super) device: BoundDevice,
 }
 
 impl datagram_common::Unbound for UnboundDatagram {
@@ -44,7 +46,7 @@ impl datagram_common::Unbound for UnboundDatagram {
         pollee: &Pollee,
         options: BindOptions,
     ) -> Result<Self::Bound> {
-        let bound_port = bind_port(endpoint, options.can_reuse)?;
+        let bound_port = bind_port(endpoint, options.can_reuse, options.device)?;
 
         let bound_socket =
             match UdpSocket::new_bind(bound_port, DatagramObserver::new(pollee.clone())) {
@@ -66,7 +68,14 @@ impl datagram_common::Unbound for UnboundDatagram {
             let remote_endpoint = map_unspecified_to_localhost(*remote_endpoint);
             get_ephemeral_endpoint(&remote_endpoint)?
         };
-        self.bind(&endpoint, pollee, BindOptions { can_reuse: false })
+        self.bind(
+            &endpoint,
+            pollee,
+            BindOptions {
+                can_reuse: false,
+                device: BoundDevice::NONE,
+            },
+        )
     }
 
     fn check_io_events(&self) -> IoEvents {
@@ -74,7 +83,12 @@ impl datagram_common::Unbound for UnboundDatagram {
     }
 }
 
-fn bind_port(endpoint: &IpEndpoint, can_reuse: bool) -> Result<BoundUdpPort> {
-    let (iface, config) = resolve_bind_iface_and_config(endpoint, can_reuse)?;
+fn bind_port(endpoint: &IpEndpoint, can_reuse: bool, device: BoundDevice) -> Result<BoundUdpPort> {
+    let (iface, config) = match device.iface()? {
+        Some(device_iface) => {
+            resolve_device_bind_iface_and_config(endpoint, can_reuse, device_iface)?
+        }
+        None => resolve_bind_iface_and_config(endpoint, can_reuse)?,
+    };
     Ok(iface.bind_udp(config)?)
 }
