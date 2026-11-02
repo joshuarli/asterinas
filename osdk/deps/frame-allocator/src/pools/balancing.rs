@@ -2,7 +2,7 @@
 
 //! Controlling the balancing between CPU-local free pools and the global free pool.
 
-use ostd::cpu::num_cpus;
+use ostd::{cpu::num_cpus, mm::PAGE_SIZE};
 
 use super::{BuddyOrder, BuddySet, MAX_LOCAL_BUDDY_ORDER, OnDemandGlobalLock, lesser_order_of};
 
@@ -45,39 +45,49 @@ fn cache_maximal_size(global_size: usize) -> usize {
     cache_expected_size(global_size) * CACHE_MAXIMAL_MULTIPLIER
 }
 
+/// What balancing a local cache against the global free pool has to move.
+#[derive(Debug, PartialEq, Eq)]
+enum Rebalance {
+    Keep,
+    ToGlobal(BuddyOrder),
+    ToLocal(BuddyOrder),
+}
+
+/// Decides what to move for the given sizes of the global pool and a local cache.
+///
+/// Nothing is moved when the amount to move is smaller than a page, which
+/// happens when the global pool is almost exhausted.
+fn plan(global_size: usize, local_size: usize) -> Rebalance {
+    let minimal_local_size = cache_minimal_size(global_size);
+    let expected_local_size = cache_expected_size(global_size);
+    let maximal_local_size = cache_maximal_size(global_size);
+
+    if local_size >= maximal_local_size {
+        let expected_removal = local_size - expected_local_size;
+        if expected_removal < PAGE_SIZE {
+            return Rebalance::Keep;
+        }
+        Rebalance::ToGlobal(lesser_order_of(expected_removal))
+    } else if local_size < minimal_local_size {
+        let expected_allocation = expected_local_size - local_size;
+        if expected_allocation < PAGE_SIZE {
+            return Rebalance::Keep;
+        }
+        Rebalance::ToLocal(lesser_order_of(expected_allocation))
+    } else {
+        Rebalance::Keep
+    }
+}
+
 /// Balances a local cache and the global free pool.
 pub(super) fn balance(
     local: &mut BuddySet<MAX_LOCAL_BUDDY_ORDER>,
     global: &mut OnDemandGlobalLock,
 ) {
-    let global_size = global.get_global_size();
-
-    let minimal_local_size = cache_minimal_size(global_size);
-    let expected_local_size = cache_expected_size(global_size);
-    let maximal_local_size = cache_maximal_size(global_size);
-
-    let local_size = local.total_size();
-
-    if local_size >= maximal_local_size {
-        // Move local frames to the global pool.
-        if local_size == 0 {
-            return;
-        }
-
-        let expected_removal = local_size - expected_local_size;
-        let lesser_order = lesser_order_of(expected_removal);
-
-        balance_to(local, &mut *global.get(), lesser_order);
-    } else if local_size < minimal_local_size {
-        // Move global frames to the local pool.
-        if global_size == 0 {
-            return;
-        }
-
-        let expected_allocation = expected_local_size - local_size;
-        let lesser_order = lesser_order_of(expected_allocation);
-
-        balance_to(&mut *global.get(), local, lesser_order);
+    match plan(global.get_global_size(), local.total_size()) {
+        Rebalance::Keep => {}
+        Rebalance::ToGlobal(order) => balance_to(local, &mut *global.get(), order),
+        Rebalance::ToLocal(order) => balance_to(&mut *global.get(), local, order),
     }
 }
 
@@ -128,6 +138,33 @@ mod test {
 
     use super::*;
     use crate::test::MockMemoryRegion;
+
+    #[ktest]
+    fn plan_moves_nothing_when_the_global_pool_is_almost_exhausted() {
+        let cpus = num_cpus();
+        for global_pages in 0..(4 * cpus * CACHE_EXPECTED_PORTION) {
+            let global_size = global_pages * PAGE_SIZE;
+            for local_pages in 0..(4 * cpus * CACHE_EXPECTED_PORTION) {
+                plan(global_size, local_pages * PAGE_SIZE);
+            }
+        }
+    }
+
+    #[ktest]
+    fn plan_returns_surplus_and_refills_a_starved_cache() {
+        let cpus = num_cpus();
+        let global_size = 1024 * cpus * CACHE_EXPECTED_PORTION * PAGE_SIZE;
+        let expected = cache_expected_size(global_size);
+        assert_eq!(plan(global_size, expected), Rebalance::Keep);
+        assert_eq!(
+            plan(global_size, 3 * expected),
+            Rebalance::ToGlobal(lesser_order_of(2 * expected))
+        );
+        assert_eq!(
+            plan(global_size, 0),
+            Rebalance::ToLocal(lesser_order_of(expected))
+        );
+    }
 
     #[ktest]
     fn balance_to_terminates_when_only_small_chunks_remain() {
