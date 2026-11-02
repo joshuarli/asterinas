@@ -16,7 +16,7 @@ use int_to_c_enum::TryFromInt;
 use ostd::sync::{SpinLock, SpinLockGuard};
 use smoltcp::{
     iface::{Context, Route},
-    wire::{IpAddress, IpEndpoint, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
+    wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
 };
 
 use super::{
@@ -28,7 +28,7 @@ use super::{
 };
 use crate::{
     device::{AnyNetworkDevice, WithDevice},
-    errors::{AddressTableFull, BindError},
+    errors::{AddressTableFull, BindError, RouteTableFull},
     ext::Ext,
     iface::ScheduleNextPoll,
     packet::{FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TxPacket},
@@ -161,6 +161,13 @@ impl<E: Ext> IfaceCommon<E> {
 
     pub(super) fn set_ipv4_cidrs(&self, cidrs: &[Ipv4Cidr]) -> Result<(), AddressTableFull> {
         self.interface.lock().set_ipv4_cidrs(cidrs)
+    }
+
+    pub(super) fn set_ipv4_gateway_routes(
+        &self,
+        routes: &[(Ipv4Cidr, Ipv4Address)],
+    ) -> Result<(), RouteTableFull> {
+        self.interface.lock().set_ipv4_gateway_routes(routes)
     }
 
     pub(super) fn ipv6_cidr(&self) -> Option<Ipv6Cidr> {

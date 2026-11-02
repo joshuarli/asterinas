@@ -11,7 +11,7 @@ use super::{
     BindPortConfig, BoundTcpPort, BoundUdpPort, InterfaceFlags, InterfaceName, InterfaceType,
 };
 use crate::{
-    errors::{AddressTableFull, BindError},
+    errors::{AddressTableFull, BindError, RouteTableFull},
     ext::Ext,
 };
 
@@ -108,6 +108,16 @@ impl<E: Ext> dyn Iface<E> {
     /// The first CIDR is the one the iface uses as its source address when it must pick one.
     pub fn set_ipv4_cidrs(&self, cidrs: &[Ipv4Cidr]) -> Result<(), AddressTableFull> {
         self.common().set_ipv4_cidrs(cidrs)
+    }
+
+    /// Replaces the IPv4 routes through a gateway that the iface uses to reach other networks.
+    ///
+    /// Destinations on a network of one of the iface's addresses are always reached directly.
+    pub fn set_ipv4_gateway_routes(
+        &self,
+        routes: &[(Ipv4Cidr, Ipv4Address)],
+    ) -> Result<(), RouteTableFull> {
+        self.common().set_ipv4_gateway_routes(routes)
     }
 
     /// Gets the IPv6 CIDR of the iface, if any.

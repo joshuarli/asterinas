@@ -144,19 +144,24 @@ impl RouteAddressFamily for Ipv6Address {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) struct RouteTableId(u32);
+pub(in crate::net) struct RouteTableId(u32);
 
 impl RouteTableId {
     /// The table ID of the default table,
     /// which is reserved for routes used after earlier rules do not match.
-    pub(super) const DEFAULT: Self = Self(253);
+    pub(in crate::net) const DEFAULT: Self = Self(253);
     /// The table ID of the main table.
-    pub(super) const MAIN: Self = Self(254);
+    pub(in crate::net) const MAIN: Self = Self(254);
     /// The table ID of the local table,
     /// which manages routes for addresses assigned locally.
-    pub(super) const LOCAL: Self = Self(255);
+    pub(in crate::net) const LOCAL: Self = Self(255);
 
-    pub(super) const fn get(self) -> u32 {
+    /// Creates the ID of a table; zero stands for the main table.
+    pub(in crate::net) const fn new(id: u32) -> Self {
+        if id == 0 { Self::MAIN } else { Self(id) }
+    }
+
+    pub(in crate::net) const fn get(self) -> u32 {
         self.0
     }
 }
@@ -164,36 +169,60 @@ impl RouteTableId {
 /// A route metric used to prefer routes with equal prefix lengths;
 /// lower values have higher priority.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) struct RouteMetric(u32);
+pub(in crate::net) struct RouteMetric(u32);
 
 impl RouteMetric {
-    pub(super) const fn get(self) -> u32 {
+    pub(super) const MIN: Self = Self(0);
+
+    pub(in crate::net) const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub(in crate::net) const fn get(self) -> u32 {
         self.0
     }
 }
 
-/// The protocol that installed a route.
+/// The protocol that installed a route (`RTPROT_*`).
 ///
 /// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h>.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::net) enum RouteProtocol {
+pub(in crate::net) struct RouteProtocol(u8);
+
+impl RouteProtocol {
     /// Installed by the kernel.
-    Kernel = 2,
-    /// Installed during boot.
-    Boot = 3,
+    pub(in crate::net) const KERNEL: Self = Self(2);
+
+    pub(in crate::net) const fn new(value: u8) -> Self {
+        Self(value)
+    }
+
+    pub(in crate::net) const fn get(self) -> u8 {
+        self.0
+    }
 }
 
-/// The distance to the destination of a route.
+/// The distance to the destination of a route (`RT_SCOPE_*`).
 ///
 /// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/rtnetlink.h>.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::net) enum RouteScope {
+pub(in crate::net) struct RouteScope(u8);
+
+impl RouteScope {
     /// Reachable through a gateway.
-    Universe = 0,
+    pub(in crate::net) const UNIVERSE: Self = Self(0);
     /// Reachable on the attached link.
-    Link = 253,
+    pub(in crate::net) const LINK: Self = Self(253);
     /// Reachable on this host.
-    Host = 254,
+    pub(in crate::net) const HOST: Self = Self(254);
+
+    pub(in crate::net) const fn new(value: u8) -> Self {
+        Self(value)
+    }
+
+    pub(in crate::net) const fn get(self) -> u8 {
+        self.0
+    }
 }
 
 /// The forwarding behavior of a route.

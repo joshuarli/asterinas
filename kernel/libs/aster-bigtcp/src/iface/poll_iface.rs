@@ -9,7 +9,7 @@ use core::{
 use smoltcp::iface::Route;
 
 use crate::{
-    errors::AddressTableFull,
+    errors::{AddressTableFull, RouteTableFull},
     ext::Ext,
     socket::{NeedIfacePoll, TcpConnectionBg},
 };
@@ -86,6 +86,36 @@ impl<E: Ext> PollableIface<E> {
         });
         self.ipv4_cidrs = cidrs.to_vec();
         Ok(())
+    }
+
+    /// Replaces the IPv4 gateway routes of the interface and keeps its other routes.
+    pub(super) fn set_ipv4_gateway_routes(
+        &mut self,
+        routes: &[(smoltcp::wire::Ipv4Cidr, smoltcp::wire::Ipv4Address)],
+    ) -> Result<(), RouteTableFull> {
+        let mut result = Ok(());
+        self.interface.routes_mut().update(|storage| {
+            let kept = storage
+                .iter()
+                .filter(|route| !matches!(route.cidr, smoltcp::wire::IpCidr::Ipv4(_)))
+                .count();
+            if kept + routes.len() > smoltcp::config::IFACE_MAX_ROUTE_COUNT {
+                result = Err(RouteTableFull);
+                return;
+            }
+            storage.retain(|route| !matches!(route.cidr, smoltcp::wire::IpCidr::Ipv4(_)));
+            for (cidr, gateway) in routes {
+                storage
+                    .push(Route {
+                        cidr: smoltcp::wire::IpCidr::Ipv4(*cidr),
+                        via_router: smoltcp::wire::IpAddress::Ipv4(*gateway),
+                        preferred_until: None,
+                        expires_at: None,
+                    })
+                    .expect("the route table capacity was checked");
+            }
+        });
+        result
     }
 
     pub(super) fn ipv6_cidr(&self) -> Option<smoltcp::wire::Ipv6Cidr> {

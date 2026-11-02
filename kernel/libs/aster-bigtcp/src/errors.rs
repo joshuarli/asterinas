@@ -13,6 +13,10 @@ pub enum BindError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AddressTableFull;
 
+/// An error returned when an interface cannot hold the requested IPv4 gateway routes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteTableFull;
+
 pub mod tcp {
     /// An error returned by a TCP stream I/O operation before any byte is transferred.
     ///

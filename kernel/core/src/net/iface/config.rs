@@ -12,7 +12,10 @@ use aster_bigtcp::{
 use spin::Once;
 
 use super::{Iface, iter_all_ifaces};
-use crate::{net::route, prelude::*};
+use crate::{
+    net::route::{self, Ipv4RouteSelector, NewIpv4Route},
+    prelude::*,
+};
 
 /// The state of the lock is the list of all IPv4 addresses.
 ///
@@ -143,6 +146,18 @@ pub(in crate::net) fn set_administratively_up(iface: &Arc<Iface>, up: bool) {
     let addresses = IPV4_ADDRESSES.get().unwrap().lock();
     iface.set_administratively_up(up);
     sync(iface, &addresses);
+}
+
+/// Installs a unicast IPv4 route through an interface.
+pub(in crate::net) fn add_ipv4_route(request: NewIpv4Route) -> Result<()> {
+    let addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    route::add_ipv4_route(request, &addresses)
+}
+
+/// Removes an IPv4 route that user space installed.
+pub(in crate::net) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<()> {
+    let _addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    route::remove_ipv4_route(selector)
 }
 
 /// Assigns an IPv4 address to an interface.

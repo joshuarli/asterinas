@@ -2,15 +2,23 @@
 
 //! Handle route-related requests.
 
-use core::net::IpAddr;
+use core::net::{IpAddr, Ipv4Addr};
+
+use aster_bigtcp::wire::Ipv4Cidr;
 
 use super::util::finish_response;
 use crate::{
     net::{
-        route::{RouteRecord, dump_routes},
-        socket::netlink::{
-            message::{CMsgSegHdr, CSegmentType, GetRequestFlags, SegHdrCommonFlags},
-            route::message::{RouteAttr, RouteSegment, RouteSegmentBody, RtnlSegment},
+        iface::config,
+        route::{Ipv4RouteSelector, NewIpv4Route, RouteRecord, dump_routes},
+        socket::{
+            netlink::{
+                message::{
+                    CMsgSegHdr, CSegmentType, GetRequestFlags, NewRequestFlags, SegHdrCommonFlags,
+                },
+                route::message::{RouteAttr, RouteSegment, RouteSegmentBody, RtnlSegment},
+            },
+            util::options::check_current_privileged,
         },
     },
     prelude::*,
@@ -38,6 +46,127 @@ pub(super) fn do_get_route(request_segment: &RouteSegment) -> Result<Vec<RtnlSeg
     Ok(response_segments)
 }
 
+/// `RTN_UNICAST` in Linux.
+const TYPE_UNICAST: u8 = 1;
+
+/// `RT_SCOPE_NOWHERE` in Linux.
+const SCOPE_NOWHERE: u8 = 255;
+
+pub(super) fn do_new_route(request_segment: &RouteSegment) -> Result<()> {
+    check_current_privileged()?;
+
+    let body = request_segment.body();
+    let parsed = ParsedRoute::from_request(request_segment)?;
+
+    let request_flags = NewRequestFlags::from_bits_truncate(request_segment.header().flags);
+    if request_flags.intersects(NewRequestFlags::REPLACE | NewRequestFlags::APPEND) {
+        return_errno_with_message!(
+            Errno::EOPNOTSUPP,
+            "replacing or appending a route is not supported"
+        );
+    }
+    if body.type_ != TYPE_UNICAST {
+        return_errno_with_message!(Errno::EOPNOTSUPP, "only unicast routes can be installed");
+    }
+
+    config::add_ipv4_route(NewIpv4Route {
+        table: parsed.table,
+        destination: parsed.destination,
+        gateway: parsed.gateway,
+        iface_index: parsed.iface_index,
+        priority: parsed.priority.unwrap_or(0),
+        protocol: body.protocol,
+        scope: body.scope,
+    })
+}
+
+pub(super) fn do_del_route(request_segment: &RouteSegment) -> Result<()> {
+    check_current_privileged()?;
+
+    let body = request_segment.body();
+    let parsed = ParsedRoute::from_request(request_segment)?;
+
+    config::remove_ipv4_route(&Ipv4RouteSelector {
+        table: parsed.table,
+        destination: parsed.destination,
+        priority: parsed.priority.filter(|priority| *priority != 0),
+        gateway: parsed.gateway,
+        iface_index: parsed.iface_index,
+        protocol: Some(body.protocol).filter(|protocol| *protocol != 0),
+        type_: Some(body.type_).filter(|type_| *type_ != 0),
+        scope: Some(body.scope).filter(|scope| *scope != SCOPE_NOWHERE),
+    })
+}
+
+/// The parts of a route request that both installing and removing a route use.
+struct ParsedRoute {
+    table: u32,
+    destination: Ipv4Cidr,
+    gateway: Option<Ipv4Addr>,
+    iface_index: Option<u32>,
+    priority: Option<u32>,
+}
+
+impl ParsedRoute {
+    fn from_request(request_segment: &RouteSegment) -> Result<Self> {
+        let body = request_segment.body();
+        if body.family != CSocketAddrFamily::AF_INET as u8 {
+            return_errno_with_message!(Errno::EOPNOTSUPP, "only IPv4 routes can be changed");
+        }
+        if body.dst_len > 32 {
+            return_errno_with_message!(Errno::EINVAL, "the prefix length is invalid");
+        }
+        if body.src_len != 0 || body.flags != 0 {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "source-specific routes and route flags are not supported"
+            );
+        }
+        if body.tos != 0 {
+            return_errno_with_message!(Errno::EOPNOTSUPP, "routes with a TOS are not supported");
+        }
+
+        let mut table = u32::from(body.table);
+        let mut destination = None;
+        let mut gateway = None;
+        let mut iface_index = None;
+        let mut priority = None;
+        for attr in request_segment.attrs() {
+            match attr {
+                RouteAttr::Table(id) => table = *id,
+                RouteAttr::Dst(IpAddr::V4(address)) => destination = Some(*address),
+                RouteAttr::Gateway(IpAddr::V4(address)) => gateway = Some(*address),
+                RouteAttr::Dst(IpAddr::V6(_)) | RouteAttr::Gateway(IpAddr::V6(_)) => {
+                    return_errno_with_message!(Errno::EINVAL, "the address is not IPv4");
+                }
+                RouteAttr::Oif(index) => iface_index = Some(*index).filter(|index| *index != 0),
+                RouteAttr::Priority(value) => priority = Some(*value),
+                RouteAttr::Pref(_) => {}
+                RouteAttr::PrefSrc(_) | RouteAttr::CacheInfo(_) => {
+                    return_errno_with_message!(
+                        Errno::EOPNOTSUPP,
+                        "the route attribute is not supported"
+                    );
+                }
+            }
+        }
+
+        let destination = match destination {
+            Some(address) => address,
+            None if body.dst_len == 0 => Ipv4Addr::UNSPECIFIED,
+            None => return_errno_with_message!(Errno::EINVAL, "the route has no destination"),
+        };
+
+        Ok(Self {
+            table,
+            destination: Ipv4Cidr::new(destination, body.dst_len),
+            gateway,
+            iface_index,
+            priority,
+        })
+    }
+}
+
 fn record_to_new_route(request_header: &CMsgSegHdr, record: &RouteRecord) -> RouteSegment {
     let header = CMsgSegHdr {
         len: 0,
@@ -58,8 +187,8 @@ fn record_to_new_route(request_header: &CMsgSegHdr, record: &RouteRecord) -> Rou
         src_len: 0,
         tos: 0,
         table: u8::try_from(record.table).unwrap_or(252),
-        protocol: record.protocol as u8,
-        scope: record.scope as u8,
+        protocol: record.protocol.get(),
+        scope: record.scope.get(),
         type_: record.type_ as u8,
         flags: 0,
     };

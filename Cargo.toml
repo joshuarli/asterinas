@@ -269,6 +269,7 @@ smoltcp = { version = "=0.11.0", registry = "mycrates", default-features = false
     "socket-tcp",
     "packetmeta-id",
     "iface-max-addr-count-8",
+    "iface-max-route-count-8",
 ] }
 takeable = "0.2.2"
 time = { version = "0.3", default-features = false, features = ["alloc"] }

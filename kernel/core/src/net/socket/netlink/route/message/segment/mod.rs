@@ -60,6 +60,7 @@ pub(crate) enum RtnlSegment {
     DelAddr(AddrSegment),
     NewRoute(RouteSegment),
     GetRoute(RouteSegment),
+    DelRoute(RouteSegment),
     NewRule(RuleSegment),
     GetRule(RuleSegment),
     Done(DoneSegment),
@@ -75,9 +76,9 @@ impl ProtocolSegment for RtnlSegment {
             RtnlSegment::NewAddr(addr_segment)
             | RtnlSegment::GetAddr(addr_segment)
             | RtnlSegment::DelAddr(addr_segment) => addr_segment.header(),
-            RtnlSegment::NewRoute(route_segment) | RtnlSegment::GetRoute(route_segment) => {
-                route_segment.header()
-            }
+            RtnlSegment::NewRoute(route_segment)
+            | RtnlSegment::GetRoute(route_segment)
+            | RtnlSegment::DelRoute(route_segment) => route_segment.header(),
             RtnlSegment::NewRule(rule_segment) | RtnlSegment::GetRule(rule_segment) => {
                 rule_segment.header()
             }
@@ -94,9 +95,9 @@ impl ProtocolSegment for RtnlSegment {
             RtnlSegment::NewAddr(addr_segment)
             | RtnlSegment::GetAddr(addr_segment)
             | RtnlSegment::DelAddr(addr_segment) => addr_segment.header_mut(),
-            RtnlSegment::NewRoute(route_segment) | RtnlSegment::GetRoute(route_segment) => {
-                route_segment.header_mut()
-            }
+            RtnlSegment::NewRoute(route_segment)
+            | RtnlSegment::GetRoute(route_segment)
+            | RtnlSegment::DelRoute(route_segment) => route_segment.header_mut(),
             RtnlSegment::NewRule(rule_segment) | RtnlSegment::GetRule(rule_segment) => {
                 rule_segment.header_mut()
             }
@@ -126,6 +127,12 @@ impl ProtocolSegment for RtnlSegment {
             Ok(CSegmentType::GETROUTE) => {
                 RouteSegment::read_from(&header, reader)?.map(RtnlSegment::GetRoute)
             }
+            Ok(CSegmentType::NEWROUTE) => {
+                RouteSegment::read_from(&header, reader)?.map(RtnlSegment::NewRoute)
+            }
+            Ok(CSegmentType::DELROUTE) => {
+                RouteSegment::read_from(&header, reader)?.map(RtnlSegment::DelRoute)
+            }
             Ok(CSegmentType::GETRULE) => {
                 RuleSegment::read_from(&header, reader)?.map(RtnlSegment::GetRule)
             }
@@ -154,6 +161,7 @@ impl ProtocolSegment for RtnlSegment {
             | RtnlSegment::DelAddr(_)
             | RtnlSegment::GetLink(_)
             | RtnlSegment::GetRoute(_)
+            | RtnlSegment::DelRoute(_)
             | RtnlSegment::GetRule(_) => {
                 unreachable!("kernel should not write get requests to user space");
             }

@@ -13,6 +13,7 @@ use aster_bigtcp::{
 use spin::Once;
 
 pub(super) use self::{
+    user::{Ipv4RouteSelector, NewIpv4Route},
     dump::{RouteRecord, RuleOutcome, RuleRecord, dump_routes, dump_rules},
     entry::{RouteProtocol, RouteScope, RouteType},
 };
@@ -28,6 +29,7 @@ mod entry;
 mod manager;
 mod rule;
 mod table;
+mod user;
 
 use entry::{RouteAddressFamily, RouteEntry, RouteMetric, RouteOrigin, RouteTableId};
 
@@ -108,7 +110,7 @@ fn iface_ipv4_routes(
             RouteTableId::LOCAL,
             RouteMetric::default(),
             RouteType::Local,
-            kernel_origin(RouteScope::Host, preferred_source),
+            kernel_origin(RouteScope::HOST, preferred_source),
         )
         .unwrap();
         routes.push(entry);
@@ -144,9 +146,9 @@ fn iface_ipv4_routes(
             type_,
             kernel_origin(
                 if type_ == RouteType::Local {
-                    RouteScope::Host
+                    RouteScope::HOST
                 } else {
-                    RouteScope::Link
+                    RouteScope::LINK
                 },
                 preferred_source,
             ),
@@ -184,7 +186,7 @@ fn broadcast_route(
         RouteTableId::LOCAL,
         RouteMetric::default(),
         RouteType::Broadcast,
-        kernel_origin(RouteScope::Link, preferred_source),
+        kernel_origin(RouteScope::LINK, preferred_source),
     )
     .unwrap()
 }
@@ -195,13 +197,13 @@ fn retain_routes_valid_while_down<A: RouteAddressFamily>(
     routes: &mut Vec<RouteEntry<A>>,
 ) {
     if !iface.flags().contains(InterfaceFlags::UP) {
-        routes.retain(|route| route.origin().scope == RouteScope::Host);
+        routes.retain(|route| route.origin().scope == RouteScope::HOST);
     }
 }
 
 fn kernel_origin<A: RouteAddressFamily>(scope: RouteScope, preferred_source: A) -> RouteOrigin<A> {
     RouteOrigin {
-        protocol: RouteProtocol::Kernel,
+        protocol: RouteProtocol::KERNEL,
         scope,
         preferred_source: Some(preferred_source),
     }
@@ -227,8 +229,8 @@ fn iface_ipv6_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv6Address>> {
         RouteMetric::default(),
         RouteType::Local,
         RouteOrigin {
-            protocol: RouteProtocol::Kernel,
-            scope: RouteScope::Universe,
+            protocol: RouteProtocol::KERNEL,
+            scope: RouteScope::UNIVERSE,
             preferred_source: None,
         },
     )
@@ -251,19 +253,55 @@ fn iface_ipv6_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv6Address>> {
 /// Bringing an interface down removes the routes through it that leave the host, as Linux does:
 /// the connected network, broadcast and gateway routes, and every route that user space
 /// installed. The routes that deliver to the host's own addresses stay. Bringing the interface up
-/// restores the routes the kernel derives from its addresses.
+/// restores the routes the kernel derives from its addresses. Removing the last address of an
+/// interface removes every route through it.
 pub(super) fn sync_iface_routes(iface: &Arc<Iface>, addresses: &[InterfaceAddress]) {
     let up = iface.flags().contains(InterfaceFlags::UP);
-    IPV4_ROUTE_MANAGER
-        .get()
-        .unwrap()
-        .write()
-        .replace_iface_routes(iface.index(), up, iface_ipv4_routes(iface, addresses));
+    {
+        let mut manager = IPV4_ROUTE_MANAGER.get().unwrap().write();
+        manager.replace_iface_routes(
+            iface.index(),
+            up && !addresses.is_empty(),
+            iface_ipv4_routes(iface, addresses),
+        );
+        sync_gateway_routes(&manager, iface)
+            .expect("fewer gateway routes fit in the table that held more");
+    }
     IPV6_ROUTE_MANAGER
         .get()
         .unwrap()
         .write()
         .replace_iface_routes(iface.index(), up, iface_ipv6_routes(iface));
+}
+
+/// Installs a unicast IPv4 route. The caller holds the interface configuration lock.
+pub(super) fn add_ipv4_route(request: NewIpv4Route, addresses: &[InterfaceAddress]) -> Result<()> {
+    user::add_ipv4_route(request, addresses)
+}
+
+/// Removes an IPv4 route that user space installed. The caller holds the interface configuration
+/// lock.
+pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<()> {
+    user::remove_ipv4_route(selector)
+}
+
+/// Gives an interface the main-table gateway routes through it, for next-hop selection.
+fn sync_gateway_routes(manager: &RouteManager<Ipv4Address>, iface: &Arc<Iface>) -> Result<()> {
+    let mut routes: Vec<(Ipv4Cidr, Ipv4Address)> = Vec::new();
+    for entry in manager.entries() {
+        let Some(gateway) = entry.gateway() else {
+            continue;
+        };
+        if entry.table_id() == RouteTableId::MAIN
+            && entry.output_iface().index() == iface.index()
+            && !routes.iter().any(|(cidr, _)| cidr == entry.dst())
+        {
+            routes.push((*entry.dst(), gateway));
+        }
+    }
+    iface.set_ipv4_gateway_routes(&routes).map_err(|_| {
+        Error::with_message(Errno::ENOBUFS, "the interface cannot hold more gateway routes")
+    })
 }
 
 /// Looks up the output interface for an IP destination.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{
-    RouteAddressFamily, RouteEntry, RouteLookupKey, RouteProtocol, RouteTableId,
+    RouteAddressFamily, RouteEntry, RouteLookupKey, RouteMetric, RouteProtocol, RouteTableId,
     rule::{Rule, RuleAction, RulePriority},
     table::RouteTable,
 };
@@ -49,7 +49,7 @@ impl<A: RouteAddressFamily> RouteManager<A> {
         for table in self.tables.values_mut() {
             table.retain(|entry| {
                 entry.output_iface().index() != iface_index
-                    || (keep_user_routes && entry.origin().protocol != RouteProtocol::Kernel)
+                    || (keep_user_routes && entry.origin().protocol != RouteProtocol::KERNEL)
             });
         }
         for route in derived_routes {
@@ -57,6 +57,45 @@ impl<A: RouteAddressFamily> RouteManager<A> {
                 .entry(route.table_id())
                 .or_insert_with(RouteTable::new)
                 .insert(route);
+        }
+    }
+
+    /// Inserts a route that user space installed; the route fails if it already exists.
+    pub(super) fn insert_user_route(&mut self, entry: RouteEntry<A>) -> Result<()> {
+        let table = self
+            .tables
+            .entry(entry.table_id())
+            .or_insert_with(RouteTable::new);
+        if table.get(entry.dst(), entry.metric()).is_some() {
+            return_errno_with_message!(Errno::EEXIST, "the route already exists");
+        }
+        table.insert(entry);
+        Ok(())
+    }
+
+    /// Returns the first route to `destination` in the table, by increasing metric, that
+    /// satisfies the predicate.
+    pub(super) fn find_route(
+        &self,
+        table_id: RouteTableId,
+        destination: &A::Cidr,
+        matches: impl Fn(&RouteEntry<A>) -> bool,
+    ) -> Option<RouteEntry<A>> {
+        self.tables
+            .get(&table_id)?
+            .routes_to(destination)
+            .find(|entry| matches(entry))
+            .cloned()
+    }
+
+    pub(super) fn remove_route(
+        &mut self,
+        table_id: RouteTableId,
+        destination: &A::Cidr,
+        metric: RouteMetric,
+    ) {
+        if let Some(table) = self.tables.get_mut(&table_id) {
+            table.remove(destination, metric);
         }
     }
 

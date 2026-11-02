@@ -26,6 +26,25 @@ impl<A: RouteAddressFamily> RouteTable<A> {
         self.entries.insert((*entry.dst(), entry.metric()), entry);
     }
 
+    pub(super) fn get(&self, destination: &A::Cidr, metric: RouteMetric) -> Option<&RouteEntry<A>> {
+        self.entries.get(&(*destination, metric))
+    }
+
+    /// Returns the routes to `destination` by increasing metric.
+    pub(super) fn routes_to<'a>(
+        &'a self,
+        destination: &'a A::Cidr,
+    ) -> impl Iterator<Item = &'a RouteEntry<A>> {
+        self.entries
+            .range((*destination, RouteMetric::MIN)..)
+            .take_while(move |((cidr, _), _)| cidr == destination)
+            .map(|(_, entry)| entry)
+    }
+
+    pub(super) fn remove(&mut self, destination: &A::Cidr, metric: RouteMetric) {
+        self.entries.remove(&(*destination, metric));
+    }
+
     pub(super) fn retain(&mut self, mut keep: impl FnMut(&RouteEntry<A>) -> bool) {
         self.entries.retain(|_, entry| keep(entry));
     }

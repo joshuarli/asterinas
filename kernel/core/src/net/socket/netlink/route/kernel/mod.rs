@@ -47,6 +47,12 @@ impl NetlinkRouteKernelSocket {
                 addr::do_del_addr(request_segment).map(|()| acknowledgement(request_header))
             }
             RtnlSegment::GetRoute(request_segment) => route::do_get_route(request_segment),
+            RtnlSegment::NewRoute(request_segment) => {
+                route::do_new_route(request_segment).map(|()| acknowledgement(request_header))
+            }
+            RtnlSegment::DelRoute(request_segment) => {
+                route::do_del_route(request_segment).map(|()| acknowledgement(request_header))
+            }
             RtnlSegment::GetRule(request_segment) => rule::do_get_rule(request_segment),
             _ => Err(Error::with_message(
                 Errno::EOPNOTSUPP,
