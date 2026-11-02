@@ -7,6 +7,15 @@ use super::{
 };
 use crate::prelude::*;
 
+/// How the kernel-derived routes of one interface changed.
+///
+/// `added` keeps the order in which the kernel derives the routes. `removed` keeps the order of
+/// the routing tables.
+pub(super) struct RouteChanges<A: RouteAddressFamily> {
+    pub(super) removed: Vec<RouteEntry<A>>,
+    pub(super) added: Vec<RouteEntry<A>>,
+}
+
 /// The manager that owns the routing policy rules and tables for one IP address family.
 pub(super) struct RouteManager<A: RouteAddressFamily> {
     rules: BTreeMap<RulePriority, Vec<Rule>>,
@@ -36,28 +45,57 @@ impl<A: RouteAddressFamily> RouteManager<A> {
         Self { rules, tables }
     }
 
-    /// Replaces the routes of an interface.
+    /// Returns the routes the kernel derived from the addresses of an interface.
+    pub(super) fn derived_routes_of(&self, iface_index: u32) -> Vec<RouteEntry<A>> {
+        self.entries()
+            .filter(|entry| {
+                entry.output_iface().index() == iface_index
+                    && entry.origin().protocol == RouteProtocol::KERNEL
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Replaces the routes of an interface and reports how its derived routes changed.
     ///
     /// The kernel-derived routes of the interface are replaced by `derived_routes`. Routes that
-    /// user space installed through the interface are kept only if `keep_user_routes` is set.
+    /// user space installed through the interface are kept only if `keep_user_routes` is set;
+    /// removing them is not reported, as Linux flushes them silently.
     pub(super) fn replace_iface_routes(
         &mut self,
         iface_index: u32,
         keep_user_routes: bool,
         derived_routes: Vec<RouteEntry<A>>,
-    ) {
+    ) -> RouteChanges<A> {
+        let previous = self.derived_routes_of(iface_index);
         for table in self.tables.values_mut() {
             table.retain(|entry| {
                 entry.output_iface().index() != iface_index
                     || (keep_user_routes && entry.origin().protocol != RouteProtocol::KERNEL)
             });
         }
-        for route in derived_routes {
+        for route in &derived_routes {
             self.tables
                 .entry(route.table_id())
                 .or_insert_with(RouteTable::new)
-                .insert(route);
+                .insert(route.clone());
         }
+
+        let current = self.derived_routes_of(iface_index);
+        let mut added: Vec<RouteEntry<A>> = Vec::new();
+        for route in derived_routes {
+            let stored = current.iter().any(|entry| entry.is_same_route(&route));
+            let is_new = !previous.iter().any(|entry| entry.is_same_route(&route))
+                && !added.iter().any(|entry| entry.has_same_key(&route));
+            if stored && is_new {
+                added.push(route);
+            }
+        }
+        let removed = previous
+            .into_iter()
+            .filter(|entry| !current.iter().any(|route| route.is_same_route(entry)))
+            .collect();
+        RouteChanges { removed, added }
     }
 
     /// Inserts a route that user space installed; the route fails if it already exists.

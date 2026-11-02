@@ -95,7 +95,7 @@ pub(crate) enum OperState {
     Up = 6,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum LinkAttr {
     // FIXME: Linux link-layer addresses have device-specific lengths.
     // Using `EthernetAddress` may be inappropriate

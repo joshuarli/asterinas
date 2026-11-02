@@ -17,6 +17,7 @@ use crate::{
 
 mod addr;
 mod link;
+pub(in crate::net) mod notify;
 mod route;
 mod rule;
 mod util;

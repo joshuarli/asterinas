@@ -42,7 +42,7 @@ enum RouteAttrClass {
 /// The size of `struct rta_cacheinfo`.
 const CACHE_INFO_LEN: usize = 32;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum RouteAttr {
     Table(u32),
     Dst(IpAddr),

@@ -6,7 +6,7 @@ use core::net::{IpAddr, Ipv4Addr};
 
 use aster_bigtcp::wire::Ipv4Cidr;
 
-use super::util::finish_response;
+use super::{notify::RequestOrigin, util::finish_response};
 use crate::{
     net::{
         iface::config,
@@ -38,7 +38,13 @@ pub(super) fn do_get_route(request_segment: &RouteSegment) -> Result<Vec<RtnlSeg
 
     let mut response_segments: Vec<RtnlSegment> = dump_routes(dump_ipv4, dump_ipv6)
         .iter()
-        .map(|record| RtnlSegment::NewRoute(record_to_new_route(request_segment.header(), record)))
+        .map(|record| {
+            RtnlSegment::NewRoute(record_to_route(
+                request_segment.header(),
+                CSegmentType::NEWROUTE,
+                record,
+            ))
+        })
         .collect();
 
     finish_response(request_segment.header(), true, &mut response_segments);
@@ -69,15 +75,18 @@ pub(super) fn do_new_route(request_segment: &RouteSegment) -> Result<()> {
         return_errno_with_message!(Errno::EOPNOTSUPP, "only unicast routes can be installed");
     }
 
-    config::add_ipv4_route(NewIpv4Route {
-        table: parsed.table,
-        destination: parsed.destination,
-        gateway: parsed.gateway,
-        iface_index: parsed.iface_index,
-        priority: parsed.priority.unwrap_or(0),
-        protocol: body.protocol,
-        scope: body.scope,
-    })
+    config::add_ipv4_route(
+        NewIpv4Route {
+            table: parsed.table,
+            destination: parsed.destination,
+            gateway: parsed.gateway,
+            iface_index: parsed.iface_index,
+            priority: parsed.priority.unwrap_or(0),
+            protocol: body.protocol,
+            scope: body.scope,
+        },
+        RequestOrigin::request(request_segment.header()),
+    )
 }
 
 pub(super) fn do_del_route(request_segment: &RouteSegment) -> Result<()> {
@@ -86,16 +95,19 @@ pub(super) fn do_del_route(request_segment: &RouteSegment) -> Result<()> {
     let body = request_segment.body();
     let parsed = ParsedRoute::from_request(request_segment)?;
 
-    config::remove_ipv4_route(&Ipv4RouteSelector {
-        table: parsed.table,
-        destination: parsed.destination,
-        priority: parsed.priority.filter(|priority| *priority != 0),
-        gateway: parsed.gateway,
-        iface_index: parsed.iface_index,
-        protocol: Some(body.protocol).filter(|protocol| *protocol != 0),
-        type_: Some(body.type_).filter(|type_| *type_ != 0),
-        scope: Some(body.scope).filter(|scope| *scope != SCOPE_NOWHERE),
-    })
+    config::remove_ipv4_route(
+        &Ipv4RouteSelector {
+            table: parsed.table,
+            destination: parsed.destination,
+            priority: parsed.priority.filter(|priority| *priority != 0),
+            gateway: parsed.gateway,
+            iface_index: parsed.iface_index,
+            protocol: Some(body.protocol).filter(|protocol| *protocol != 0),
+            type_: Some(body.type_).filter(|type_| *type_ != 0),
+            scope: Some(body.scope).filter(|scope| *scope != SCOPE_NOWHERE),
+        },
+        RequestOrigin::request(request_segment.header()),
+    )
 }
 
 /// The parts of a route request that both installing and removing a route use.
@@ -167,10 +179,14 @@ impl ParsedRoute {
     }
 }
 
-fn record_to_new_route(request_header: &CMsgSegHdr, record: &RouteRecord) -> RouteSegment {
+pub(super) fn record_to_route(
+    request_header: &CMsgSegHdr,
+    type_: CSegmentType,
+    record: &RouteRecord,
+) -> RouteSegment {
     let header = CMsgSegHdr {
         len: 0,
-        type_: CSegmentType::NEWROUTE as _,
+        type_: type_ as _,
         flags: SegHdrCommonFlags::empty().bits(),
         seq: request_header.seq,
         pid: request_header.pid,

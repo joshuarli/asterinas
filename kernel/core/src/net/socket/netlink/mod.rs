@@ -51,6 +51,7 @@ pub(crate) use kobject_uevent::{NetlinkUeventSocket, broadcast_synthetic_uevent}
 pub(crate) use options::{AddMembership, DropMembership};
 pub(super) use receiver::NETLINK_DEFAULT_BUF_SIZE;
 pub(crate) use route::NetlinkRouteSocket;
+pub(in crate::net) use route::{NetworkEvent, RequestOrigin, publish_network_events};
 pub(crate) use table::{StandardNetlinkProtocol, is_valid_protocol};
 
 pub(in crate::net) fn init() {

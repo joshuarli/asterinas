@@ -47,6 +47,7 @@ pub(crate) struct LinkSegmentBody {
     pub type_: InterfaceType,
     pub index: Option<NonZeroU32>,
     pub flags: InterfaceFlags,
+    pub change: u32,
 }
 
 impl TryFrom<CIfinfoMsg> for LinkSegmentBody {
@@ -63,6 +64,7 @@ impl TryFrom<CIfinfoMsg> for LinkSegmentBody {
             type_,
             index,
             flags,
+            change: value.change,
         })
     }
 }
@@ -75,7 +77,7 @@ impl From<LinkSegmentBody> for CIfinfoMsg {
             type_: value.type_ as _,
             index: value.index.map(NonZeroU32::get).unwrap_or(0),
             flags: value.flags.bits(),
-            change: 0,
+            change: value.change,
         }
     }
 }

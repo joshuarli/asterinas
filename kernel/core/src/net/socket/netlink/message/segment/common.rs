@@ -7,7 +7,7 @@ use crate::{
     util::{MultiRead, MultiWrite},
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct SegmentCommon<Body, Attr> {
     header: CMsgSegHdr,
     body: Body,

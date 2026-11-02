@@ -3,7 +3,7 @@
 pub(super) use bound::BoundNetlink;
 use unbound::UnboundNetlink;
 
-use super::{GroupIdSet, NetlinkSocketAddr};
+use super::{GroupIdSet, NetlinkSocketAddr, addr::MAX_GROUPS};
 use crate::{
     events::IoEvents,
     fs::file::FileCommon,
@@ -304,18 +304,26 @@ impl<P: SupportedNetlinkProtocol> Inner<UnboundNetlink<P>, BoundNetlink<P::Messa
     }
 }
 
+/// The set holding the group that membership options name by its number, which starts at one.
+fn group_of_number(number: u32) -> Result<GroupIdSet> {
+    if number == 0 || number > MAX_GROUPS {
+        return_errno_with_message!(Errno::EINVAL, "the netlink group number is invalid");
+    }
+    Ok(GroupIdSet::new(1 << (number - 1)))
+}
+
 fn do_netlink_setsockopt<P: SupportedNetlinkProtocol>(
     option: &dyn SocketOption,
     inner: &mut Inner<UnboundNetlink<P>, BoundNetlink<P::Message>>,
 ) -> Result<()> {
     sock_option_ref!(match option {
         add_membership @ AddMembership => {
-            let groups = add_membership.get().unwrap();
-            inner.add_groups(GroupIdSet::new(*groups));
+            let group = add_membership.get().unwrap();
+            inner.add_groups(group_of_number(*group)?);
         }
         drop_membership @ DropMembership => {
-            let groups = drop_membership.get().unwrap();
-            inner.drop_groups(GroupIdSet::new(*groups));
+            let group = drop_membership.get().unwrap();
+            inner.drop_groups(group_of_number(*group)?);
         }
         _ =>
             return_errno_with_message!(Errno::ENOPROTOOPT, "the socket option to be set is unknown"),

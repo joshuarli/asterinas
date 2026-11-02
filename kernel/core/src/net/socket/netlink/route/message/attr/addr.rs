@@ -73,7 +73,7 @@ pub(crate) struct AddrCacheInfo {
 /// The lifetime of an address that does not expire.
 pub(crate) const INFINITE_LIFETIME: u32 = u32::MAX;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum AddrAttr {
     Address(IpAddr),
     Broadcast(Ipv4Addr),

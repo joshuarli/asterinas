@@ -88,6 +88,24 @@ impl<A: RouteAddressFamily> RouteEntry<A> {
         &self.origin
     }
 
+    /// Whether both entries describe the same route through the same interface.
+    pub(super) fn is_same_route(&self, other: &Self) -> bool {
+        self.has_same_key(other)
+            && self.gateway == other.gateway
+            && self.type_ == other.type_
+            && self.origin.protocol == other.origin.protocol
+            && self.origin.scope == other.origin.scope
+            && self.origin.preferred_source == other.origin.preferred_source
+    }
+
+    /// Whether both entries occupy the same slot of the same routing table.
+    pub(super) fn has_same_key(&self, other: &Self) -> bool {
+        self.table_id == other.table_id
+            && self.dst == other.dst
+            && self.metric == other.metric
+            && self.output_iface.index() == other.output_iface.index()
+    }
+
     pub(super) fn matches_lookup(&self, key: &RouteLookupKey<A>) -> bool {
         A::contains(&self.dst, key.dst())
     }

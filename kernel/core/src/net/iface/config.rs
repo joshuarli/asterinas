@@ -6,14 +6,17 @@
 //! derived from it, so the routes always reflect the latest configuration.
 
 use aster_bigtcp::{
-    iface::InterfaceName,
+    iface::{InterfaceFlags, InterfaceName},
     wire::{Ipv4Address, Ipv4Cidr},
 };
 use spin::Once;
 
 use super::{Iface, iter_all_ifaces};
 use crate::{
-    net::route::{self, Ipv4RouteSelector, NewIpv4Route},
+    net::{
+        route::{self, IfaceRouteChanges, Ipv4RouteSelector, NewIpv4Route},
+        socket::netlink::{NetworkEvent, RequestOrigin, publish_network_events},
+    },
     prelude::*,
 };
 
@@ -142,29 +145,56 @@ pub(in crate::net) fn primary_ipv4_address(iface: &Arc<Iface>) -> Option<Ipv4Add
 }
 
 /// Brings an interface up or down and updates its routes.
+///
+/// Like Linux, a change reports the link, and bringing an interface up reports the routes that
+/// return. Taking an interface down flushes its routes without reporting them.
 pub(in crate::net) fn set_administratively_up(iface: &Arc<Iface>, up: bool) {
     let addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    let was_up = iface.flags().contains(InterfaceFlags::UP);
     iface.set_administratively_up(up);
-    sync(iface, &addresses);
+    let changes = sync(iface, &addresses);
+    if was_up == up {
+        return;
+    }
+
+    let mut events = vec![NetworkEvent::LinkChanged {
+        iface: iface.clone(),
+        changed_flags: InterfaceFlags::UP,
+    }];
+    if up {
+        events.extend(route_added_events(changes.added));
+    }
+    publish_network_events(events);
 }
 
 /// Installs a unicast IPv4 route through an interface.
-pub(in crate::net) fn add_ipv4_route(request: NewIpv4Route) -> Result<()> {
+pub(in crate::net) fn add_ipv4_route(request: NewIpv4Route, origin: RequestOrigin) -> Result<()> {
     let addresses = IPV4_ADDRESSES.get().unwrap().lock();
-    route::add_ipv4_route(request, &addresses)
+    let route = route::add_ipv4_route(request, &addresses)?;
+    publish_network_events(vec![NetworkEvent::RouteAdded { route, origin }]);
+    Ok(())
 }
 
 /// Removes an IPv4 route that user space installed.
-pub(in crate::net) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<()> {
+pub(in crate::net) fn remove_ipv4_route(
+    selector: &Ipv4RouteSelector,
+    origin: RequestOrigin,
+) -> Result<()> {
     let _addresses = IPV4_ADDRESSES.get().unwrap().lock();
-    route::remove_ipv4_route(selector)
+    let route = route::remove_ipv4_route(selector)?;
+    publish_network_events(vec![NetworkEvent::RouteRemoved { route, origin }]);
+    Ok(())
 }
 
 /// Assigns an IPv4 address to an interface.
 ///
 /// Like Linux, an address on the network of an existing address with the same prefix length
 /// becomes secondary, and assigning an address that the interface already has fails.
-pub(in crate::net) fn add_ipv4_address(iface: &Arc<Iface>, request: NewAddress) -> Result<()> {
+pub(in crate::net) fn add_ipv4_address(
+    iface: &Arc<Iface>,
+    request: NewAddress,
+    origin: RequestOrigin,
+) -> Result<()> {
     let mut addresses = IPV4_ADDRESSES.get().unwrap().lock();
 
     let mut secondary = false;
@@ -213,15 +243,26 @@ pub(in crate::net) fn add_ipv4_address(iface: &Arc<Iface>, request: NewAddress) 
             .position(|address| Arc::ptr_eq(&address.iface, iface));
         last_primary.or(first_of_iface).unwrap_or(updated.len())
     };
-    updated.insert(position, new_address);
+    updated.insert(position, new_address.clone());
 
-    commit(iface, &mut addresses, updated)
+    let changes = commit(iface, &mut addresses, updated)?;
+    let mut events = vec![NetworkEvent::AddressAdded {
+        address: new_address,
+        origin,
+    }];
+    events.extend(route_added_events(changes.added));
+    publish_network_events(events);
+    Ok(())
 }
 
 /// Removes an IPv4 address and the secondary addresses that depend on it.
+///
+/// Like Linux, the dependent secondary addresses go first, each reported together with its routes,
+/// and the address itself goes last.
 pub(in crate::net) fn remove_ipv4_address(
     iface: &Arc<Iface>,
     selector: &AddressSelector,
+    origin: RequestOrigin,
 ) -> Result<()> {
     let mut addresses = IPV4_ADDRESSES.get().unwrap().lock();
 
@@ -236,28 +277,56 @@ pub(in crate::net) fn remove_ipv4_address(
     };
     let removed = removed.clone();
 
-    let updated = addresses
-        .iter()
-        .filter(|address| {
-            let same_iface = Arc::ptr_eq(&address.iface, iface);
-            let is_removed = same_iface && address.address() == removed.address();
-            let depends_on_removed = same_iface
-                && !removed.secondary
-                && address.secondary
-                && same_network(&address.cidr, &removed.cidr);
-            !is_removed && !depends_on_removed
-        })
-        .cloned()
-        .collect();
+    let mut removals: Vec<InterfaceAddress> = Vec::new();
+    if !removed.secondary {
+        removals.extend(
+            addresses
+                .iter()
+                .filter(|address| {
+                    Arc::ptr_eq(&address.iface, iface)
+                        && address.secondary
+                        && same_network(&address.cidr, &removed.cidr)
+                })
+                .cloned(),
+        );
+    }
+    removals.push(removed);
 
-    commit(iface, &mut addresses, updated)
+    let mut events = Vec::new();
+    for removal in removals {
+        let updated = addresses
+            .iter()
+            .filter(|address| {
+                !(Arc::ptr_eq(&address.iface, iface) && address.address() == removal.address())
+            })
+            .cloned()
+            .collect();
+        let changes = commit(iface, &mut addresses, updated)?;
+        events.push(NetworkEvent::AddressRemoved {
+            address: removal,
+            origin,
+        });
+        events.extend(changes.removed.into_iter().map(|route| NetworkEvent::RouteRemoved {
+            route,
+            origin: RequestOrigin::KERNEL,
+        }));
+    }
+    publish_network_events(events);
+    Ok(())
+}
+
+fn route_added_events(routes: Vec<route::RouteRecord>) -> impl Iterator<Item = NetworkEvent> {
+    routes.into_iter().map(|route| NetworkEvent::RouteAdded {
+        route,
+        origin: RequestOrigin::KERNEL,
+    })
 }
 
 fn commit(
     iface: &Arc<Iface>,
     addresses: &mut Vec<InterfaceAddress>,
     updated: Vec<InterfaceAddress>,
-) -> Result<()> {
+) -> Result<IfaceRouteChanges> {
     let cidrs: Vec<Ipv4Cidr> = updated
         .iter()
         .filter(|address| Arc::ptr_eq(&address.iface, iface))
@@ -268,17 +337,16 @@ fn commit(
     })?;
 
     *addresses = updated;
-    sync(iface, addresses);
-    Ok(())
+    Ok(sync(iface, addresses))
 }
 
-fn sync(iface: &Arc<Iface>, addresses: &[InterfaceAddress]) {
+fn sync(iface: &Arc<Iface>, addresses: &[InterfaceAddress]) -> IfaceRouteChanges {
     let own: Vec<InterfaceAddress> = addresses
         .iter()
         .filter(|address| Arc::ptr_eq(&address.iface, iface))
         .cloned()
         .collect();
-    route::sync_iface_routes(iface, &own);
+    route::sync_iface_routes(iface, &own)
 }
 
 fn same_network(first: &Ipv4Cidr, second: &Ipv4Cidr) -> bool {

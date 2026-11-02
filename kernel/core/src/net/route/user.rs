@@ -8,7 +8,7 @@ use aster_bigtcp::{
 };
 
 use super::{
-    IPV4_ROUTE_MANAGER, RouteEntry, RouteMetric, RouteOrigin, RouteProtocol, RouteScope,
+    IPV4_ROUTE_MANAGER, RouteRecord, dump::entry_record, RouteEntry, RouteMetric, RouteOrigin, RouteProtocol, RouteScope,
     RouteTableId, RouteType,
 };
 use crate::{
@@ -49,7 +49,10 @@ pub(in crate::net) struct Ipv4RouteSelector {
 
 /// Installs a route. The caller holds the interface configuration lock and passes the addresses
 /// of all interfaces.
-pub(super) fn add_ipv4_route(request: NewIpv4Route, addresses: &[InterfaceAddress]) -> Result<()> {
+pub(super) fn add_ipv4_route(
+    request: NewIpv4Route,
+    addresses: &[InterfaceAddress],
+) -> Result<RouteRecord> {
     if request.destination != request.destination.network() {
         return_errno_with_message!(Errno::EINVAL, "the route destination is not a network");
     }
@@ -83,6 +86,7 @@ pub(super) fn add_ipv4_route(request: NewIpv4Route, addresses: &[InterfaceAddres
     )?;
     let table_id = entry.table_id();
     let metric = entry.metric();
+    let record = entry_record(&entry);
 
     let mut manager = IPV4_ROUTE_MANAGER.get().unwrap().write();
     manager.insert_user_route(entry)?;
@@ -91,11 +95,11 @@ pub(super) fn add_ipv4_route(request: NewIpv4Route, addresses: &[InterfaceAddres
         return Err(error);
     }
 
-    Ok(())
+    Ok(record)
 }
 
 /// Removes a route. The caller holds the interface configuration lock.
-pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<()> {
+pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<RouteRecord> {
     let mut manager = IPV4_ROUTE_MANAGER.get().unwrap().write();
 
     let table_id = RouteTableId::new(selector.table);
@@ -128,7 +132,7 @@ pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<()> {
     super::sync_gateway_routes(&manager, &iface)
         .expect("fewer gateway routes fit in the table that held more");
 
-    Ok(())
+    Ok(entry_record(&entry))
 }
 
 fn route_iface(request: &NewIpv4Route, addresses: &[InterfaceAddress]) -> Result<Arc<Iface>> {

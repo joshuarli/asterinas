@@ -24,7 +24,9 @@ pub(super) use segment::{
     rule::{RuleSegment, RuleSegmentBody},
 };
 
-use crate::net::socket::netlink::message::Message;
+use crate::net::socket::netlink::{message::Message, table::MulticastMessage};
 
 /// A netlink route message.
 pub(in netlink) type RtnlMessage = Message<RtnlSegment>;
+
+impl MulticastMessage for RtnlMessage {}

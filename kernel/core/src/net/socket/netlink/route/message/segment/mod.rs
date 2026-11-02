@@ -52,7 +52,7 @@ use crate::{
 };
 
 /// The netlink route segment, which is the basic unit of a netlink route message.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum RtnlSegment {
     NewLink(LinkSegment),
     GetLink(LinkSegment),
@@ -171,16 +171,18 @@ impl ProtocolSegment for RtnlSegment {
     fn write_to(&self, writer: &mut dyn MultiWrite) -> Result<()> {
         match self {
             RtnlSegment::NewLink(link_segment) => link_segment.write_to(writer)?,
-            RtnlSegment::NewAddr(addr_segment) => addr_segment.write_to(writer)?,
-            RtnlSegment::NewRoute(route_segment) => route_segment.write_to(writer)?,
+            RtnlSegment::NewAddr(addr_segment) | RtnlSegment::DelAddr(addr_segment) => {
+                addr_segment.write_to(writer)?
+            }
+            RtnlSegment::NewRoute(route_segment) | RtnlSegment::DelRoute(route_segment) => {
+                route_segment.write_to(writer)?
+            }
             RtnlSegment::NewRule(rule_segment) => rule_segment.write_to(writer)?,
             RtnlSegment::Done(done_segment) => done_segment.write_to(writer)?,
             RtnlSegment::Error(error_segment) => error_segment.write_to(writer)?,
             RtnlSegment::GetAddr(_)
-            | RtnlSegment::DelAddr(_)
             | RtnlSegment::GetLink(_)
             | RtnlSegment::GetRoute(_)
-            | RtnlSegment::DelRoute(_)
             | RtnlSegment::GetRule(_) => {
                 unreachable!("kernel should not write get requests to user space");
             }

@@ -11,7 +11,7 @@
 use super::{
     CSegmentType, SegmentBody,
     common::SegmentCommon,
-    header::{CMsgSegHdr, SegHdrCommonFlags},
+    header::{AckFlags, CMsgSegHdr, SegHdrCommonFlags},
 };
 use crate::{net::socket::netlink::message::NoAttr, prelude::*};
 
@@ -64,7 +64,11 @@ impl ErrorSegment {
         let header = CMsgSegHdr {
             len: 0,
             type_: CSegmentType::ERROR as _,
-            flags: SegHdrCommonFlags::empty().bits(),
+            flags: if error.is_none() {
+                AckFlags::CAPPED.bits()
+            } else {
+                SegHdrCommonFlags::empty().bits()
+            },
             seq: request_header.seq,
             pid: request_header.pid,
         };

@@ -62,7 +62,7 @@ pub(in crate::net) fn dump_rules(ipv4: bool, ipv6: bool) -> Vec<RuleRecord> {
     records
 }
 
-trait IntoIpAddr: RouteAddressFamily {
+pub(super) trait IntoIpAddr: RouteAddressFamily {
     fn into_ip_addr(self) -> IpAddr;
     fn cidr_parts(cidr: &Self::Cidr) -> (IpAddr, u8);
 }
@@ -91,7 +91,7 @@ fn manager_records<A: IntoIpAddr>(manager: &RouteManager<A>) -> Vec<RouteRecord>
     manager.entries().map(entry_record).collect()
 }
 
-fn entry_record<A: IntoIpAddr>(entry: &RouteEntry<A>) -> RouteRecord {
+pub(super) fn entry_record<A: IntoIpAddr>(entry: &RouteEntry<A>) -> RouteRecord {
     let (destination, destination_prefix_len) = A::cidr_parts(entry.dst());
     RouteRecord {
         destination,

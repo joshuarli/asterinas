@@ -38,7 +38,7 @@ enum RuleAttrClass {
     PROTOCOL = 21,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum RuleAttr {
     Table(u32),
     SuppressPrefixLen(u32),

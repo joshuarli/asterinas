@@ -17,7 +17,7 @@ pub(super) use self::{
     dump::{RouteRecord, RuleOutcome, RuleRecord, dump_routes, dump_rules},
     entry::{RouteProtocol, RouteScope, RouteType},
 };
-use self::{manager::RouteManager, rule::Rule};
+use self::{dump::entry_record, manager::RouteManager, rule::Rule};
 use super::iface::{
     self, Iface,
     config::{self, InterfaceAddress},
@@ -248,40 +248,77 @@ fn iface_ipv6_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv6Address>> {
     routes
 }
 
-/// Recomputes the routes of an interface after its link state changed.
+/// How the routes the kernel derives for an interface changed.
+pub(in crate::net) struct IfaceRouteChanges {
+    pub removed: Vec<RouteRecord>,
+    pub added: Vec<RouteRecord>,
+}
+
+/// Recomputes the routes of an interface after its link state or addresses changed.
 ///
 /// Bringing an interface down removes the routes through it that leave the host, as Linux does:
 /// the connected network, broadcast and gateway routes, and every route that user space
 /// installed. The routes that deliver to the host's own addresses stay. Bringing the interface up
-/// restores the routes the kernel derives from its addresses. Removing the last address of an
-/// interface removes every route through it.
-pub(super) fn sync_iface_routes(iface: &Arc<Iface>, addresses: &[InterfaceAddress]) {
+/// restores the routes the kernel derives from its addresses. While an interface is down, a new
+/// address gains only its own route. Removing the last address of an interface removes every
+/// route through it.
+pub(super) fn sync_iface_routes(
+    iface: &Arc<Iface>,
+    addresses: &[InterfaceAddress],
+) -> IfaceRouteChanges {
     let up = iface.flags().contains(InterfaceFlags::UP);
-    {
+    let changes = {
         let mut manager = IPV4_ROUTE_MANAGER.get().unwrap().write();
-        manager.replace_iface_routes(
+        let mut derived = iface_ipv4_routes(iface, addresses);
+        if !up {
+            let existing = manager.derived_routes_of(iface.index());
+            derived.retain(|route| {
+                is_address_route(route) || existing.iter().any(|entry| entry.is_same_route(route))
+            });
+        }
+        let changes = manager.replace_iface_routes(
             iface.index(),
             up && !addresses.is_empty(),
-            iface_ipv4_routes(iface, addresses),
+            derived,
         );
         sync_gateway_routes(&manager, iface)
             .expect("fewer gateway routes fit in the table that held more");
-    }
+        changes
+    };
     IPV6_ROUTE_MANAGER
         .get()
         .unwrap()
         .write()
         .replace_iface_routes(iface.index(), up, iface_ipv6_routes(iface));
+
+    let mut removed: Vec<RouteRecord> = changes.removed.iter().map(entry_record).collect();
+    removed.sort_by_key(|record| match record.type_ {
+        RouteType::Local if record.destination_prefix_len == 32 => 2,
+        RouteType::Broadcast => 1,
+        _ => 0,
+    });
+    IfaceRouteChanges {
+        removed,
+        added: changes.added.iter().map(entry_record).collect(),
+    }
+}
+
+/// Whether the route delivers to one address of the host itself.
+fn is_address_route(route: &RouteEntry<Ipv4Address>) -> bool {
+    route.type_() == RouteType::Local && route.dst().prefix_len() == 32
 }
 
 /// Installs a unicast IPv4 route. The caller holds the interface configuration lock.
-pub(super) fn add_ipv4_route(request: NewIpv4Route, addresses: &[InterfaceAddress]) -> Result<()> {
+pub(super) fn add_ipv4_route(
+    request: NewIpv4Route,
+    addresses: &[InterfaceAddress],
+) -> Result<RouteRecord> {
     user::add_ipv4_route(request, addresses)
 }
 
 /// Removes an IPv4 route that user space installed. The caller holds the interface configuration
 /// lock.
-pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<()> {
+pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<RouteRecord> {
     user::remove_ipv4_route(selector)
 }
 
