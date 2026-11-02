@@ -54,7 +54,7 @@ const MAX_LOCAL_BUDDY_ORDER: BuddyOrder = 18;
 
 pub(super) fn alloc(guard: &DisabledLocalIrqGuard, layout: Layout) -> Option<Paddr> {
     alloc_from_local_or_global(guard, layout).or_else(|| {
-        if reclaim_remote_local_pools(guard) {
+        if reclaim_local_pools() {
             alloc_from_local_or_global(guard, layout)
         } else {
             None
@@ -62,16 +62,15 @@ pub(super) fn alloc(guard: &DisabledLocalIrqGuard, layout: Layout) -> Option<Pad
     })
 }
 
-fn reclaim_remote_local_pools(guard: &DisabledLocalIrqGuard) -> bool {
-    let current = guard.current_cpu();
+fn reclaim_local_pools() -> bool {
     let mut reclaimed = false;
-    for cpu in all_cpus().filter(|cpu| *cpu != current) {
-        let mut remote_pool = LOCAL_POOL.get_on_cpu(cpu).lock();
-        if remote_pool.total_size() == 0 {
+    for cpu in all_cpus() {
+        let mut local_pool = LOCAL_POOL.get_on_cpu(cpu).lock();
+        if local_pool.total_size() == 0 {
             continue;
         }
         let mut global_pool = OnDemandGlobalLock::new();
-        remote_pool.drain_chunks(|addr, order| {
+        local_pool.drain_chunks(|addr, order| {
             global_pool.get().insert_chunk(addr, order);
         });
         reclaimed = true;
@@ -219,10 +218,30 @@ mod test {
             .insert_chunk(stranded, order);
         let global_before = GLOBAL_POOL.lock().total_size();
 
-        assert!(reclaim_remote_local_pools(&guard));
+        assert!(reclaim_local_pools());
 
         assert_eq!(LOCAL_POOL.get_on_cpu(remote).lock().total_size(), 0);
         assert!(GLOBAL_POOL.lock().total_size() >= global_before + layout.size());
-        assert!(!reclaim_remote_local_pools(&guard));
+        assert!(!reclaim_local_pools());
+    }
+
+    #[ktest]
+    fn reclaim_moves_chunks_cached_by_the_current_cpu_into_the_global_pool() {
+        let guard = irq::disable_local();
+
+        let order = 4;
+        let layout = Layout::from_size_align(PAGE_SIZE << order, PAGE_SIZE).unwrap();
+        let stranded = alloc_from_local_or_global(&guard, layout).unwrap();
+        LOCAL_POOL
+            .get_with(&guard)
+            .lock()
+            .insert_chunk(stranded, order);
+        let global_before = GLOBAL_POOL.lock().total_size();
+
+        assert!(reclaim_local_pools());
+
+        assert_eq!(LOCAL_POOL.get_with(&guard).lock().total_size(), 0);
+        assert!(GLOBAL_POOL.lock().total_size() >= global_before + layout.size());
+        assert!(!reclaim_local_pools());
     }
 }
