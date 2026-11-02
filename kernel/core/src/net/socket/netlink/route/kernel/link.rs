@@ -162,12 +162,13 @@ pub(super) fn iface_to_new_link(
     // See the reference below for the complete attribute list and ordering.
     // TODO: Asterinas currently reports only a subset of these attributes.
     // Reference: <https://elixir.bootlin.com/linux/v7.1/source/net/core/rtnetlink.c#L2050>.
-    let mut attrs = Vec::with_capacity(5);
+    let mut attrs = Vec::with_capacity(7);
     attrs.extend([
         LinkAttr::Name(*iface.name()),
         LinkAttr::TxqLen(DEFAULT_TX_QUEUE_LEN),
         LinkAttr::OperState(oper_state(iface)),
         LinkAttr::Mtu(iface.mtu() as u32),
+        LinkAttr::Carrier(1),
     ]);
 
     let (link_addr, link_broadcast_addr) = match iface.ethernet_addr() {

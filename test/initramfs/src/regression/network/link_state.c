@@ -10,6 +10,10 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 
+#ifndef IFF_LOWER_UP
+#define IFF_LOWER_UP 0x10000
+#endif
+
 #define UP_FLAGS (IFF_UP | IFF_RUNNING)
 #define OPERSTATE_UNKNOWN 0
 #define OPERSTATE_DOWN 2
@@ -45,13 +49,19 @@ static int set_up(const char *name, int up)
 	return set_flags(name, up ? flags | IFF_UP : flags & ~IFF_UP);
 }
 
-static int link_operstate(const char *name)
+struct link_facts {
+	int operstate;
+	int carrier;
+	unsigned int flags;
+};
+
+static int read_link(const char *name, struct link_facts *facts)
 {
 	struct ifinfomsg body = { .ifi_family = AF_UNSPEC };
 	struct rtnl_reply reply;
 	struct nlmsghdr *header;
 	int fd = rtnl_open(0);
-	int state = -1;
+	int found = -1;
 
 	if (fd < 0 || rtnl_send(fd, RTM_GETLINK, NLM_F_REQUEST | NLM_F_DUMP, 21,
 				&body, sizeof(body)) ||
@@ -66,12 +76,38 @@ static int link_operstate(const char *name)
 		size_t length = IFLA_PAYLOAD(header);
 		struct rtattr *interface_name = rtnl_find(first, length, IFLA_IFNAME);
 		struct rtattr *operstate = rtnl_find(first, length, IFLA_OPERSTATE);
+		struct rtattr *carrier = rtnl_find(first, length, IFLA_CARRIER);
 
-		if (interface_name && !strcmp(RTA_DATA(interface_name), name) &&
-		    operstate)
-			state = *(uint8_t *)RTA_DATA(operstate);
+		if (!interface_name || strcmp(RTA_DATA(interface_name), name) ||
+		    !operstate || !carrier)
+			continue;
+		facts->operstate = *(uint8_t *)RTA_DATA(operstate);
+		facts->carrier = *(uint8_t *)RTA_DATA(carrier);
+		facts->flags = link->ifi_flags;
+		found = 0;
 	}
-	return state;
+	return found;
+}
+
+static int link_operstate(const char *name)
+{
+	struct link_facts facts;
+
+	return read_link(name, &facts) ? -1 : facts.operstate;
+}
+
+static int link_carrier(const char *name)
+{
+	struct link_facts facts;
+
+	return read_link(name, &facts) ? -1 : facts.carrier;
+}
+
+static int link_lower_up(const char *name)
+{
+	struct link_facts facts;
+
+	return read_link(name, &facts) ? -1 : !!(facts.flags & IFF_LOWER_UP);
 }
 
 static int ipv4_loopback_route_count(void)
@@ -159,6 +195,8 @@ FN_TEST(loopback_starts_up)
 	TEST_RES(flags & UP_FLAGS, _ret == UP_FLAGS);
 	TEST_RES(flags & IFF_LOOPBACK, _ret == IFF_LOOPBACK);
 	TEST_RES(link_operstate("lo"), _ret == OPERSTATE_UNKNOWN);
+	TEST_RES(link_carrier("lo"), _ret == 1);
+	TEST_RES(link_lower_up("lo"), _ret == 1);
 	TEST_RES(ipv4_loopback_route_count(), _ret == 3);
 }
 END_TEST()
@@ -173,6 +211,8 @@ FN_TEST(a_down_interface_keeps_only_its_host_routes_and_carries_no_traffic)
 	TEST_RES(flags & UP_FLAGS, _ret == 0);
 	TEST_RES(flags & IFF_LOOPBACK, _ret == IFF_LOOPBACK);
 	TEST_RES(link_operstate("lo"), _ret == OPERSTATE_DOWN);
+	TEST_RES(link_carrier("lo"), _ret == 1);
+	TEST_RES(link_lower_up("lo"), _ret == 0);
 	TEST_RES(ipv4_loopback_route_count(), _ret == 2);
 	TEST_RES(loopback_connect_and_bind(&connect_errno, &bind_errno),
 		 bind_errno == 0 && connect_errno == EINPROGRESS);
@@ -188,6 +228,8 @@ FN_TEST(bringing_an_interface_up_restores_its_routes_and_traffic)
 	TEST_SUCC(get_flags("lo", &flags));
 	TEST_RES(flags & UP_FLAGS, _ret == UP_FLAGS);
 	TEST_RES(link_operstate("lo"), _ret == OPERSTATE_UNKNOWN);
+	TEST_RES(link_carrier("lo"), _ret == 1);
+	TEST_RES(link_lower_up("lo"), _ret == 1);
 	TEST_RES(ipv4_loopback_route_count(), _ret == 3);
 	TEST_RES(loopback_connect_and_bind(&connect_errno, &bind_errno),
 		 bind_errno == 0 && connect_errno == 0);
