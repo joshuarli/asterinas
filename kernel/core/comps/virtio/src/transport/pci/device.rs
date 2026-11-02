@@ -24,7 +24,7 @@ use crate::{
     VirtioDeviceType,
     queue::{AvailRing, Descriptor, UsedRing},
     transport::{
-        ConfigManager, DeviceStatus, VirtioTransport, VirtioTransportError,
+        ConfigManager, DeviceStatus, TransportLocation, VirtioTransport, VirtioTransportError,
         pci::capability::{VirtioPciCapabilityData, VirtioPciCpabilityType},
     },
 };
@@ -72,6 +72,15 @@ impl Debug for VirtioPciModernTransport {
 impl VirtioTransport for VirtioPciModernTransport {
     fn device_type(&self) -> VirtioDeviceType {
         self.device_type
+    }
+
+    fn location(&self) -> TransportLocation {
+        let location = self.common_device.location();
+        TransportLocation::Pci {
+            bus: location.bus,
+            device: location.device,
+            function: location.function,
+        }
     }
 
     fn set_queue(

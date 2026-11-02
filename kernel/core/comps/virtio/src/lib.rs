@@ -24,7 +24,8 @@ use ostd::{error, warn};
 use spin::Once;
 use transport::{DeviceStatus, mmio::VIRTIO_MMIO_DRIVER, pci::VIRTIO_PCI_DRIVER};
 
-use crate::transport::{DeviceTransport, VirtioTransport};
+pub use crate::identity::{VirtioIdentity, VirtioPlacement};
+use crate::transport::{DeviceTransport, TransportLocation, VirtioTransport};
 
 // Set this crate's log prefix for `ostd::log`.
 macro_rules! __log_prefix {
@@ -36,6 +37,7 @@ macro_rules! __log_prefix {
 pub mod device;
 mod dma_buf;
 mod id_alloc;
+mod identity;
 mod queue;
 mod transport;
 
@@ -52,8 +54,31 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
     device::network::init();
     device::socket::init();
 
+    let mut next_index = 0;
+    let mut next_mmio_ordinal = 0;
     while let Some(mut transport) = pop_device_transport() {
         let device_type = transport.device_type();
+        let placement = match transport.location() {
+            TransportLocation::Mmio { base } => {
+                let ordinal = next_mmio_ordinal;
+                next_mmio_ordinal += 1;
+                VirtioPlacement::Mmio { ordinal, base }
+            }
+            TransportLocation::Pci {
+                bus,
+                device,
+                function,
+            } => VirtioPlacement::Pci {
+                bus,
+                device,
+                function,
+            },
+        };
+        let identity = VirtioIdentity {
+            index: next_index,
+            placement,
+        };
+        next_index += 1;
 
         // Follow VirtIO 1.3, 3.1.1 "Driver Requirements: Device Initialization".
         // Reference: <https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html#x1-1230001>
@@ -101,7 +126,7 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
         let device_transport = DeviceTransport::new(transport);
 
         let res = match device_type {
-            VirtioDeviceType::Block => BlockDevice::init(device_transport),
+            VirtioDeviceType::Block => BlockDevice::init(device_transport, identity),
             VirtioDeviceType::Console => ConsoleDevice::init(device_transport),
             VirtioDeviceType::Entropy => EntropyDevice::init(device_transport),
             VirtioDeviceType::Input => InputDevice::init(device_transport),

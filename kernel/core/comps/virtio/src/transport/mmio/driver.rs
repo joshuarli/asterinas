@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{collections::vec_deque::VecDeque, sync::Arc};
 
 use ostd::{bus::BusProbeError, sync::SpinLock};
 
@@ -14,17 +14,17 @@ use super::{
 
 #[derive(Debug)]
 pub(crate) struct VirtioMmioDriver {
-    devices: SpinLock<Vec<VirtioMmioTransport>>,
+    devices: SpinLock<VecDeque<VirtioMmioTransport>>,
 }
 
 impl VirtioMmioDriver {
     pub(crate) fn pop_device_transport(&self) -> Option<VirtioMmioTransport> {
-        self.devices.lock().pop()
+        self.devices.lock().pop_front()
     }
 
     pub(super) fn new() -> Self {
         VirtioMmioDriver {
-            devices: SpinLock::new(Vec::new()),
+            devices: SpinLock::new(VecDeque::new()),
         }
     }
 }
@@ -36,7 +36,7 @@ impl MmioDriver for VirtioMmioDriver {
     ) -> Result<Arc<dyn MmioDevice>, (BusProbeError, MmioCommonDevice)> {
         let device = VirtioMmioTransport::new(device);
         let mmio_device = device.mmio_device().clone();
-        self.devices.lock().push(device);
+        self.devices.lock().push_back(device);
         Ok(mmio_device)
     }
 }

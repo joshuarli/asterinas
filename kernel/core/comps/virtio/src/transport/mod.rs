@@ -25,6 +25,15 @@ use crate::{
 pub(crate) mod mmio;
 pub(crate) mod pci;
 
+/// Where a transport sits on its bus.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TransportLocation {
+    /// A memory-mapped transport at a physical address.
+    Mmio { base: usize },
+    /// A function of a PCI device.
+    Pci { bus: u8, device: u8, function: u8 },
+}
+
 /// The transport of virtio device. Virtio device can use this transport to:
 /// 1. Set device status.
 /// 2. Negotiate features.
@@ -36,6 +45,9 @@ pub(crate) trait VirtioTransport: Sync + Send + Debug {
 
     /// Get device type.
     fn device_type(&self) -> VirtioDeviceType;
+
+    /// Get where the transport sits.
+    fn location(&self) -> TransportLocation;
 
     /// Get device features.
     fn read_device_features(&self) -> u64;

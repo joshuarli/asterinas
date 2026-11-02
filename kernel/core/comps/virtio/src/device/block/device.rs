@@ -22,7 +22,7 @@ use ostd::{
 
 use super::{BlockFeatures, VirtioBlockConfig};
 use crate::{
-    VIRTIO_BLOCK_MAJOR_ID,
+    VIRTIO_BLOCK_MAJOR_ID, VirtioIdentity,
     device::{
         VirtioDeviceError,
         block::{ReqType, RespStatus},
@@ -43,6 +43,7 @@ pub struct BlockDevice {
     queue: BioRequestSingleQueue,
     id: DeviceId,
     name: String,
+    identity: VirtioIdentity,
     partition_manager: PartitionManager,
 }
 
@@ -70,7 +71,10 @@ impl BlockDevice {
     }
 
     /// Creates a new VirtIO-Block driver and registers it.
-    pub(crate) fn init(device_transport: DeviceTransport) -> Result<(), VirtioDeviceError> {
+    pub(crate) fn init(
+        device_transport: DeviceTransport,
+        identity: VirtioIdentity,
+    ) -> Result<(), VirtioDeviceError> {
         let device = DeviceInner::init(device_transport)?;
 
         let index = NR_BLOCK_DEVICE.fetch_add(1, Ordering::Relaxed);
@@ -89,6 +93,7 @@ impl BlockDevice {
             ),
             id,
             name,
+            identity,
             partition_manager: PartitionManager::new(),
         });
 
@@ -96,6 +101,11 @@ impl BlockDevice {
 
         bio_segment_pool_init();
         Ok(())
+    }
+
+    /// Returns where the device sits and its number among the virtio devices.
+    pub fn identity(&self) -> &VirtioIdentity {
+        &self.identity
     }
 
     /// Dequeues a `BioRequest` from the software staging queue and

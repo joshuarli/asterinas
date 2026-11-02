@@ -18,8 +18,8 @@ use crate::{
     DeviceStatus, VirtioDeviceType,
     queue::UsedElem,
     transport::{
-        AvailRing, ConfigManager, Descriptor, UsedRing, VirtioTransport, VirtioTransportError,
-        pci::msix::VirtioMsixManager,
+        AvailRing, ConfigManager, Descriptor, TransportLocation, UsedRing, VirtioTransport,
+        VirtioTransportError, pci::msix::VirtioMsixManager,
     },
 };
 
@@ -152,6 +152,15 @@ impl VirtioPciLegacyTransport {
 impl VirtioTransport for VirtioPciLegacyTransport {
     fn device_type(&self) -> VirtioDeviceType {
         self.device_type
+    }
+
+    fn location(&self) -> TransportLocation {
+        let location = self.common_device.location();
+        TransportLocation::Pci {
+            bus: location.bus,
+            device: location.device,
+            function: location.function,
+        }
     }
 
     fn set_queue(

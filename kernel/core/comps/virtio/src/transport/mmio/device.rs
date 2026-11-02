@@ -8,7 +8,7 @@ use aster_util::{field_ptr, safe_ptr::SafePtr};
 use ostd::{
     io::IoMem,
     irq::IrqCallbackFunction,
-    mm::{HasDaddr, PAGE_SIZE, dma::DmaCoherent},
+    mm::{HasDaddr, HasPaddr, PAGE_SIZE, dma::DmaCoherent},
     sync::RwLock,
     warn,
 };
@@ -24,7 +24,9 @@ use super::{
 use crate::{
     VirtioDeviceType,
     queue::{AvailRing, Descriptor, UsedRing},
-    transport::{ConfigManager, DeviceStatus, VirtioTransport, VirtioTransportError},
+    transport::{
+        ConfigManager, DeviceStatus, TransportLocation, VirtioTransport, VirtioTransportError,
+    },
 };
 
 #[derive(Debug)]
@@ -91,6 +93,12 @@ impl VirtioMmioTransport {
 impl VirtioTransport for VirtioMmioTransport {
     fn device_type(&self) -> VirtioDeviceType {
         VirtioDeviceType::try_from(self.device.device_id() as u8).unwrap()
+    }
+
+    fn location(&self) -> TransportLocation {
+        TransportLocation::Mmio {
+            base: self.common_device.io_mem().paddr(),
+        }
     }
 
     fn set_queue(
