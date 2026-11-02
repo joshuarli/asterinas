@@ -38,8 +38,9 @@ pub(crate) mod route;
 pub(crate) mod rule;
 
 use addr::AddrSegment;
+use addr::CIfaddrMsg;
 use link::LinkSegment;
-use route::RouteSegment;
+use route::{CRtMsg, RouteSegment};
 use rule::RuleSegment;
 
 use crate::{
@@ -111,7 +112,25 @@ impl ProtocolSegment for RtnlSegment {
             .read_val_opt::<CMsgSegHdr>()?
             .ok_or_else(|| Error::with_message(Errno::EINVAL, "the reader length is too small"))?;
 
+        // Only a request that reads data may have the shorter legacy body. A request that changes
+        // state needs the full body, as Linux validates it against the full body size.
+        let required_body_len = match CSegmentType::try_from(header.type_) {
+            Ok(CSegmentType::NEWADDR | CSegmentType::DELADDR) => size_of::<CIfaddrMsg>(),
+            Ok(CSegmentType::NEWROUTE | CSegmentType::DELROUTE) => size_of::<CRtMsg>(),
+            _ => 0,
+        };
+        let body_too_small =
+            (header.len as usize) < size_of::<CMsgSegHdr>() + required_body_len;
+
         let segment = match CSegmentType::try_from(header.type_) {
+            _ if body_too_small => {
+                let payload_len = header.calc_payload_len_with_padding(reader)?;
+                reader.skip_some(payload_len);
+                ContinueRead::skipped_with_error(
+                    Errno::EINVAL,
+                    "the message body is too small",
+                )
+            }
             Ok(CSegmentType::GETLINK) => {
                 LinkSegment::read_from(&header, reader)?.map(RtnlSegment::GetLink)
             }
