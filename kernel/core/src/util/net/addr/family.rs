@@ -7,6 +7,7 @@ use ostd::{mm::VmIo, task::Task};
 use super::{
     ip::{CSocketAddrInet, CSocketAddrInet6},
     netlink::CSocketAddrNetlink,
+    packet::CSocketAddrPacket,
     unix,
     vsock::CSocketAddrVm,
 };
@@ -178,6 +179,13 @@ pub(crate) fn read_socket_addr_from_user(addr: Vaddr, addr_len: usize) -> Result
             let addr = CSocketAddrNetlink::from_first_bytes(storage.as_bytes());
             SocketAddr::Netlink(addr.into())
         }
+        Ok(CSocketAddrFamily::AF_PACKET) => {
+            if addr_len < size_of::<CSocketAddrPacket>() {
+                return_errno_with_message!(Errno::EINVAL, "the socket address length is too small");
+            }
+            let addr = CSocketAddrPacket::from_first_bytes(storage.as_bytes());
+            SocketAddr::Packet(addr.into())
+        }
         Ok(CSocketAddrFamily::AF_VSOCK) => {
             if addr_len < size_of::<CSocketAddrVm>() {
                 return_errno_with_message!(Errno::EINVAL, "the socket address length is too small");
@@ -272,6 +280,13 @@ pub(crate) fn write_socket_addr_with_max_len(
         })?,
         SocketAddr::Netlink(addr) => {
             write_c_socket_address_util::<CSocketAddrNetlink, _>(*addr, dest, max_len as usize)?
+        }
+        SocketAddr::Packet(addr) => {
+            let c_socket_addr = CSocketAddrPacket::from(*addr);
+            let actual_len = CSocketAddrPacket::len_with_link_addr(addr.link_addr_len());
+            let written_len = min(actual_len, max_len as usize);
+            current_userspace!().write_bytes(dest, &c_socket_addr.as_bytes()[..written_len])?;
+            actual_len
         }
         SocketAddr::Vsock(addr) => {
             write_c_socket_address_util::<CSocketAddrVm, _>(*addr, dest, max_len as usize)?

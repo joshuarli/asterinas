@@ -397,12 +397,20 @@ impl SocketTimeouts {
 }
 
 pub(in crate::net::socket) fn check_current_privileged() -> Result<()> {
+    check_current_capability(CapSet::NET_ADMIN)
+}
+
+pub(in crate::net::socket) fn check_current_net_raw() -> Result<()> {
+    check_current_capability(CapSet::NET_RAW)
+}
+
+fn check_current_capability(capability: CapSet) -> Result<()> {
     let current = current_thread!();
     let posix_thread = current.as_posix_thread().unwrap();
     lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
         UserNamespace::get_init_singleton().as_ref(),
         posix_thread,
-        CapSet::NET_ADMIN,
+        capability,
     ))
 }
 

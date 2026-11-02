@@ -8,5 +8,6 @@ pub(crate) use family::{
 mod family;
 mod ip;
 mod netlink;
+mod packet;
 mod unix;
 mod vsock;

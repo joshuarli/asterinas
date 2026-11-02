@@ -3,7 +3,10 @@
 use aster_bigtcp::wire::{Ipv4Address, Ipv6Address, PortNum};
 
 use crate::{
-    net::socket::{netlink::NetlinkSocketAddr, unix::UnixSocketAddr, vsock::VsockSocketAddr},
+    net::socket::{
+        netlink::NetlinkSocketAddr, packet::PacketSocketAddr, unix::UnixSocketAddr,
+        vsock::VsockSocketAddr,
+    },
     prelude::*,
 };
 
@@ -13,5 +16,6 @@ pub(crate) enum SocketAddr {
     IPv4(Ipv4Address, PortNum),
     IPv6(Ipv6Address, PortNum),
     Netlink(NetlinkSocketAddr),
+    Packet(PacketSocketAddr),
     Vsock(VsockSocketAddr),
 }
