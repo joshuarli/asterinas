@@ -134,7 +134,7 @@ fn balance_to<const MAX_ORDER1: BuddyOrder, const MAX_ORDER2: BuddyOrder>(
 
 #[cfg(ktest)]
 mod test {
-    use ostd::{mm::PAGE_SIZE, prelude::ktest};
+    use ostd::prelude::ktest;
 
     use super::*;
     use crate::test::MockMemoryRegion;
