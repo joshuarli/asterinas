@@ -17,21 +17,21 @@ use crate::{
 /// Represents a partition entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PartitionInfo {
-    Mbr(MbrEntry),
+    Mbr { entry: MbrEntry, disk_id: u32 },
     Gpt(GptEntry),
 }
 
 impl PartitionInfo {
     fn start_sector(&self) -> u64 {
         match self {
-            PartitionInfo::Mbr(entry) => entry.start_sector as u64,
+            PartitionInfo::Mbr { entry, .. } => entry.start_sector as u64,
             PartitionInfo::Gpt(entry) => entry.start_lba,
         }
     }
 
     fn total_sectors(&self) -> u64 {
         match self {
-            PartitionInfo::Mbr(entry) => entry.total_sectors as u64,
+            PartitionInfo::Mbr { entry, .. } => entry.total_sectors as u64,
             PartitionInfo::Gpt(entry) => entry.end_lba - entry.start_lba + 1,
         }
     }
@@ -173,14 +173,17 @@ fn parse_mbr(device: &Arc<dyn BlockDevice>, mbr: &MbrHeader) -> Vec<Option<Parti
         }
 
         if entry.is_valid() {
-            partitions.push(Some(PartitionInfo::Mbr(entry)));
+            partitions.push(Some(PartitionInfo::Mbr {
+                entry,
+                disk_id: mbr.id,
+            }));
         } else {
             partitions.push(None);
         }
     }
 
     if let Some(start_sector) = extended_partition {
-        parse_ebr(device, &mut partitions, start_sector, 0);
+        parse_ebr(device, &mut partitions, mbr.id, start_sector, 0);
     }
 
     partitions
@@ -189,6 +192,7 @@ fn parse_mbr(device: &Arc<dyn BlockDevice>, mbr: &MbrHeader) -> Vec<Option<Parti
 fn parse_ebr(
     device: &Arc<dyn BlockDevice>,
     partitions: &mut Vec<Option<PartitionInfo>>,
+    disk_id: u32,
     start_sector: u32,
     offset: u32,
 ) {
@@ -198,13 +202,17 @@ fn parse_ebr(
         .unwrap();
     if ebr.entries[0].is_valid() {
         ebr.entries[0].start_sector += ebr_sector;
-        partitions.push(Some(PartitionInfo::Mbr(ebr.entries[0])));
+        partitions.push(Some(PartitionInfo::Mbr {
+            entry: ebr.entries[0],
+            disk_id,
+        }));
     }
 
     if ebr.entries[1].is_extended() {
         parse_ebr(
             device,
             partitions,
+            disk_id,
             start_sector,
             ebr.entries[1].start_sector,
         );
@@ -250,6 +258,7 @@ struct PartitionNode {
     id: DeviceId,
     name: String,
     device: Arc<dyn BlockDevice>,
+    number: u32,
     info: PartitionInfo,
 }
 
@@ -276,16 +285,85 @@ impl BlockDevice for PartitionNode {
     fn is_partition(&self) -> bool {
         true
     }
+
+    fn partition_disk(&self) -> Option<&Arc<dyn BlockDevice>> {
+        Some(&self.device)
+    }
+
+    fn partition_number(&self) -> Option<u32> {
+        Some(self.number)
+    }
+
+    fn partition_uuid(&self) -> Option<String> {
+        Some(match self.info {
+            PartitionInfo::Mbr { disk_id, .. } => mbr_partition_uuid(disk_id, self.number),
+            PartitionInfo::Gpt(entry) => gpt_guid_text(&entry.guid),
+        })
+    }
+}
+
+/// Formats the partition UUID of an MBR partition: the disk signature and the partition number.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v6.12/source/block/partitions/core.c#L231>.
+fn mbr_partition_uuid(disk_id: u32, number: u32) -> String {
+    format!("{:08x}-{:02x}", disk_id, number)
+}
+
+/// Formats a GPT GUID, whose first three fields are stored little-endian.
+fn gpt_guid_text(guid: &[u8; 16]) -> String {
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]),
+        u16::from_le_bytes([guid[4], guid[5]]),
+        u16::from_le_bytes([guid[6], guid[7]]),
+        guid[8],
+        guid[9],
+        guid[10],
+        guid[11],
+        guid[12],
+        guid[13],
+        guid[14],
+        guid[15],
+    )
 }
 
 impl PartitionNode {
-    fn new(id: DeviceId, name: String, device: Arc<dyn BlockDevice>, info: PartitionInfo) -> Self {
+    fn new(
+        id: DeviceId,
+        name: String,
+        device: Arc<dyn BlockDevice>,
+        number: u32,
+        info: PartitionInfo,
+    ) -> Self {
         Self {
             id,
             name,
             device,
+            number,
             info,
         }
+    }
+}
+
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    #[ktest]
+    fn an_mbr_partition_uuid_joins_the_disk_signature_and_the_number() {
+        assert_eq!(mbr_partition_uuid(0, 1), "00000000-01");
+        assert_eq!(mbr_partition_uuid(0xdeadbeef, 18), "deadbeef-12");
+    }
+
+    #[ktest]
+    fn a_gpt_guid_is_written_with_its_leading_fields_byte_swapped() {
+        let guid = [
+            0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        assert_eq!(gpt_guid_text(&guid), "00112233-4455-6677-8899-aabbccddeeff");
     }
 }
 
@@ -341,7 +419,7 @@ impl PartitionManager {
                 EXTENDED_DEVICE_ID_ALLOCATOR.get().unwrap().allocate()
             };
             let name = partition_name(device.name(), index);
-            let partition = Arc::new(PartitionNode::new(id, name, device.clone(), *info));
+            let partition = Arc::new(PartitionNode::new(id, name, device.clone(), index, *info));
             new_partitions.push(partition);
         }
 

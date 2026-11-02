@@ -96,6 +96,21 @@ pub trait BlockDevice: Send + Sync + Any + Debug {
     fn partition_manager(&self) -> Option<&PartitionManager> {
         None
     }
+
+    /// Returns the whole disk that a partition belongs to.
+    fn partition_disk(&self) -> Option<&Arc<dyn BlockDevice>> {
+        None
+    }
+
+    /// Returns the number of a partition within its disk, counting from one.
+    fn partition_number(&self) -> Option<u32> {
+        None
+    }
+
+    /// Returns the UUID of a partition in the text form Linux reports as `PARTUUID`.
+    fn partition_uuid(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Metadata for a block device.

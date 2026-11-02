@@ -5,7 +5,10 @@
 #include "../common/test.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <linux/netlink.h>
 #include <poll.h>
 #include <stdio.h>
@@ -35,6 +38,14 @@ static int read_file(const char *path, char *buffer, size_t size)
 		return -1;
 	buffer[len] = '\0';
 	return (int)len;
+}
+
+static int resolve(const char *path, char *out)
+{
+	char *resolved = realpath(path, out);
+
+	errno = 0;
+	return resolved != NULL;
 }
 
 static int open_listener(unsigned int groups)
@@ -152,6 +163,52 @@ FN_TEST(writing_add_broadcasts_a_kernel_uevent)
 	snprintf(expected, sizeof(expected), "/block/%s", disk);
 	TEST_RES(strstr(message, expected) != NULL, _ret);
 	TEST_RES(strncmp(message, "add@/devices/", 13), _ret == 0);
+}
+END_TEST()
+
+FN_TEST(the_disk_sits_below_a_virtio_device_and_not_below_virtual)
+{
+	char link[512], resolved[PATH_MAX], virtio[PATH_MAX], subsystem[PATH_MAX + 16];
+	char expected_tail[512];
+	char *tail;
+
+	snprintf(link, sizeof(link), "/sys/class/block/%s", disk);
+	TEST_RES(resolve(link, resolved), _ret);
+	TEST_RES(strncmp(resolved, "/sys/devices/virtual/", 21), _ret != 0);
+
+	snprintf(expected_tail, sizeof(expected_tail), "/block/%s", disk);
+	tail = strstr(resolved, expected_tail);
+	TEST_RES(tail != NULL && strcmp(tail, expected_tail) == 0, _ret);
+	if (tail == NULL)
+		return;
+
+	snprintf(virtio, sizeof(virtio), "%.*s", (int)(tail - resolved), resolved);
+	TEST_RES(strstr(strrchr(virtio, '/'), "/virtio") != NULL, _ret);
+	snprintf(subsystem, sizeof(subsystem), "%s/subsystem", virtio);
+	TEST_RES(resolve(subsystem, link) && strcmp(link, "/sys/bus/virtio") == 0, _ret);
+}
+END_TEST()
+
+FN_TEST(a_synthetic_event_carries_the_device_path_of_the_class_entry)
+{
+	char link[512], resolved[PATH_MAX], message[2048], expected[PATH_MAX + 16];
+	int listener = CHECK(open_listener(KERNEL_GROUP));
+	int fd = CHECK(open(uevent_path, O_WRONLY));
+	int len;
+
+	snprintf(link, sizeof(link), "/sys/class/block/%s", disk);
+	TEST_RES(resolve(link, resolved) && strncmp(resolved, "/sys/", 5) == 0, _ret);
+	TEST_SUCC(write(fd, "add\n", 4));
+	TEST_RES(len = receive(listener, message, sizeof(message)), _ret > 0);
+	close(fd);
+	close(listener);
+	if (len <= 0)
+		return;
+
+	snprintf(expected, sizeof(expected), "DEVPATH=%s", resolved + 4);
+	TEST_RES(has_field(message, len, expected), _ret);
+	snprintf(expected, sizeof(expected), "add@%s", resolved + 4);
+	TEST_RES(strcmp(message, expected), _ret == 0);
 }
 END_TEST()
 
