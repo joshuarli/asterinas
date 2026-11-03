@@ -23,7 +23,7 @@ use smoltcp::{
 };
 
 use super::{
-    Iface, InterfaceName,
+    Iface, InterfaceName, UdpRegistry,
     poll::{PollContext, SocketTableAction},
     poll_iface::PollableIface,
     port::BindPortConfig,
@@ -36,7 +36,7 @@ use crate::{
     ext::Ext,
     iface::ScheduleNextPoll,
     packet::{FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TxPacket},
-    socket::{TcpListenerBg, UdpSocketBg},
+    socket::TcpListenerBg,
     socket_table::SocketTable,
 };
 
@@ -49,6 +49,7 @@ pub struct IfaceCommon<E: Ext> {
     interface: SpinLock<PollableIface<E>, BottomHalfDisabled>,
     used_ports: SpinLock<PortTable, BottomHalfDisabled>,
     sockets: SpinLock<SocketTable<E>, BottomHalfDisabled>,
+    udp: Arc<UdpRegistry<E>>,
     taps: LinkTaps,
     sched_poll: E::ScheduleNextPoll,
 }
@@ -56,11 +57,11 @@ pub struct IfaceCommon<E: Ext> {
 pub(super) struct TxPacketWithDst {
     pub(super) packet: TxPacket<NetworkLayer>,
     pub(super) dst_addr: IpAddress,
-    pub(super) failure: Option<(Arc<dyn UdpFailure>, smoltcp::wire::IpEndpoint)>,
+    pub(super) failure: Option<(Arc<dyn UdpFailure>, IpEndpoint)>,
 }
 
 pub(crate) trait UdpFailure: Send + Sync {
-    fn report(&self, destination: smoltcp::wire::IpEndpoint, offender: IpAddress, payload: Vec<u8>, tos: u8);
+    fn report(&self, destination: IpEndpoint, offender: IpAddress, payload: Vec<u8>, tos: u8);
 }
 
 pub(super) enum PhyProcessResult {
@@ -146,6 +147,7 @@ impl<E: Ext> IfaceCommon<E> {
         flags: InterfaceFlags,
         interface: smoltcp::iface::Interface,
         sched_poll: E::ScheduleNextPoll,
+        udp: Arc<UdpRegistry<E>>,
     ) -> Self {
         let index = INTERFACE_INDEX_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
 
@@ -157,6 +159,7 @@ impl<E: Ext> IfaceCommon<E> {
             interface: SpinLock::new(PollableIface::new(interface)),
             used_ports: SpinLock::new(PortTable::new()),
             sockets: SpinLock::new(SocketTable::new()),
+            udp,
             taps: LinkTaps::new(index, type_),
             sched_poll,
         }
@@ -282,15 +285,6 @@ impl<E: Ext> IfaceCommon<E> {
             .map(BoundTcpPort)
     }
 
-    pub(super) fn bind_udp(
-        &self,
-        iface: Arc<dyn Iface<E>>,
-        config: BindPortConfig,
-    ) -> Result<BoundUdpPort<E>, BindError> {
-        self.bind(iface, config, PortProtocol::Udp)
-            .map(BoundUdpPort)
-    }
-
     fn bind(
         &self,
         iface: Arc<dyn Iface<E>>,
@@ -317,22 +311,12 @@ impl<E: Ext> IfaceCommon<E> {
 }
 
 impl<E: Ext> IfaceCommon<E> {
-    pub(crate) fn register_udp_socket(&self, socket: Arc<UdpSocketBg<E>>) {
-        let mut sockets = self.sockets.lock();
-        sockets.insert_udp_socket(socket);
-    }
-
     pub(crate) fn remove_tcp_listener(&self, socket: &Arc<TcpListenerBg<E>>) {
         let mut sockets = self.sockets.lock();
         let removed = sockets.remove_listener(socket.listener_key());
         debug_assert!(removed.is_some());
     }
 
-    pub(crate) fn remove_udp_socket(&self, socket: &Arc<UdpSocketBg<E>>) {
-        let mut sockets = self.sockets.lock();
-        let removed = sockets.remove_udp_socket(socket);
-        debug_assert!(removed.is_some());
-    }
 }
 
 impl<E: Ext> IfaceCommon<E> {
@@ -356,10 +340,11 @@ impl<E: Ext> IfaceCommon<E> {
             return None;
         }
 
+        let udp_sockets = self.udp.sockets();
         let mut sockets = self.sockets.lock();
         let mut socket_actions = Vec::new();
 
-        let mut context = PollContext::new(interface.as_mut(), &sockets, &mut socket_actions);
+        let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, self.index, &mut socket_actions);
         context.poll_ingress(device, phy, &self.taps);
         context.poll_egress(device, phy, &self.taps);
 
@@ -474,16 +459,8 @@ impl<E: Ext> Drop for BoundPort<E> {
 
 /// A TCP port bound to an iface.
 pub struct BoundTcpPort<E: Ext>(BoundPort<E>);
-/// A UDP port bound to an iface.
-pub struct BoundUdpPort<E: Ext>(BoundPort<E>);
 
 impl<E: Ext> Deref for BoundTcpPort<E> {
-    type Target = BoundPort<E>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl<E: Ext> Deref for BoundUdpPort<E> {
     type Target = BoundPort<E>;
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -500,7 +477,6 @@ struct PortKey {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum PortProtocol {
     Tcp,
-    Udp,
 }
 
 struct PortState {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{boxed::Box, collections::VecDeque, sync::{Arc, Weak}, vec, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use alloc::{collections::VecDeque, sync::{Arc, Weak}, vec, vec::Vec};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use aster_softirq::BottomHalfDisabled;
 use ostd::sync::SpinLock;
@@ -10,35 +10,73 @@ use smoltcp::{
     iface::Context,
     socket::udp::UdpMetadata,
     storage::{PacketBuffer, PacketMetadata, SliceLike},
-    wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpRepr, UdpRepr},
+    wire::{IpAddress, IpEndpoint, IpProtocol, IpRepr, UdpRepr, UDP_HEADER_LEN},
 };
 
-use super::{
-    ReceiveBehavior,
-    common::{Inner, Socket, SocketBg},
-};
+use super::ReceiveBehavior;
 use crate::{
     errors::udp::SendError,
     ext::Ext,
-    iface::{BoundUdpPort, PacketSlice, UdpFailure},
+    iface::{PacketSlice, UdpFailure, UdpReservation},
     socket::{
-        RawUdpSocket,
-        event::SocketEvents,
-        unbound::{UDP_METADATA_LEN, UDP_RECV_PAYLOAD_LEN, new_udp_socket},
+        event::{SocketEventObserver, SocketEvents},
+        unbound::{UDP_METADATA_LEN, UDP_RECV_PAYLOAD_LEN, UDP_SEND_PAYLOAD_LEN},
     },
 };
 
-pub type UdpSocket<E> = Socket<UdpSocketInner, E>;
+pub struct UdpSocket<E: Ext>(Arc<UdpSocketBg<E>>);
+
+pub(crate) struct UdpSocketBg<E: Ext> {
+    bound: UdpReservation<E>,
+    inner: UdpSocketInner,
+    observer: E::UdpEventObserver,
+    open: SpinLock<bool, BottomHalfDisabled>,
+}
 
 /// States needed by [`UdpSocketBg`].
-pub struct UdpSocketInner {
-    socket: SpinLock<Box<RawUdpSocket>, BottomHalfDisabled>,
-    need_dispatch: AtomicBool,
+struct UdpSocketInner {
+    tx: SpinLock<TxQueue, BottomHalfDisabled>,
+    ttl: AtomicU8,
     received: SpinLock<PacketBuffer<'static, ReceivedMetadata>, BottomHalfDisabled>,
-    tx_tos: SpinLock<VecDeque<u8>, BottomHalfDisabled>,
     tx_stamps: SpinLock<VecDeque<TxTimestamp>, BottomHalfDisabled>,
     errors: SpinLock<UdpErrors, BottomHalfDisabled>,
     failure_reporter: Once<Arc<dyn UdpFailure>>,
+}
+
+#[derive(Default)]
+struct TxQueue {
+    packets: VecDeque<TxDatagram>,
+    queued_bytes: usize,
+}
+
+struct TxDatagram {
+    iface: u32,
+    source: IpAddress,
+    destination: IpEndpoint,
+    ttl: u8,
+    tos: u8,
+    tag: u32,
+    payload: Vec<u8>,
+}
+
+impl TxQueue {
+    fn can_enqueue(&self, size: usize) -> bool {
+        self.packets.len() < UDP_METADATA_LEN && self.queued_bytes + size <= UDP_SEND_PAYLOAD_LEN
+    }
+
+    fn enqueue(&mut self, packet: TxDatagram) -> Result<(), SendError> {
+        if !self.can_enqueue(packet.payload.len()) { return Err(SendError::BufferFull); }
+        self.queued_bytes += packet.payload.len();
+        self.packets.push_back(packet);
+        Ok(())
+    }
+
+    fn take_for(&mut self, ifindex: u32) -> Option<TxDatagram> {
+        let position = self.packets.iter().position(|packet| packet.iface == ifindex)?;
+        let packet = self.packets.remove(position).unwrap();
+        self.queued_bytes -= packet.payload.len();
+        Some(packet)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -47,6 +85,7 @@ struct ReceivedMetadata {
     timestamp_ns: u64,
     ttl: u8,
     tos: u8,
+    ifindex: u32,
 }
 
 struct UdpFailureReporter<E: Ext> {
@@ -109,31 +148,41 @@ pub struct TxTimestamp {
 
 const MAX_PENDING_TX_STAMPS: usize = 64;
 
-impl<E: Ext> Inner<E> for UdpSocketInner {
-    type BoundPort = BoundUdpPort<E>;
-    type Observer = E::UdpEventObserver;
-
-    fn on_drop(this: &Arc<SocketBg<Self, E>>) {
-        this.inner.socket.lock().close();
-
-        // A UDP socket can be removed immediately.
-        this.bound.iface().common().remove_udp_socket(this);
+impl<E: Ext> Drop for UdpSocket<E> {
+    fn drop(&mut self) {
+        let mut open = self.0.open.lock();
+        *open = false;
+        self.0.bound.release();
+        self.0.bound.registry().unregister(&self.0);
     }
 }
 
-pub(crate) type UdpSocketBg<E> = SocketBg<UdpSocketInner, E>;
-
 impl<E: Ext> UdpSocketBg<E> {
+    pub(crate) fn can_process(&self, port: u16) -> bool {
+        self.bound.endpoint().port == port
+    }
+
+    pub(crate) fn same_reuse_port_group(&self, other: &Self) -> bool {
+        self.bound.same_reuse_port_group(&other.bound)
+    }
+
+    fn notify_events(&self, events: SocketEvents) {
+        self.observer.on_events(events);
+    }
     pub(crate) fn failure_reporter(&self) -> Arc<dyn UdpFailure> {
         self.inner.failure_reporter.get().unwrap().clone()
     }
 
-    pub(crate) fn can_receive_error(&self, source: IpEndpoint) -> bool {
-        self.bound.port() == source.port
-            && (self.bound.addr().is_unspecified() || *self.bound.addr() == source.addr)
+    pub(crate) fn can_receive_error(&self, source: IpEndpoint, ifindex: u32) -> bool {
+        let bound = self.bound.endpoint();
+        self.bound.device().is_none_or(|device| device == ifindex)
+            && bound.port == source.port
+            && (bound.addr.is_unspecified() || bound.addr == source.addr)
     }
 
     pub(crate) fn report_error(&self, mut error: UdpError) {
+        let open = self.open.lock();
+        if !*open { return; }
         let mut errors = self.inner.errors.lock();
         if errors.peer.is_some_and(|peer| peer != error.destination)
             || errors.peer.is_none() && !errors.recverr
@@ -157,6 +206,7 @@ impl<E: Ext> UdpSocketBg<E> {
             }
         }
         drop(errors);
+        drop(open);
         self.notify_events(SocketEvents::HAS_ERROR);
     }
 
@@ -167,8 +217,10 @@ impl<E: Ext> UdpSocketBg<E> {
         udp_repr: &UdpRepr,
         udp_payload: PacketSlice<'_>,
         tos: u8,
+        ifindex: u32,
     ) -> bool {
-        if !self.accepts(ip_repr, udp_repr) {
+        let open = self.open.lock();
+        if !*open || !self.accepts(ip_repr, udp_repr, ifindex) {
             return false;
         }
 
@@ -181,80 +233,78 @@ impl<E: Ext> UdpSocketBg<E> {
             local_address: Some(ip_repr.dst_addr()),
             meta: Default::default(),
         };
-        let metadata = ReceivedMetadata { udp, timestamp_ns: E::wall_time_ns(), ttl, tos };
+        let metadata = ReceivedMetadata { udp, timestamp_ns: E::wall_time_ns(), ttl, tos, ifindex };
         let mut received = self.inner.received.lock();
         let Ok(buffer) = received.enqueue(udp_payload.len(), metadata) else {
             return true;
         };
         udp_payload.copy_to_slice(buffer);
         drop(received);
+        drop(open);
 
         self.notify_events(SocketEvents::CAN_RECV);
 
         true
     }
 
-    fn accepts(&self, ip_repr: &IpRepr, udp_repr: &UdpRepr) -> bool {
-        // This must be stricter than `RawUdpSocket::accepts` so that `RawUdpSocket::process` is
-        // guaranteed to work correctly if this method returns true.
-        //
-        // `RawUdpSocket::accepts` accepts all incoming broadcast and multicast packets, which is not
-        // what we want.
-        let bound_addr = self.bound.addr();
-        (bound_addr.is_unspecified() || ip_repr.dst_addr() == *bound_addr)
-            && udp_repr.dst_port == self.bound.port()
+    fn accepts(&self, ip_repr: &IpRepr, udp_repr: &UdpRepr, ifindex: u32) -> bool {
+        let bound = self.bound.endpoint();
+        let peer = IpEndpoint::new(ip_repr.src_addr(), udp_repr.src_port);
+        self.bound.device().is_none_or(|device| device == ifindex)
+            && (bound.addr.is_unspecified() || ip_repr.dst_addr() == bound.addr)
+            && udp_repr.dst_port == bound.port
+            && self.inner.errors.lock().peer.is_none_or(|connected| connected == peer)
+    }
+
+    pub(crate) fn receive_priority(&self, ip_repr: &IpRepr, udp_repr: &UdpRepr, ifindex: u32) -> Option<u8> {
+        let open = self.open.lock();
+        if !*open || !self.accepts(ip_repr, udp_repr, ifindex) { return None; }
+        let specific = !self.bound.endpoint().addr.is_unspecified();
+        let connected = self.inner.errors.lock().peer.is_some();
+        Some(u8::from(specific) + u8::from(connected) * 2)
     }
 
     /// Tries to generate an outgoing packet and dispatches the generated packet.
-    pub(crate) fn dispatch<D>(&self, cx: &mut Context, dispatch: D)
+    pub(crate) fn dispatch<D>(&self, ifindex: u32, cx: &mut Context, dispatch: D)
     where
         D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8),
     {
-        let mut socket = self.inner.socket.lock();
-
-        let mut stamped = false;
-        let mut queued_tos = self.inner.tx_tos.lock();
-        let tos = queued_tos.pop_front();
-        socket
-            .dispatch(cx, |cx, meta, (ip_repr, udp_repr, udp_payload)| {
-                dispatch(cx, &ip_repr, &udp_repr, udp_payload, tos.expect("queued UDP packet has TOS"));
-                if meta.id != 0 {
-                    let mut stamps = self.inner.tx_stamps.lock();
-                    if stamps.len() == MAX_PENDING_TX_STAMPS {
-                        stamps.pop_front();
-                    }
-                    stamps.push_back(TxTimestamp {
-                        tag: meta.id,
-                        wall_time_ns: E::wall_time_ns(),
-                    });
-                    stamped = true;
-                }
-                Ok::<(), ()>(())
-            })
-            .unwrap();
-        if stamped {
-            self.notify_events(SocketEvents::HAS_ERROR);
+        let open = self.open.lock();
+        if !*open { return; }
+        let mut queue = self.inner.tx.lock();
+        let Some(packet) = queue.take_for(ifindex) else { return };
+        drop(queue);
+        drop(open);
+        let ip_repr = IpRepr::new(packet.source, packet.destination.addr, IpProtocol::Udp,
+            UDP_HEADER_LEN + packet.payload.len(), packet.ttl);
+        let udp_repr = UdpRepr { src_port: self.bound.endpoint().port, dst_port: packet.destination.port };
+        dispatch(cx, &ip_repr, &udp_repr, &packet.payload, packet.tos);
+        let open = self.open.lock();
+        let notify_send = *open;
+        let notify_stamp = *open && packet.tag != 0;
+        if notify_stamp {
+            let mut stamps = self.inner.tx_stamps.lock();
+            if stamps.len() == MAX_PENDING_TX_STAMPS { stamps.pop_front(); }
+            stamps.push_back(TxTimestamp { tag: packet.tag, wall_time_ns: E::wall_time_ns() });
+            drop(stamps);
         }
-
-        // For UDP, dequeuing a packet means that we can queue more packets.
-        self.notify_events(SocketEvents::CAN_SEND);
-
-        self.inner
-            .need_dispatch
-            .store(!queued_tos.is_empty(), Ordering::Relaxed);
+        drop(open);
+        if notify_stamp { self.notify_events(SocketEvents::HAS_ERROR); }
+        if notify_send { self.notify_events(SocketEvents::CAN_SEND); }
     }
 
     /// Returns whether the socket _may_ generate an outgoing packet.
     ///
     /// The check is intended to be lock-free and fast, but may have false positives.
-    pub(crate) fn need_dispatch(&self) -> bool {
-        self.inner.need_dispatch.load(Ordering::Relaxed)
+    pub(crate) fn need_dispatch(&self, ifindex: u32) -> bool {
+        let open = self.open.lock();
+        *open && self.inner.tx.lock().packets.iter().any(|packet| packet.iface == ifindex)
     }
 }
 
 impl<E: Ext> UdpSocket<E> {
     pub fn set_hop_limit(&self, limit: u8) {
-        self.0.inner.socket.lock().set_hop_limit(Some(limit));
+        self.0.inner.ttl.store(limit, Ordering::Relaxed);
     }
 
     pub fn set_error_peer(&self, peer: Option<IpEndpoint>) {
@@ -290,59 +340,26 @@ impl<E: Ext> UdpSocket<E> {
     /// Binds to a specified endpoint.
     ///
     /// Polling the iface is _not_ required after this method succeeds.
-    pub fn new_bind(
-        bound: BoundUdpPort<E>,
-        observer: E::UdpEventObserver,
-    ) -> Result<Self, (BoundUdpPort<E>, smoltcp::socket::udp::BindError)> {
-        let local_endpoint = {
-            let mut endpoint = bound.endpoint();
-
-            // This is the address used to send packets. Source addresses can never be the broadcast
-            // address, even if it is the address that the socket binds to.
-            let interface = bound.iface().common().interface();
-            endpoint.addr = interface.map_broadcast_to_local(endpoint.addr);
-
-            endpoint
-        };
-
-        let socket = {
-            let mut socket = new_udp_socket();
-
-            let listen_endpoint = IpListenEndpoint {
-                addr: (!local_endpoint.addr.is_unspecified()).then_some(local_endpoint.addr),
-                port: local_endpoint.port,
-            };
-            if let Err(err) = socket.bind(listen_endpoint) {
-                return Err((bound, err));
-            }
-
-            socket
-        };
-
+    pub fn new_bind(bound: UdpReservation<E>, observer: E::UdpEventObserver) -> Self {
+        let registry = bound.registry().clone();
         let inner = UdpSocketInner {
-            socket: SpinLock::new(socket),
-            need_dispatch: AtomicBool::new(false),
+            tx: SpinLock::new(TxQueue::default()),
+            ttl: AtomicU8::new(64),
             received: SpinLock::new(PacketBuffer::new(
                 vec![PacketMetadata::<ReceivedMetadata>::EMPTY; UDP_METADATA_LEN],
                 vec![0; UDP_RECV_PAYLOAD_LEN],
             )),
-            tx_tos: SpinLock::new(VecDeque::new()),
             tx_stamps: SpinLock::new(VecDeque::new()),
             errors: SpinLock::new(UdpErrors::default()),
             failure_reporter: Once::new(),
         };
 
-        let socket = Self::new(bound, inner);
-        socket.inner().inner.failure_reporter.call_once(|| {
-            Arc::new(UdpFailureReporter { socket: Arc::downgrade(socket.inner()) })
+        let socket = Self(Arc::new(UdpSocketBg { bound, inner, observer, open: SpinLock::new(true) }));
+        socket.0.inner.failure_reporter.call_once(|| {
+            Arc::new(UdpFailureReporter { socket: Arc::downgrade(&socket.0) })
         });
-        socket.init_observer(observer);
+        registry.register(&socket.0);
         socket
-            .iface()
-            .common()
-            .register_udp_socket(socket.inner().clone());
-
-        Ok(socket)
     }
 
     /// Sends some data.
@@ -351,31 +368,31 @@ impl<E: Ext> UdpSocket<E> {
     ///
     /// A nonzero `meta.meta.id` asks for a transmit timestamp, which [`Self::pop_tx_timestamp`]
     /// returns after the packet leaves the interface.
-    pub fn send<F, R>(
+    pub fn send<F, R, Err>(
         &self,
         size: usize,
         meta: impl Into<UdpMetadata>,
+        iface: u32,
+        source: IpAddress,
         tos: u8,
         f: F,
-    ) -> Result<R, SendError>
+    ) -> Result<Result<R, Err>, SendError>
     where
-        F: FnOnce(&mut [u8]) -> R,
+        F: FnOnce(&mut [u8]) -> Result<R, Err>,
     {
-        let mut socket = self.0.inner.socket.lock();
-
-        if size > socket.payload_send_capacity() {
+        if size > UDP_SEND_PAYLOAD_LEN {
             return Err(SendError::TooLarge);
         }
-
-        let buffer = socket.send(size, meta)?;
-        self.0.inner.tx_tos.lock().push_back(tos);
-        let result = f(buffer);
-
-        self.0
-            .inner
-            .need_dispatch
-            .store(true, Ordering::Relaxed);
-
+        let mut payload = vec![0; size];
+        let mut queue = self.0.inner.tx.lock();
+        if !queue.can_enqueue(size) {
+            return Err(SendError::BufferFull);
+        }
+        let result = f(&mut payload);
+        if result.is_err() { return Ok(result); }
+        let meta = meta.into();
+        queue.enqueue(TxDatagram { iface, source, destination: meta.endpoint,
+            ttl: self.0.inner.ttl.load(Ordering::Relaxed), tos, tag: meta.meta.id, payload })?;
         Ok(result)
     }
 
@@ -391,7 +408,7 @@ impl<E: Ext> UdpSocket<E> {
         copy_fn: CopyFn,
     ) -> Result<R, smoltcp::socket::udp::RecvError>
     where
-        CopyFn: FnOnce(&[u8], UdpMetadata, u64, u8, u8) -> R,
+        CopyFn: FnOnce(&[u8], UdpMetadata, u64, u8, u8, u32) -> R,
     {
         let mut received = self.0.inner.received.lock();
         let (metadata, data): (ReceivedMetadata, &[u8]) = match behavior {
@@ -404,7 +421,7 @@ impl<E: Ext> UdpSocket<E> {
                 (*metadata, data)
             }
         };
-        Ok(copy_fn(data, metadata.udp, metadata.timestamp_ns, metadata.ttl, metadata.tos))
+        Ok(copy_fn(data, metadata.udp, metadata.timestamp_ns, metadata.ttl, metadata.tos, metadata.ifindex))
     }
 
     /// Takes the oldest pending transmit timestamp.
@@ -422,6 +439,37 @@ impl<E: Ext> UdpSocket<E> {
     }
 
     pub fn can_send(&self) -> bool {
-        self.0.inner.socket.lock().can_send()
+        self.0.inner.tx.lock().packets.len() < UDP_METADATA_LEN
+    }
+
+    pub fn local_endpoint(&self) -> IpEndpoint { self.0.bound.endpoint() }
+
+    pub fn bound_port(&self) -> &UdpReservation<E> { &self.0.bound }
+}
+
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::ktest;
+    use smoltcp::wire::Ipv4Address;
+    use super::*;
+
+    fn packet(iface: u32, size: usize) -> TxDatagram {
+        let address = IpAddress::Ipv4(Ipv4Address::LOCALHOST);
+        TxDatagram { iface, source: address, destination: IpEndpoint::new(address, 1234),
+            ttl: 64, tos: 0, tag: 0, payload: vec![0; size] }
+    }
+
+    #[ktest]
+    fn tx_queue_respects_capacity_and_selected_interface() {
+        let mut queue = TxQueue::default();
+        assert!(queue.enqueue(packet(1, UDP_SEND_PAYLOAD_LEN)).is_ok());
+        assert!(queue.enqueue(packet(2, 1)).is_err());
+        assert!(queue.enqueue(packet(2, 0)).is_ok());
+        assert_eq!(queue.take_for(2).unwrap().payload.len(), 0);
+        assert_eq!(queue.take_for(1).unwrap().payload.len(), UDP_SEND_PAYLOAD_LEN);
+        for _ in 0..UDP_METADATA_LEN { assert!(queue.enqueue(packet(1, 0)).is_ok()); }
+        assert!(queue.enqueue(packet(1, 0)).is_err());
+        assert!(queue.take_for(1).is_some());
+        assert!(queue.enqueue(packet(1, 0)).is_ok());
     }
 }

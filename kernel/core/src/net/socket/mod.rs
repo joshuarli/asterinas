@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::fmt::Display;
+use core::{fmt::Display, sync::atomic::AtomicU32};
 
 use options::SocketOption;
 use util::{MessageHeader, RecvFlags, RecvOutput, SendFlags, SockShutdownCmd, SocketAddr};
@@ -220,4 +220,10 @@ fn new_socket_common(is_nonblocking: bool) -> FileCommon {
     };
     // Reference: <https://elixir.bootlin.com/linux/v7.0/source/net/socket.c#L483>.
     FileCommon::new(SockFs::new_path(), AccessMode::O_RDWR, status_flags)
+}
+
+fn new_udp_socket_common(is_nonblocking: bool, uid: crate::process::Uid, gid: crate::process::Gid) -> (FileCommon, Arc<AtomicU32>) {
+    let status_flags = if is_nonblocking { StatusFlags::O_NONBLOCK } else { StatusFlags::empty() };
+    let (path, owner) = SockFs::new_path_with_owner(uid, gid);
+    (FileCommon::new(path, AccessMode::O_RDWR, status_flags), owner)
 }

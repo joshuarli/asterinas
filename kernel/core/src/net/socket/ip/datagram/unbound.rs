@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_bigtcp::{socket::UdpSocket, wire::IpEndpoint};
+use core::sync::atomic::AtomicU32;
+use aster_bigtcp::{iface::BindPortConfig, socket::UdpSocket, wire::{IpAddress, IpEndpoint, Ipv4Address}};
 
 use super::{bound::BoundDatagram, observer::DatagramObserver};
 use crate::{
     events::IoEvents,
     net::{
-        iface::BoundUdpPort,
+        iface::udp_registry,
+        route::lookup_local_iface,
         socket::{
-            ip::common::{
-                get_ephemeral_endpoint, map_unspecified_to_localhost, resolve_bind_iface_and_config,
-                resolve_device_bind_iface_and_config,
-            },
-            util::{BoundDevice, datagram_common},
+            util::{BoundDevice, check_port_privilege, datagram_common},
         },
     },
     prelude::*,
@@ -20,17 +18,18 @@ use crate::{
 };
 
 pub(super) struct UnboundDatagram {
-    _private: (),
+    owner: Arc<AtomicU32>,
 }
 
 impl UnboundDatagram {
-    pub(super) fn new() -> Self {
-        Self { _private: () }
+    pub(super) fn new(owner: Arc<AtomicU32>) -> Self {
+        Self { owner }
     }
 }
 
 pub(super) struct BindOptions {
     pub(super) can_reuse: bool,
+    pub(super) reuse_port: bool,
     pub(super) device: BoundDevice,
 }
 
@@ -46,33 +45,33 @@ impl datagram_common::Unbound for UnboundDatagram {
         pollee: &Pollee,
         options: BindOptions,
     ) -> Result<Self::Bound> {
-        let bound_port = bind_port(endpoint, options.can_reuse, options.device)?;
-
-        let bound_socket =
-            match UdpSocket::new_bind(bound_port, DatagramObserver::new(pollee.clone())) {
-                Ok(bound_socket) => bound_socket,
-                Err((_, err)) => {
-                    unreachable!("`new_bind` fails with {:?}, which should not happen", err)
-                }
-            };
+        check_port_privilege(endpoint.port)?;
+        let device = options.device.iface()?;
+        if !endpoint.addr.is_unspecified() {
+            let owner = lookup_local_iface(endpoint.addr)?;
+            if device.is_some_and(|device| !Arc::ptr_eq(device, &owner)) {
+                return_errno_with_message!(Errno::EADDRNOTAVAIL, "the address does not belong to the selected interface");
+            }
+        }
+        let config = BindPortConfig::new(*endpoint, options.can_reuse);
+        let reservation = udp_registry().bind(config, device.map(|iface| iface.index()), options.reuse_port, self.owner.clone())?;
+        let bound_socket = UdpSocket::new_bind(reservation, DatagramObserver::new(pollee.clone()));
 
         Ok(BoundDatagram::new(bound_socket))
     }
 
     fn bind_ephemeral(
         &mut self,
-        remote_endpoint: &Self::Endpoint,
+        _remote_endpoint: &Self::Endpoint,
         pollee: &Pollee,
     ) -> Result<Self::Bound> {
-        let endpoint = {
-            let remote_endpoint = map_unspecified_to_localhost(*remote_endpoint);
-            get_ephemeral_endpoint(&remote_endpoint)?
-        };
+        let endpoint = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), 0);
         self.bind(
             &endpoint,
             pollee,
             BindOptions {
                 can_reuse: false,
+                reuse_port: false,
                 device: BoundDevice::NONE,
             },
         )
@@ -81,14 +80,4 @@ impl datagram_common::Unbound for UnboundDatagram {
     fn check_io_events(&self) -> IoEvents {
         IoEvents::OUT
     }
-}
-
-fn bind_port(endpoint: &IpEndpoint, can_reuse: bool, device: BoundDevice) -> Result<BoundUdpPort> {
-    let (iface, config) = match device.iface()? {
-        Some(device_iface) => {
-            resolve_device_bind_iface_and_config(endpoint, can_reuse, device_iface)?
-        }
-        None => resolve_bind_iface_and_config(endpoint, can_reuse)?,
-    };
-    Ok(iface.bind_udp(config)?)
 }

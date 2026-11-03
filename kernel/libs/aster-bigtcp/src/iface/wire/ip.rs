@@ -229,12 +229,6 @@ enum Ecn {
     // Add other variants (e.g., `Ect1`) when needed.
 }
 
-impl DscpAndEcn {
-    fn new(dscp: Dscp, ecn: Ecn) -> Self {
-        Self(((dscp as u8) << 2) | ecn as u8)
-    }
-}
-
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Pod)]
 struct FlagsAndFragmentOffset([u8; 2]);

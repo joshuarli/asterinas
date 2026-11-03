@@ -40,6 +40,7 @@ static IPV6_ROUTE_MANAGER: Once<RwMutex<RouteManager<Ipv6Address>>> = Once::new(
 #[derive(Clone, Debug)]
 struct RouteLookupKey<A: RouteAddressFamily> {
     dst: A,
+    direct: bool,
     // TODO: Add selectors required by route netlink queries,
     // such as a source address, TOS, packet mark, and input/output interface.
 }
@@ -47,7 +48,11 @@ struct RouteLookupKey<A: RouteAddressFamily> {
 impl<A: RouteAddressFamily> RouteLookupKey<A> {
     /// Creates a new route lookup key.
     const fn new(dst: A) -> Self {
-        Self { dst }
+        Self { dst, direct: false }
+    }
+
+    const fn direct(dst: A) -> Self {
+        Self { dst, direct: true }
     }
 
     const fn dst(&self) -> &A {
@@ -343,19 +348,27 @@ fn sync_gateway_routes(manager: &RouteManager<Ipv4Address>, iface: &Arc<Iface>) 
 
 /// Looks up the output interface for an IP destination.
 pub(super) fn lookup_iface(dst: IpAddress) -> Result<Arc<Iface>> {
+    lookup_iface_with_scope(dst, false)
+}
+
+pub(super) fn lookup_direct_iface(dst: IpAddress) -> Result<Arc<Iface>> {
+    lookup_iface_with_scope(dst, true)
+}
+
+fn lookup_iface_with_scope(dst: IpAddress, direct: bool) -> Result<Arc<Iface>> {
     let iface = match dst {
         IpAddress::Ipv4(dst) => IPV4_ROUTE_MANAGER
             .get()
             .unwrap()
             .read()
-            .lookup_entry(&RouteLookupKey::new(dst))?
+            .lookup_entry(&if direct { RouteLookupKey::direct(dst) } else { RouteLookupKey::new(dst) })?
             .output_iface()
             .clone(),
         IpAddress::Ipv6(dst) => IPV6_ROUTE_MANAGER
             .get()
             .unwrap()
             .read()
-            .lookup_entry(&RouteLookupKey::new(dst))?
+            .lookup_entry(&if direct { RouteLookupKey::direct(dst) } else { RouteLookupKey::new(dst) })?
             .output_iface()
             .clone(),
     };

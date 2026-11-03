@@ -14,23 +14,24 @@ use crate::{
     events::IoEvents,
     fs::file::FileCommon,
     net::{
-        route::is_broadcast_endpoint,
+        iface::{Iface, iter_all_ifaces},
+        route::{is_broadcast_endpoint, lookup_direct_iface, lookup_iface},
         socket::{
             Socket,
             ip::{
                 common::{get_ephemeral_endpoint_on, map_unspecified_to_localhost},
                 options::{IpOptionSet, SetIpLevelOption},
             },
-            new_socket_common,
+            new_udp_socket_common,
             options::{
-                BindToDevice, Error as SocketError, SocketOption,
+                BindToDevice, DontRoute, Error as SocketError, ReusePort, SocketOption,
                 macros::{sock_option_mut, sock_option_ref},
             },
             private::SocketPrivate,
             util::{
                 BoundDevice, ControlMessage, MessageHeader, RecvFlags, RecvOutput, SendFlags,
                 SocketAddr,
-                datagram_common::{Inner, select_remote_and_bind},
+                datagram_common::{Bound, Inner, select_remote_and_bind},
                 options::{
                     GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
                     check_current_net_raw, timestamping,
@@ -39,7 +40,7 @@ use crate::{
         },
     },
     prelude::*,
-    process::signal::{PollHandle, Pollable, Pollee},
+    process::{posix_thread::AsPosixThread, signal::{PollHandle, Pollable, Pollee}},
     util::{MultiRead, MultiWrite, ioctl::RawIoctl, net::SockType},
 };
 
@@ -66,6 +67,7 @@ struct OptionSet {
     socket: SocketOptionSet,
     ip: IpOptionSet,
     device: BoundDevice,
+    dont_route: bool,
     // TODO: UDP option set
 }
 
@@ -77,6 +79,7 @@ impl OptionSet {
             socket,
             ip,
             device: BoundDevice::NONE,
+            dont_route: false,
         }
     }
 }
@@ -94,14 +97,16 @@ impl DatagramSocket {
     }
 
     pub(crate) fn new(is_nonblocking: bool) -> Arc<Self> {
-        let unbound_datagram = UnboundDatagram::new();
+        let credentials = current_thread!().as_posix_thread().unwrap().credentials();
+        let (common, owner) = new_udp_socket_common(is_nonblocking, credentials.fsuid(), credentials.fsgid());
+        let unbound_datagram = UnboundDatagram::new(owner);
         Arc::new(Self {
             inner: RwMutex::new(Inner::Unbound(unbound_datagram)),
             options: RwLock::new(OptionSet::new()),
             timeouts: SocketTimeouts::new(),
             tx_timestamp_key: AtomicU32::new(0),
             pollee: Pollee::new(),
-            common: new_socket_common(is_nonblocking),
+            common,
         })
     }
 
@@ -119,7 +124,8 @@ impl DatagramSocket {
             }
             Inner::Bound(bound_datagram) => {
                 let (output, meta) = bound_datagram.try_recv_with_meta(writer, flags)?;
-                (output, meta, bound_datagram.iface().index())
+                let ifindex = meta.ifindex;
+                (output, meta, ifindex)
             }
         };
         self.pollee.invalidate();
@@ -248,23 +254,33 @@ impl DatagramSocket {
             return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the IPv4 length limit");
         }
         let tx_tag = self.next_tx_tag();
-        let tos = self.options.read().ip.tos();
+        let (tos, dont_route) = {
+            let options = self.options.read();
+            (options.ip.tos(), options.dont_route || flags.contains(SendFlags::MSG_DONTROUTE))
+        };
         let (sent_bytes, iface_to_poll) = select_remote_and_bind(
             &self.inner,
             remote,
             || {
-                let remote_endpoint = remote.ok_or_else(|| {
+                remote.ok_or_else(|| {
                     Error::with_message(
                         Errno::EDESTADDRREQ,
                         "the destination address is not specified",
                     )
                 })?;
-                self.bind_ephemeral(remote_endpoint)
+                self.bind_ephemeral()
             },
             |bound_datagram, remote_endpoint| {
-                let sent_bytes = bound_datagram.try_send_tagged(reader, remote_endpoint, tx_tag, tos)?;
-                let iface_to_poll = bound_datagram.iface().clone();
-                Ok((sent_bytes, iface_to_poll))
+                let remote_endpoint = map_unspecified_to_localhost(*remote_endpoint);
+                let iface = self.output_iface(&remote_endpoint, dont_route)?;
+                let local = bound_datagram.local_endpoint();
+                let source = if local.addr.is_unspecified() || is_broadcast_endpoint(&local) {
+                    get_ephemeral_endpoint_on(&iface, &remote_endpoint)?.addr
+                } else {
+                    local.addr
+                };
+                let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos)?;
+                Ok((sent_bytes, iface))
             },
         )?;
 
@@ -276,38 +292,34 @@ impl DatagramSocket {
 }
 
 impl DatagramSocket {
-    /// Binds an unbound socket to an ephemeral endpoint that reaches `remote_endpoint`.
-    ///
-    /// A socket restricted to a device sends through that device whatever the routes say.
-    fn bind_ephemeral(&self, remote_endpoint: &IpEndpoint) -> Result<()> {
-        let device = self.options.read().device;
+    fn bind_ephemeral(&self) -> Result<()> {
+        let (device, can_reuse, reuse_port) = {
+            let options = self.options.read();
+            (options.device, options.socket.reuse_addr(), options.socket.reuse_port())
+        };
         let mut inner = self.inner.write();
-
-        let is_unbound = matches!(&*inner, Inner::Unbound(_));
-
-        match device.iface()? {
-            Some(iface) if is_unbound => {
-                let endpoint = get_ephemeral_endpoint_on(
-                    iface,
-                    &map_unspecified_to_localhost(*remote_endpoint),
-                )?;
-                inner.bind(
-                    &endpoint,
-                    &self.pollee,
-                    BindOptions {
-                        can_reuse: false,
-                        device,
-                    },
-                )
-            }
-            _ => inner.bind_ephemeral(remote_endpoint, &self.pollee),
-        }?;
+        if matches!(&*inner, Inner::Unbound(_)) {
+            inner.bind(&UNSPECIFIED_LOCAL_ENDPOINT, &self.pollee, BindOptions { can_reuse, reuse_port, device })?;
+        }
         if let Inner::Bound(bound) = &*inner {
             let options = self.options.read();
             bound.set_receive_errors(options.ip.recverr());
             bound.set_hop_limit(options.ip.ttl().get());
         }
         Ok(())
+    }
+
+    fn output_iface(&self, remote: &IpEndpoint, dont_route: bool) -> Result<Arc<Iface>> {
+        let device = self.options.read().device;
+        let route = if dont_route { Some(lookup_direct_iface(remote.addr)?) } else { None };
+        match (device.iface()?, route) {
+            (Some(device), Some(route)) if !Arc::ptr_eq(device, &route) => {
+                return_errno_with_message!(Errno::ENETUNREACH, "the direct route uses a different interface");
+            }
+            (Some(device), _) => Ok(device.clone()),
+            (None, Some(route)) => Ok(route),
+            (None, None) => lookup_iface(remote.addr),
+        }
     }
 
     fn set_bound_device(&self, device: BoundDevice) -> Result<()> {
@@ -372,16 +384,16 @@ impl SocketPrivate for DatagramSocket {
 impl Socket for DatagramSocket {
     fn bind(&self, socket_addr: SocketAddr) -> Result<()> {
         let endpoint = socket_addr.try_into()?;
-        let (can_reuse, device) = {
+        let (can_reuse, reuse_port, device) = {
             let options = self.options.read();
-            (options.socket.reuse_addr(), options.device)
+            (options.socket.reuse_addr(), options.socket.reuse_port(), options.device)
         };
 
         let mut inner = self.inner.write();
         inner.bind(
             &endpoint,
             &self.pollee,
-            BindOptions { can_reuse, device },
+            BindOptions { can_reuse, reuse_port, device },
         )?;
         if let Inner::Bound(bound) = &*inner {
             let options = self.options.read();
@@ -401,8 +413,16 @@ impl Socket for DatagramSocket {
             );
         }
 
-        self.bind_ephemeral(&endpoint)?;
-        self.inner.write().connect(&endpoint, &self.pollee)
+        let dont_route = self.options.read().dont_route;
+        self.bind_ephemeral()?;
+        let iface = self.output_iface(&endpoint, dont_route)?;
+        let mut inner = self.inner.write();
+        if let Inner::Bound(bound) = &mut *inner {
+            if bound.bound_port().endpoint().addr.is_unspecified() {
+                bound.set_connected_source(get_ephemeral_endpoint_on(&iface, &endpoint)?.addr);
+            }
+        }
+        inner.connect(&endpoint, &self.pollee)
     }
 
     fn addr(&self) -> Result<SocketAddr> {
@@ -431,7 +451,7 @@ impl Socket for DatagramSocket {
         flags: SendFlags,
     ) -> Result<usize> {
         // TODO: Deal with flags
-        if !flags.is_all_supported() {
+        if !(flags & !SendFlags::MSG_DONTROUTE).is_all_supported() {
             warn!("unsupported flags: {:?}", flags);
         }
 
@@ -499,6 +519,10 @@ impl Socket for DatagramSocket {
                 bind_to_device.set(self.options.read().device);
                 return Ok(());
             }
+            dont_route @ DontRoute => {
+                dont_route.set(self.options.read().dont_route);
+                return Ok(());
+            }
             _ => (),
         });
 
@@ -523,6 +547,17 @@ impl Socket for DatagramSocket {
             bind_to_device @ BindToDevice => {
                 return self.set_bound_device(*bind_to_device.get().unwrap());
             }
+            dont_route @ DontRoute => {
+                self.options.write().dont_route = *dont_route.get().unwrap();
+                return Ok(());
+            }
+            reuse_port @ ReusePort => {
+                let inner = self.inner.read();
+                let enabled = *reuse_port.get().unwrap();
+                self.options.write().socket.set_reuse_port(enabled);
+                if let Inner::Bound(bound) = &*inner { bound.bound_port().set_reuse_port(enabled); }
+                return Ok(());
+            }
             _ => (),
         });
 
@@ -546,18 +581,13 @@ impl Socket for DatagramSocket {
             bound.set_hop_limit(options.ip.ttl().get());
         }
 
-        let iface_to_poll = need_iface_poll
-            .then(|| match &*inner {
-                Inner::Unbound(_) => None,
-                Inner::Bound(bound_datagram) => Some(bound_datagram.iface().clone()),
-            })
-            .flatten();
+        let poll = need_iface_poll.then(|| ()).is_some();
 
         drop(inner);
         drop(options);
 
-        if let Some(iface) = iface_to_poll {
-            iface.poll();
+        if poll {
+            for iface in iter_all_ifaces() { iface.poll(); }
         }
 
         Ok(())

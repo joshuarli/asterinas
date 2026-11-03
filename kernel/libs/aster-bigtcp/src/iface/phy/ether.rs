@@ -20,7 +20,7 @@ use crate::{
     errors::LinkSendError,
     ext::Ext,
     iface::{
-        Iface, InterfaceFlags, InterfaceName, LinkTap,
+        Iface, InterfaceFlags, InterfaceName, LinkTap, UdpRegistry,
         common::{
             IfaceCommon, InterfaceType, PhyProcessResult, PollPhy, TxPacketWithDst,
             link_packet_from_bytes,
@@ -30,7 +30,7 @@ use crate::{
         phy::neighbors::{Due, Neighbors, Queued},
         wire::{arp, ether, icmp},
     },
-    packet::{FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
+    packet::{FreshTxPacket, LinkLayer, RxPacket, TransportLayer, TxPacket},
 };
 
 pub struct EtherIface<D, E: Ext> {
@@ -48,6 +48,7 @@ impl<D: WithDevice, E: Ext> EtherIface<D, E> {
         name: InterfaceName,
         sched_poll: E::ScheduleNextPoll,
         flags: InterfaceFlags,
+        udp: Arc<UdpRegistry<E>>,
     ) -> Arc<Self> {
         let interface = driver.with(|device| {
             let config = Config::new(wire::HardwareAddress::Ethernet(ether_addr));
@@ -56,7 +57,7 @@ impl<D: WithDevice, E: Ext> EtherIface<D, E> {
             new_interface(config, device.capabilities(), now)
         });
 
-        let common = IfaceCommon::new(name, InterfaceType::ETHER, flags, interface, sched_poll);
+        let common = IfaceCommon::new(name, InterfaceType::ETHER, flags, interface, sched_poll, udp);
 
         Arc::new(Self {
             driver,

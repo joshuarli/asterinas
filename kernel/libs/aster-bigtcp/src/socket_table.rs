@@ -12,7 +12,7 @@ use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 
 use crate::{
     ext::Ext,
-    socket::{TcpConnectionBg, TcpListenerBg, UdpSocketBg},
+    socket::{TcpConnectionBg, TcpListenerBg},
     wire::PortNum,
 };
 
@@ -101,7 +101,7 @@ const HASH_SECRET: u32 = 0xdeadbeef;
 // FIXME: This constant should be a per-net-namespace value
 const NET_HASHMIX: u32 = 0xbeefdead;
 
-const fn hash_local_remote(
+pub(crate) const fn hash_local_remote(
     local_addr: IpAddress,
     local_port: PortNum,
     remote_addr: IpAddress,
@@ -166,11 +166,6 @@ pub(crate) struct SocketTable<E: Ext> {
     // Since we do not yet support INADDR_ANY, we only have the first table here.
     listener_buckets: Box<[ListenerHashBucket<E>]>,
     connection_buckets: Box<[ConnectionHashBucket<E>]>,
-    // Linux does not include UDP sockets in the inet hashtable.
-    // Here we include UDP sockets in the socket table for simplicity.
-    // Note that multiple UDP sockets can be bound to the same address,
-    // so we cannot use (addr, port) as a _unique_ key for UDP sockets.
-    udp_sockets: Vec<Arc<UdpSocketBg<E>>>,
 }
 
 // On Linux, the number of buckets is determined at runtime based on the available memory.
@@ -194,12 +189,9 @@ impl<E: Ext> SocketTable<E> {
             .map(|_| ConnectionHashBucket::new())
             .collect();
 
-        let udp_sockets = Vec::new();
-
         Self {
             listener_buckets,
             connection_buckets,
-            udp_sockets,
         }
     }
 
@@ -253,16 +245,6 @@ impl<E: Ext> SocketTable<E> {
 
         bucket.connections.push(connection);
         Ok(())
-    }
-
-    pub(crate) fn insert_udp_socket(&mut self, udp_socket: Arc<UdpSocketBg<E>>) {
-        debug_assert!(
-            !self
-                .udp_sockets
-                .iter()
-                .any(|socket| Arc::ptr_eq(socket, &udp_socket))
-        );
-        self.udp_sockets.push(udp_socket);
     }
 
     pub(crate) fn lookup_listener(&self, key: &ListenerKey) -> Option<&Arc<TcpListenerBg<E>>> {
@@ -329,20 +311,6 @@ impl<E: Ext> SocketTable<E> {
         connection.notify_dead_events();
     }
 
-    pub(crate) fn remove_udp_socket(
-        &mut self,
-        socket: &Arc<UdpSocketBg<E>>,
-    ) -> Option<Arc<UdpSocketBg<E>>> {
-        let index = self
-            .udp_sockets
-            .iter()
-            .position(|udp_socket| Arc::ptr_eq(udp_socket, socket))?;
-        Some(self.udp_sockets.swap_remove(index))
-    }
-
-    pub(crate) fn udp_socket_iter(&self) -> impl Iterator<Item = &Arc<UdpSocketBg<E>>> {
-        self.udp_sockets.iter()
-    }
 }
 
 impl<E: Ext> Default for SocketTable<E> {

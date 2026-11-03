@@ -12,7 +12,8 @@ use crate::{
     events::IoEvents,
     net::{
         iface::{BoundUdpPort, Iface, UdpSocket},
-        socket::util::{RecvFlags, RecvOutput, SendFlags, datagram_common},
+        route::lookup_iface,
+        socket::{ip::common::get_ephemeral_endpoint_on, util::{RecvFlags, RecvOutput, SendFlags, datagram_common}},
     },
     prelude::*,
     util::{MultiRead, MultiWrite},
@@ -25,11 +26,13 @@ pub(super) struct ReceivedMeta {
     pub(super) arrived_at: Duration,
     pub(super) ttl: u8,
     pub(super) tos: u8,
+    pub(super) ifindex: u32,
 }
 
 pub(super) struct BoundDatagram {
     bound_socket: UdpSocket,
     remote_endpoint: Option<IpEndpoint>,
+    connected_source: Option<IpAddress>,
 }
 
 impl BoundDatagram {
@@ -37,15 +40,16 @@ impl BoundDatagram {
         Self {
             bound_socket,
             remote_endpoint: None,
+            connected_source: None,
         }
-    }
-
-    pub(super) fn iface(&self) -> &Arc<Iface> {
-        self.bound_socket.iface()
     }
 
     pub(super) fn bound_port(&self) -> &BoundUdpPort {
         self.bound_socket.bound_port()
+    }
+
+    pub(super) fn set_connected_source(&mut self, source: IpAddress) {
+        self.connected_source = Some(source);
     }
 
     pub(super) fn set_receive_errors(&self, enabled: bool) {
@@ -72,7 +76,7 @@ impl BoundDatagram {
     ) -> Result<(RecvOutput, ReceivedMeta)> {
         let result = self.bound_socket.recv(
             flags.receive_behavior(),
-            |packet, udp_metadata, arrived_at_ns, ttl, tos| {
+            |packet, udp_metadata, arrived_at_ns, ttl, tos, ifindex| {
                 let message_len = packet.len();
                 let copied_res = writer
                     .write(&mut VmReader::from(packet))
@@ -83,6 +87,7 @@ impl BoundDatagram {
                     arrived_at: Duration::from_nanos(arrived_at_ns),
                     ttl,
                     tos,
+                    ifindex,
                 };
                 (copied_res, meta, message_len)
             },
@@ -108,6 +113,8 @@ impl BoundDatagram {
         &self,
         reader: &mut dyn MultiRead,
         remote: &IpEndpoint,
+        iface: &Arc<Iface>,
+        source: IpAddress,
         tx_tag: u32,
         tos: u8,
     ) -> Result<usize> {
@@ -115,14 +122,9 @@ impl BoundDatagram {
         meta.meta.id = tx_tag;
         let result = self
             .bound_socket
-            .send(reader.sum_lens(), meta, tos, |socket_buffer| {
-                // FIXME: If copy failed, we should not send any packet.
-                // But current smoltcp API seems not to support this behavior.
+            .send(reader.sum_lens(), meta, iface.index(), source, tos, |socket_buffer| {
                 reader
                     .read(&mut VmWriter::from(socket_buffer))
-                    .inspect_err(|e| {
-                        warn!("unexpected UDP packet {e:#?} will be sent");
-                    })
                     .map_err(Into::into)
             });
 
@@ -150,7 +152,9 @@ impl datagram_common::Bound for BoundDatagram {
     type Endpoint = IpEndpoint;
 
     fn local_endpoint(&self) -> Self::Endpoint {
-        self.bound_socket.local_endpoint()
+        let mut endpoint = self.bound_socket.local_endpoint();
+        if let Some(source) = self.connected_source { endpoint.addr = source; }
+        endpoint
     }
 
     fn remote_endpoint(&self) -> Option<&Self::Endpoint> {
@@ -177,7 +181,10 @@ impl datagram_common::Bound for BoundDatagram {
         remote: &Self::Endpoint,
         _flags: SendFlags,
     ) -> Result<usize> {
-        self.try_send_tagged(reader, remote, 0, 0)
+        let iface = lookup_iface(remote.addr)?;
+        let local = self.local_endpoint();
+        let source = if local.addr.is_unspecified() { get_ephemeral_endpoint_on(&iface, remote)?.addr } else { local.addr };
+        self.try_send_tagged(reader, remote, &iface, source, 0, 0)
     }
 
     fn check_io_events(&self) -> IoEvents {

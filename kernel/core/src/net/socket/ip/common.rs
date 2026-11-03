@@ -41,30 +41,6 @@ impl From<BindError> for Error {
     }
 }
 
-/// Resolves the interface and port configuration of a socket restricted to `iface`.
-///
-/// Such a socket receives only what arrives on `iface`, so it may bind the unspecified address.
-/// A specified address must belong to `iface`.
-pub(super) fn resolve_device_bind_iface_and_config(
-    endpoint: &IpEndpoint,
-    can_reuse: bool,
-    iface: &Arc<Iface>,
-) -> Result<(Arc<Iface>, BindPortConfig)> {
-    check_port_privilege(endpoint.port)?;
-
-    if !endpoint.addr.is_unspecified() {
-        let owner = route::lookup_local_iface(endpoint.addr)?;
-        if !Arc::ptr_eq(&owner, iface) {
-            return_errno_with_message!(
-                Errno::EADDRNOTAVAIL,
-                "the address does not belong to the interface the socket is bound to"
-            );
-        }
-    }
-
-    Ok((iface.clone(), BindPortConfig::new(*endpoint, can_reuse)))
-}
-
 pub(super) fn get_ephemeral_endpoint(remote_endpoint: &IpEndpoint) -> Result<IpEndpoint> {
     let iface = route::lookup_iface(remote_endpoint.addr)?;
     get_ephemeral_endpoint_on(&iface, remote_endpoint)
