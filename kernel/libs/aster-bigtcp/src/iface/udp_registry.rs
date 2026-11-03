@@ -143,12 +143,23 @@ pub struct UdpReservation<E: Ext> {
 impl<E: Ext> UdpReservation<E> {
     pub fn endpoint(&self) -> IpEndpoint { self.endpoint }
 
+    pub(crate) fn receive_endpoint(&self) -> IpEndpoint {
+        self.registry.state.lock().bindings.get(&self.id)
+            .map_or(self.endpoint, |binding| binding.endpoint)
+    }
+
+    pub(crate) fn set_receive_address(&self, address: IpAddress) {
+        if let Some(binding) = self.registry.state.lock().bindings.get_mut(&self.id) {
+            binding.endpoint.addr = address;
+        }
+    }
+
     pub fn device(&self) -> Option<u32> { self.device }
 
     pub(crate) fn same_reuse_port_group(&self, other: &Self) -> bool {
         self.reuse_port.load(Ordering::Acquire) && other.reuse_port.load(Ordering::Acquire)
             && self.owner.load(Ordering::Acquire) == other.owner.load(Ordering::Acquire)
-            && self.endpoint == other.endpoint && self.device == other.device
+            && self.receive_endpoint() == other.receive_endpoint() && self.device == other.device
     }
 
     pub(crate) fn registry(&self) -> &Arc<UdpRegistry<E>> { &self.registry }

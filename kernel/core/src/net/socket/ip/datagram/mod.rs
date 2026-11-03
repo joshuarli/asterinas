@@ -5,7 +5,7 @@ use core::{
     time::Duration,
 };
 
-use aster_bigtcp::{socket::UdpErrorOrigin, wire::{IpAddress, IpEndpoint}};
+use aster_bigtcp::{iface::InterfaceType, socket::UdpErrorOrigin, wire::{IpAddress, IpEndpoint}};
 use bound::{BoundDatagram, ReceivedMeta};
 use unbound::{BindOptions, UnboundDatagram};
 
@@ -279,7 +279,8 @@ impl DatagramSocket {
                 } else {
                     local.addr
                 };
-                let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos)?;
+                let next_hop = if dont_route { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed };
+                let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos, next_hop)?;
                 Ok((sent_bytes, iface))
             },
         )?;
@@ -311,14 +312,14 @@ impl DatagramSocket {
 
     fn output_iface(&self, remote: &IpEndpoint, dont_route: bool) -> Result<Arc<Iface>> {
         let device = self.options.read().device;
-        let route = if dont_route { Some(lookup_direct_iface(remote.addr)?) } else { None };
-        match (device.iface()?, route) {
-            (Some(device), Some(route)) if !Arc::ptr_eq(device, &route) => {
-                return_errno_with_message!(Errno::ENETUNREACH, "the direct route uses a different interface");
+        let device = device.iface()?;
+        if dont_route {
+            lookup_direct_iface(remote.addr, device.map(|iface| iface.index()))
+        } else {
+            match device {
+                Some(device) => Ok(device.clone()),
+                None => lookup_iface(remote.addr),
             }
-            (Some(device), _) => Ok(device.clone()),
-            (None, Some(route)) => Ok(route),
-            (None, None) => lookup_iface(remote.addr),
         }
     }
 
@@ -418,7 +419,13 @@ impl Socket for DatagramSocket {
         let iface = self.output_iface(&endpoint, dont_route)?;
         let mut inner = self.inner.write();
         if let Inner::Bound(bound) = &mut *inner {
-            if bound.bound_port().endpoint().addr.is_unspecified() {
+            let local = bound.local_endpoint().addr;
+            if matches!(local, IpAddress::Ipv4(address) if address.is_loopback())
+                && iface.type_() != InterfaceType::LOOPBACK
+            {
+                return_errno_with_message!(Errno::EINVAL, "a loopback source cannot use a non-loopback route");
+            }
+            if local.is_unspecified() {
                 bound.set_connected_source(get_ephemeral_endpoint_on(&iface, &endpoint)?.addr);
             }
         }

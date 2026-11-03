@@ -27,7 +27,7 @@ use crate::{
     ext::Ext,
     iface::poll_iface::IsUnicast,
     packet::{ApplicationLayer, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
-    socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin, UdpSocketBg},
+    socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin, UdpNextHop, UdpSocketBg},
     socket_table::{ConnectionKey, ListenerKey, SocketTable, hash_local_remote},
 };
 
@@ -364,7 +364,7 @@ impl<E: Ext> PollContext<'_, E> {
         let mut processed = false;
         let is_unicast = self.iface.context().is_unicast(ip_repr.dst_addr());
 
-        for priority in (0..=3).rev() {
+        for priority in (0..=7).rev() {
             if is_unicast {
                 let candidates = || self.udp_sockets.iter().rev().filter(|socket|
                     socket.receive_priority(ip_repr, udp_repr, self.ifindex) == Some(priority));
@@ -464,6 +464,7 @@ impl<E: Ext> PollContext<'_, E> {
         Some(TxPacketWithDst {
             packet,
             dst_addr: reply_ip_repr.dst_addr(),
+            direct: false,
             failure: None,
         })
     }
@@ -483,6 +484,7 @@ impl<E: Ext> PollContext<'_, E> {
         Some(TxPacketWithDst {
             packet,
             dst_addr: ip_repr.dst_addr(),
+            direct: false,
             failure: None,
         })
     }
@@ -494,6 +496,7 @@ impl<E: Ext> PollContext<'_, E> {
         udp_repr: &UdpRepr,
         payload: &[u8],
         tos: u8,
+        next_hop: UdpNextHop,
     ) -> Option<TxPacketWithDst> {
         let checksum_caps = self.iface.context().checksum_caps();
 
@@ -507,7 +510,7 @@ impl<E: Ext> PollContext<'_, E> {
             dst_addr = IpAddress::Ipv4(Ipv4Address::BROADCAST);
         }
 
-        Some(TxPacketWithDst { packet, dst_addr, failure: None })
+        Some(TxPacketWithDst { packet, dst_addr, direct: matches!(next_hop, UdpNextHop::Direct), failure: None })
     }
 
     fn copy_payload(phy: &dyn PollPhy, payload: &[u8]) -> Option<TxPacket<ApplicationLayer>> {
@@ -674,13 +677,13 @@ impl<E: Ext> PollContext<'_, E> {
             let mut deferred = None;
 
             let (cx, pending, ipv4_cidrs) = self.iface.inner_mut();
-            socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos| {
+            socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop| {
                 let iface = PollableIfaceMut::new(cx, pending, ipv4_cidrs);
                 let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.ifindex, &mut actions);
 
                 let is_broadcast = this.iface.context().is_broadcast(&ip_repr.dst_addr());
                 if is_broadcast || !this.iface.is_unicast_local(ip_repr.dst_addr()) {
-                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos);
+                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop);
                     if !is_broadcast {
                         if let Some(packet) = tx_packet.as_mut() {
                             packet.failure = Some((

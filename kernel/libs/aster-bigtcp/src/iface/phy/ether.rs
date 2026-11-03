@@ -159,7 +159,8 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
         iface_cx: &mut Context,
         ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<TxPacket<LinkLayer>> {
-        let next_hop_ip = match iface_cx.route(&packet.dst_addr, iface_cx.now()) {
+        let route = if packet.direct { Some(packet.dst_addr) } else { iface_cx.route(&packet.dst_addr, iface_cx.now()) };
+        let next_hop_ip = match route {
             Some(IpAddress::Ipv4(next_hop_ip)) => next_hop_ip,
             Some(IpAddress::Ipv6(_)) => {
                 // FIXME: Currently, we drop outbound IPv6 packets because neighbor discovery is not

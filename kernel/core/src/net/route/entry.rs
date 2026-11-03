@@ -108,6 +108,7 @@ impl<A: RouteAddressFamily> RouteEntry<A> {
 
     pub(super) fn matches_lookup(&self, key: &RouteLookupKey<A>) -> bool {
         A::contains(&self.dst, key.dst())
+            && key.device.is_none_or(|device| self.output_iface.index() == device)
             && (!key.direct || self.gateway.is_none() && self.origin.scope.get() >= RouteScope::LINK.get())
     }
 }
