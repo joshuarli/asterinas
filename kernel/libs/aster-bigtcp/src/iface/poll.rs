@@ -148,7 +148,7 @@ impl<E: Ext> PollContext<'_, E> {
                 self.parse_and_process_udp(phy, &ip_repr, packet, checksum_caps.udp.rx())
             }
             IpProtocol::Icmp if matches!(&ip_repr.inner, IpRepr::Ipv4(_)) => {
-                self.process_icmp(&ip_repr.inner, packet);
+                self.process_icmp(&ip_repr, packet);
                 None
             }
             _ => None,
@@ -157,7 +157,7 @@ impl<E: Ext> PollContext<'_, E> {
 
     fn process_icmp(
         &mut self,
-        ip_repr: &IpRepr,
+        ip_repr: &IpReprWithLen,
         packet: RxPacket<TransportLayer>,
     ) {
         let mut bytes = alloc::vec![0; packet.len()];
@@ -165,7 +165,7 @@ impl<E: Ext> PollContext<'_, E> {
         let Some(error) = icmp::parse_udp_error(&bytes, true) else {
             return;
         };
-        if error.source.addr != ip_repr.dst_addr() || !self.iface.is_unicast_local(error.source.addr) {
+        if error.source.addr != ip_repr.inner.dst_addr() || !self.iface.is_unicast_local(error.source.addr) {
             return;
         }
         for socket in self.sockets.udp_socket_iter() {
@@ -175,11 +175,12 @@ impl<E: Ext> PollContext<'_, E> {
                     payload: error.payload.to_vec(),
                     timestamp_ns: 0,
                     origin: UdpErrorOrigin::Icmp {
-                        offender: ip_repr.src_addr(),
+                        offender: ip_repr.inner.src_addr(),
                         type_: error.type_,
                         code: error.code,
                         info: error.info,
-                        ttl: match ip_repr { IpRepr::Ipv4(header) => header.hop_limit, _ => 0 },
+                        ttl: match &ip_repr.inner { IpRepr::Ipv4(header) => header.hop_limit, _ => 0 },
+                        tos: ip_repr.tos,
                     },
                 });
             }
@@ -684,6 +685,7 @@ impl<E: Ext> PollContext<'_, E> {
                                 code: 3,
                                 info: 0,
                                 ttl: 64,
+                                tos: icmp::reply_tos(tos),
                             },
                         });
                     }
@@ -707,6 +709,7 @@ impl<E: Ext> PollContext<'_, E> {
                             code: 3,
                             info: 0,
                             ttl: 64,
+                            tos: icmp::reply_tos(tos),
                         },
                     });
                 }

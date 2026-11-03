@@ -10,6 +10,10 @@ use crate::{
 
 pub(in crate::iface) const HEADER_LEN: usize = size_of::<Header>();
 
+pub(in crate::iface) fn reply_tos(original: u8) -> u8 {
+    (original & 0x1e) | 0xc0
+}
+
 pub(in crate::iface) struct QuotedUdpError<'a> {
     pub source: IpEndpoint,
     pub destination: IpEndpoint,

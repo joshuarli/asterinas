@@ -350,6 +350,10 @@ FN_TEST(received_icmp_error_is_matched_to_the_original_udp_socket)
 	}
 	packet.icmp.type = ICMP_PARAMETERPROB;
 	packet.icmp.code = 0;
+	TEST_SUCC(setsockopt(sender, IPPROTO_IP, IP_RECVTOS, &enabled, sizeof(enabled)));
+	packet.outer.tos = 0xb9;
+	packet.outer.check = 0;
+	packet.outer.check = checksum(&packet.outer, sizeof(packet.outer));
 	((unsigned char *)&packet.icmp)[4] = 17;
 	packet.icmp.checksum = 0;
 	packet.icmp.checksum = checksum(&packet.icmp, packet_len - sizeof(packet.outer));
@@ -358,7 +362,15 @@ FN_TEST(received_icmp_error_is_matched_to_the_original_udp_socket)
 	msg.msg_controllen = sizeof(control.data);
 	msg.msg_namelen = sizeof(quoted_destination);
 	TEST_RES(recvmsg(sender, &msg, MSG_ERRQUEUE), _ret == 5);
-	cmsg = CMSG_FIRSTHDR(&msg);
+	int received_tos = -1;
+	cmsg = NULL;
+	for (struct cmsghdr *current = CMSG_FIRSTHDR(&msg); current; current = CMSG_NXTHDR(&msg, current)) {
+		if (current->cmsg_level == IPPROTO_IP && current->cmsg_type == IP_TOS && current->cmsg_len >= CMSG_LEN(1))
+			received_tos = *(unsigned char *)CMSG_DATA(current);
+		if (current->cmsg_level == IPPROTO_IP && current->cmsg_type == IP_RECVERR)
+			cmsg = current;
+	}
+	TEST_RES(received_tos, _ret == 0xb9);
 	TEST_RES(cmsg, _ret && _ret->cmsg_level == IPPROTO_IP && _ret->cmsg_type == IP_RECVERR);
 	if (cmsg && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct sock_extended_err))) {
 		struct sock_extended_err error;
@@ -381,6 +393,9 @@ FN_TEST(error_queue_reports_the_original_udp_probe)
 	int enabled = 1;
 	TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_RECVERR, &enabled, sizeof(enabled)));
 	TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_RECVTTL, &enabled, sizeof(enabled)));
+	TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &enabled, sizeof(enabled)));
+	int sent_tos = 0xb9;
+	TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_TOS, &sent_tos, sizeof(sent_tos)));
 	TEST_SUCC(setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPNS, &enabled, sizeof(enabled)));
 	TEST_RES(sendto(fd, "probe", 5, 0, (struct sockaddr *)&addr, sizeof(addr)), _ret == 5);
 	struct pollfd event = { .fd = fd, .events = POLLIN };
@@ -400,7 +415,7 @@ FN_TEST(error_queue_reports_the_original_udp_probe)
 	TEST_RES(destination.sin_port, _ret == addr.sin_port);
 	TEST_RES(destination.sin_addr.s_addr, _ret == addr.sin_addr.s_addr);
 	TEST_RES(msg.msg_flags, _ret & MSG_ERRQUEUE);
-	int saw_ttl = 0, saw_timestamp = 0;
+	int saw_ttl = 0, saw_timestamp = 0, received_tos = -1;
 	struct cmsghdr *cmsg, *error_cmsg = NULL;
 	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
 		if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TTL &&
@@ -417,9 +432,12 @@ FN_TEST(error_queue_reports_the_original_udp_probe)
 		}
 		if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_RECVERR)
 			error_cmsg = cmsg;
+		if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TOS && cmsg->cmsg_len >= CMSG_LEN(1))
+			received_tos = *(unsigned char *)CMSG_DATA(cmsg);
 	}
 	TEST_RES(saw_ttl, _ret == 1);
 	TEST_RES(saw_timestamp, _ret == 1);
+	TEST_RES(received_tos, _ret == 0xd8);
 	cmsg = error_cmsg;
 	TEST_RES(cmsg, _ret && _ret->cmsg_level == IPPROTO_IP && _ret->cmsg_type == IP_RECVERR);
 	TEST_RES(cmsg, _ret && _ret->cmsg_len >= CMSG_LEN(sizeof(struct sock_extended_err) + sizeof(struct sockaddr_in)));
