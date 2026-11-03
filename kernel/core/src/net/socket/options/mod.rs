@@ -19,6 +19,7 @@ impl_socket_options!(
     pub(crate) struct SocketType(SockType);
     pub(crate) struct Error(Option<crate::error::Error>);
     pub(crate) struct Broadcast(bool);
+    pub(crate) struct DontRoute(bool);
     pub(crate) struct SendBuf(u32);
     pub(crate) struct RecvBuf(u32);
     pub(crate) struct KeepAlive(bool);

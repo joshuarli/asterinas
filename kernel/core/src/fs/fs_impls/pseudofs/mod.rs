@@ -21,7 +21,7 @@
 //! anonymous device IDs.
 
 use core::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -194,6 +194,7 @@ impl From<PseudoInodeType> for InodeType {
 /// A pseudo inode that does not correspond to any real path in the file system.
 pub(crate) struct PseudoInode {
     metadata: SpinLock<Metadata>,
+    tracked_owner: Option<Arc<AtomicU32>>,
     extension: Extension,
     fs: Weak<NaivePseudoFs>,
     is_anon: bool,
@@ -232,10 +233,17 @@ impl PseudoInode {
 
         PseudoInode {
             metadata: SpinLock::new(metadata),
+            tracked_owner: None,
             extension: Extension::new(),
             fs,
             is_anon: type_ == InodeType::Unknown,
         }
+    }
+
+    fn track_owner(&mut self) -> Arc<AtomicU32> {
+        let owner = Arc::new(AtomicU32::new(self.metadata.lock().uid.into()));
+        self.tracked_owner = Some(owner.clone());
+        owner
     }
 }
 
@@ -315,6 +323,9 @@ impl Inode for PseudoInode {
     fn set_owner(&self, _self_dentry: &Dentry, uid: Uid) -> Result<()> {
         let mut meta = self.metadata.lock();
         meta.uid = uid;
+        if let Some(owner) = &self.tracked_owner {
+            owner.store(uid.into(), Ordering::Release);
+        }
         meta.last_meta_change_at = now();
         Ok(())
     }

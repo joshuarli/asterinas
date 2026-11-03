@@ -8,7 +8,7 @@ use smoltcp::{
 };
 
 use super::{
-    BindPortConfig, BoundTcpPort, BoundUdpPort, InterfaceFlags, InterfaceName, InterfaceType,
+    BindPortConfig, BoundTcpPort, InterfaceFlags, InterfaceName, InterfaceType,
     LinkTap,
 };
 use crate::{
@@ -61,18 +61,6 @@ impl<E: Ext> dyn Iface<E> {
     ) -> Result<BoundTcpPort<E>, BindError> {
         let common = self.common();
         common.bind_tcp(self.clone(), config)
-    }
-
-    /// Binds a UDP port to the iface.
-    ///
-    /// If no specific port is given in [`BindPortConfig`], the iface will pick up an ephemeral
-    /// port.
-    pub fn bind_udp(
-        self: &Arc<Self>,
-        config: BindPortConfig,
-    ) -> Result<BoundUdpPort<E>, BindError> {
-        let common = self.common();
-        common.bind_udp(self.clone(), config)
     }
 
     /// Returns the interface index.

@@ -19,7 +19,7 @@ use crate::{
     errors::LinkSendError,
     ext::Ext,
     iface::{
-        Iface, InterfaceName, LinkTap,
+        Iface, InterfaceName, LinkTap, UdpRegistry,
         common::{
             IfaceCommon, InterfaceFlags, InterfaceType, PhyProcessResult, PollPhy, TxPacketWithDst,
             link_packet_from_bytes,
@@ -46,6 +46,7 @@ impl<D: WithDevice, E: Ext> IpIface<D, E> {
         sched_poll: E::ScheduleNextPoll,
         type_: InterfaceType,
         flags: InterfaceFlags,
+        udp: Arc<UdpRegistry<E>>,
     ) -> Arc<Self> {
         let interface = driver.with(|device| {
             let config = Config::new(wire::HardwareAddress::Ip);
@@ -62,7 +63,7 @@ impl<D: WithDevice, E: Ext> IpIface<D, E> {
             interface
         });
 
-        let common = IfaceCommon::new(name, type_, flags, interface, sched_poll);
+        let common = IfaceCommon::new(name, type_, flags, interface, sched_poll, udp);
 
         Arc::new(Self {
             driver,

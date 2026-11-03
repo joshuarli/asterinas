@@ -4,7 +4,7 @@ use core::slice::Iter;
 
 use aster_bigtcp::{
     device::{AnyNetworkDevice, WithDevice},
-    iface::{InterfaceFlags, InterfaceName, InterfaceType},
+    iface::{InterfaceFlags, InterfaceName, InterfaceType, UdpRegistry},
 };
 use aster_softirq::BottomHalfDisabled;
 use spin::Once;
@@ -12,32 +12,42 @@ use spin::Once;
 use super::{Iface, poll::poll_ifaces};
 use crate::{net::iface::sched::PollScheduler, prelude::*};
 
-static IFACES: Once<Vec<Arc<Iface>>> = Once::new();
+struct NetworkStack {
+    ifaces: Vec<Arc<Iface>>,
+    udp: Arc<UdpRegistry<super::ext::BigtcpExt>>,
+}
+
+static NETWORK: Once<NetworkStack> = Once::new();
 
 fn virtio_iface() -> Option<&'static Arc<Iface>> {
-    IFACES.get().unwrap().get(1)
+    NETWORK.get().unwrap().ifaces.get(1)
 }
 
 pub(in crate::net) fn iter_all_ifaces() -> Iter<'static, Arc<Iface>> {
-    IFACES.get().unwrap().iter()
+    NETWORK.get().unwrap().ifaces.iter()
+}
+
+pub(in crate::net) fn udp_registry() -> &'static Arc<UdpRegistry<super::ext::BigtcpExt>> {
+    &NETWORK.get().unwrap().udp
 }
 
 // TODO: Support multiple network devices and avoid the hardcoded device name.
 const VIRTIO_DEVICE_NAME: &str = aster_virtio::device::network::DEVICE_NAME;
 
 pub(in crate::net) fn init() {
-    IFACES.call_once(|| {
+    NETWORK.call_once(|| {
+        let udp = UdpRegistry::new();
         let mut ifaces = Vec::with_capacity(2);
 
         // Initialize loopback before virtio
         // to ensure the loopback interface index is ahead of virtio.
-        ifaces.push(new_loopback());
+        ifaces.push(new_loopback(udp.clone()));
 
-        if let Some(iface_virtio) = new_virtio() {
+        if let Some(iface_virtio) = new_virtio(udp.clone()) {
             ifaces.push(iface_virtio);
         }
 
-        ifaces
+        NetworkStack { ifaces, udp }
     });
 
     if let Some(iface_virtio) = virtio_iface() {
@@ -51,7 +61,7 @@ pub(in crate::net) fn init() {
     poll_ifaces();
 }
 
-fn new_loopback() -> Arc<Iface> {
+fn new_loopback(udp: Arc<UdpRegistry<super::ext::BigtcpExt>>) -> Arc<Iface> {
     use aster_bigtcp::{
         device::Loopback,
         iface::IpIface,
@@ -95,10 +105,11 @@ fn new_loopback() -> Arc<Iface> {
         PollScheduler::new(),
         InterfaceType::LOOPBACK,
         flags,
+        udp,
     ) as Arc<Iface>
 }
 
-fn new_virtio() -> Option<Arc<Iface>> {
+fn new_virtio(udp: Arc<UdpRegistry<super::ext::BigtcpExt>>) -> Option<Arc<Iface>> {
     use aster_bigtcp::iface::EtherIface;
 
     let virtio_net = aster_network::get_device(VIRTIO_DEVICE_NAME)?;
@@ -129,5 +140,6 @@ fn new_virtio() -> Option<Arc<Iface>> {
         InterfaceName::from_str_truncated("eth0"),
         PollScheduler::new(),
         flags,
+        udp,
     ))
 }

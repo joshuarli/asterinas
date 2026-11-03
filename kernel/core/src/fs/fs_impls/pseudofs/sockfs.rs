@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::format;
+use core::sync::atomic::AtomicU32;
 
 use spin::Once;
 
 use crate::{
     fs::{
         file::mkmod,
-        pseudofs::{NaivePseudoFs, PseudoInodeType},
+        pseudofs::{NaivePseudoFs, PseudoInode, PseudoInodeType},
         vfs::{
             file_system::FileSystem,
             path::{Mount, Path},
@@ -44,6 +45,16 @@ impl SockFs {
             Gid::new_root(),
         ));
 
+        Self::path(socket_inode)
+    }
+
+    pub(crate) fn new_path_with_owner(uid: Uid, gid: Gid) -> (Path, Arc<AtomicU32>) {
+        let mut inode = Self::singleton().alloc_inode(PseudoInodeType::Socket, mkmod!(a+rwx), uid, gid);
+        let owner = inode.track_owner();
+        (Self::path(Arc::new(inode)), owner)
+    }
+
+    fn path(socket_inode: Arc<PseudoInode>) -> Path {
         Path::new_pseudo(Self::mount_node().clone(), socket_inode, |inode| {
             format!("socket:[{}]", inode.ino())
         })
