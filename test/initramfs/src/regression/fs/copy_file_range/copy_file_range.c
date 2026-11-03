@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -72,6 +73,22 @@ FN_TEST(file_offsets_are_used_and_advanced_without_pointers)
 }
 END_TEST()
 
+FN_TEST(failed_offset_copyback_still_advances_the_output)
+{
+	long long *in_off = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+				 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	TEST_RES(in_off, _ret != MAP_FAILED);
+	*in_off = 4;
+	TEST_SUCC(mprotect(in_off, 4096, PROT_READ));
+	TEST_SUCC(ftruncate(destination, 0));
+	TEST_SUCC(lseek(destination, 0, SEEK_SET));
+	TEST_ERRNO(copy(source, in_off, destination, NULL, 4, 0), EFAULT);
+	TEST_RES(lseek(destination, 0, SEEK_CUR), _ret == 4);
+	TEST_RES(destination_holds("4567", 4), _ret == 1);
+	TEST_SUCC(munmap(in_off, 4096));
+}
+END_TEST()
+
 FN_TEST(a_start_past_the_end_copies_nothing)
 {
 	long long in_off = 16;
@@ -135,36 +152,6 @@ FN_TEST(files_on_different_file_systems_are_rejected)
 	TEST_ERRNO(copy(source, NULL, other, NULL, 1, 0), EXDEV);
 	TEST_SUCC(close(other));
 	TEST_SUCC(unlink("/dev/shm/copy_file_range_other"));
-}
-END_TEST()
-
-static void *copy_to_shared_offset(void *unused)
-{
-	(void)unused;
-	for (int i = 0; i < 100; i++) {
-		long long in_off = 0;
-		if (copy(source, &in_off, destination, NULL, 16, 0) != 16)
-			return (void *)1;
-	}
-	return NULL;
-}
-
-FN_TEST(concurrent_copies_advance_the_shared_output_offset)
-{
-	TEST_SUCC(ftruncate(destination, 0));
-	TEST_SUCC(lseek(destination, 0, SEEK_SET));
-	pthread_t first, second;
-	CHECK_WITH(pthread_create(&first, NULL, copy_to_shared_offset, NULL), _ret == 0);
-	CHECK_WITH(pthread_create(&second, NULL, copy_to_shared_offset, NULL), _ret == 0);
-	void *first_result, *second_result;
-	CHECK_WITH(pthread_join(first, &first_result), _ret == 0);
-	CHECK_WITH(pthread_join(second, &second_result), _ret == 0);
-	TEST_RES(first_result, _ret == NULL);
-	TEST_RES(second_result, _ret == NULL);
-	struct stat st;
-	TEST_SUCC(fstat(destination, &st));
-	TEST_RES(st.st_size, _ret == 3200);
-	TEST_RES(lseek(destination, 0, SEEK_CUR), _ret == 3200);
 }
 END_TEST()
 

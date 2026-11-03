@@ -130,18 +130,23 @@ pub(super) fn sys_copy_file_range(
     }
 
     if copied > 0 {
+        fs::vfs::notify::on_access(&in_file);
+        fs::vfs::notify::on_modify(&out_file);
+        let mut copyback = Ok(());
         if in_offset_ptr == 0 {
             **in_guard.as_mut().or(out_guard.as_mut()).expect("input offset is locked") = in_pos + copied;
         } else {
-            ctx.user_space().write_val(in_offset_ptr, &((in_pos + copied) as i64))?;
+            copyback = ctx.user_space().write_val(in_offset_ptr, &((in_pos + copied) as i64));
         }
         if out_offset_ptr == 0 {
             **out_guard.as_mut().or(in_guard.as_mut()).expect("output offset is locked") = out_pos + copied;
         } else {
-            ctx.user_space().write_val(out_offset_ptr, &((out_pos + copied) as i64))?;
+            let result = ctx.user_space().write_val(out_offset_ptr, &((out_pos + copied) as i64));
+            if copyback.is_ok() {
+                copyback = result;
+            }
         }
-        fs::vfs::notify::on_access(&in_file);
-        fs::vfs::notify::on_modify(&out_file);
+        copyback?;
     }
 
     Ok(SyscallReturn::Return(copied as _))
