@@ -4,6 +4,7 @@ use core::time::Duration;
 
 use aster_bigtcp::{
     errors::udp::{RecvError, SendError},
+    socket::{UdpError, UdpErrorOrigin},
     wire::{IpAddress, IpEndpoint},
 };
 
@@ -22,6 +23,7 @@ pub(super) struct ReceivedMeta {
     pub(super) remote: IpEndpoint,
     pub(super) local_address: Option<IpAddress>,
     pub(super) arrived_at: Duration,
+    pub(super) ttl: u8,
 }
 
 pub(super) struct BoundDatagram {
@@ -45,6 +47,22 @@ impl BoundDatagram {
         self.bound_socket.bound_port()
     }
 
+    pub(super) fn set_receive_errors(&self, enabled: bool) {
+        self.bound_socket.set_receive_errors(enabled);
+    }
+
+    pub(super) fn set_hop_limit(&self, limit: u8) {
+        self.bound_socket.set_hop_limit(limit);
+    }
+
+    pub(super) fn take_pending_error(&self) -> Option<UdpErrorOrigin> {
+        self.bound_socket.take_pending_error()
+    }
+
+    pub(super) fn pop_network_error(&self) -> Option<UdpError> {
+        self.bound_socket.pop_network_error()
+    }
+
     /// Receives a datagram together with its arrival time and destination address.
     pub(super) fn try_recv_with_meta(
         &self,
@@ -53,7 +71,7 @@ impl BoundDatagram {
     ) -> Result<(RecvOutput, ReceivedMeta)> {
         let result = self.bound_socket.recv(
             flags.receive_behavior(),
-            |packet, udp_metadata, arrived_at_ns| {
+            |packet, udp_metadata, arrived_at_ns, ttl| {
                 let message_len = packet.len();
                 let copied_res = writer
                     .write(&mut VmReader::from(packet))
@@ -62,6 +80,7 @@ impl BoundDatagram {
                     remote: udp_metadata.endpoint,
                     local_address: udp_metadata.local_address,
                     arrived_at: Duration::from_nanos(arrived_at_ns),
+                    ttl,
                 };
                 (copied_res, meta, message_len)
             },
@@ -136,7 +155,8 @@ impl datagram_common::Bound for BoundDatagram {
     }
 
     fn set_remote_endpoint(&mut self, endpoint: &Self::Endpoint) {
-        self.remote_endpoint = Some(*endpoint)
+        self.remote_endpoint = Some(*endpoint);
+        self.bound_socket.set_error_peer(Some(*endpoint));
     }
 
     fn try_recv(
@@ -170,7 +190,7 @@ impl datagram_common::Bound for BoundDatagram {
             }
 
             events
-        }) | if self.bound_socket.has_tx_timestamp() {
+        }) | if self.bound_socket.has_tx_timestamp() || self.bound_socket.has_network_error() {
             IoEvents::ERR
         } else {
             IoEvents::empty()

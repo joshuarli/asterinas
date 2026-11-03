@@ -5,7 +5,7 @@ use core::{
     time::Duration,
 };
 
-use aster_bigtcp::wire::{IpAddress, IpEndpoint};
+use aster_bigtcp::{socket::UdpErrorOrigin, wire::{IpAddress, IpEndpoint}};
 use bound::{BoundDatagram, ReceivedMeta};
 use unbound::{BindOptions, UnboundDatagram};
 
@@ -47,6 +47,8 @@ mod bound;
 pub(super) mod observer;
 mod unbound;
 
+const SO_EE_ORIGIN_ICMP: u8 = 2;
+
 pub(crate) struct DatagramSocket {
     // Lock order: `inner` first, `options` second
     inner: RwMutex<Inner<UnboundDatagram, BoundDatagram>>,
@@ -79,6 +81,17 @@ impl OptionSet {
 }
 
 impl DatagramSocket {
+    fn take_pending_error(&self) -> Option<Error> {
+        let origin = match &*self.inner.read() {
+            Inner::Bound(bound) => bound.take_pending_error(),
+            Inner::Unbound(_) => None,
+        };
+        if origin.is_some() {
+            self.pollee.invalidate();
+        }
+        origin.map(|origin| Error::from(network_error_errno(origin)))
+    }
+
     pub(crate) fn new(is_nonblocking: bool) -> Arc<Self> {
         let unbound_datagram = UnboundDatagram::new();
         Arc::new(Self {
@@ -96,6 +109,9 @@ impl DatagramSocket {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, ReceivedMeta, u32)> {
+        if let Some(error) = self.take_pending_error() {
+            return Err(error);
+        }
         let result = match &*self.inner.read() {
             Inner::Unbound(_) => {
                 return_errno_with_message!(Errno::EAGAIN, "the socket is not bound")
@@ -118,6 +134,10 @@ impl DatagramSocket {
     ) -> Vec<ControlMessage> {
         let options = self.options.read();
         let mut messages = Vec::new();
+
+        if options.ip.recvttl() {
+            messages.push(ControlMessage::Ip(IpControlMessage::TimeToLive(meta.ttl)));
+        }
 
         if options.socket.recv_timestamp_ns() {
             messages.push(ControlMessage::Ip(IpControlMessage::TimestampNs(
@@ -150,7 +170,44 @@ impl DatagramSocket {
     }
 
     /// Takes one pending transmit timestamp, as `recvmsg(MSG_ERRQUEUE)` does.
-    fn recv_error_queue(&self, flags: RecvFlags) -> Result<(RecvOutput, MessageHeader)> {
+    fn recv_error_queue(
+        &self,
+        writer: &mut dyn MultiWrite,
+        flags: RecvFlags,
+    ) -> Result<(RecvOutput, MessageHeader)> {
+        let network_error = match &*self.inner.read() {
+            Inner::Bound(bound) => bound.pop_network_error(),
+            Inner::Unbound(_) => None,
+        };
+        if let Some(error) = network_error {
+            self.pollee.invalidate();
+            let copied = writer.write(&mut VmReader::from(error.payload.as_slice()))?;
+            let (origin, type_, code, info, offender) = match error.origin {
+                UdpErrorOrigin::Icmp { offender: IpAddress::Ipv4(addr), type_, code, info, .. } =>
+                    (SO_EE_ORIGIN_ICMP, type_, code, info, Some(addr.octets())),
+                UdpErrorOrigin::Icmp { type_, code, info, .. } => (SO_EE_ORIGIN_ICMP, type_, code, info, None),
+            };
+            let message = IpControlMessage::NetworkError {
+                errno: network_error_errno(error.origin) as u32,
+                origin, type_, code, info, offender,
+            };
+            let mut messages = Vec::new();
+            let options = self.options.read();
+            let time = Duration::from_nanos(error.timestamp_ns);
+            if options.ip.recvttl()
+                && let UdpErrorOrigin::Icmp { ttl, .. } = error.origin
+            {
+                messages.push(ControlMessage::Ip(IpControlMessage::TimeToLive(ttl)));
+            }
+            if options.socket.recv_timestamp_ns() {
+                messages.push(ControlMessage::Ip(IpControlMessage::TimestampNs(time)));
+            } else if options.socket.recv_timestamp() {
+                messages.push(ControlMessage::Ip(IpControlMessage::Timestamp(time)));
+            }
+            messages.push(ControlMessage::Ip(message));
+            let output = RecvOutput::new_for_error_queue(flags, copied, error.payload.len());
+            return Ok((output, MessageHeader::new(Some(error.destination.into()), messages)));
+        }
         let stamp = match &*self.inner.read() {
             Inner::Bound(bound_datagram) => bound_datagram.pop_tx_timestamp(),
             Inner::Unbound(_) => None,
@@ -164,7 +221,7 @@ impl DatagramSocket {
             ControlMessage::Ip(IpControlMessage::Timestamping(time)),
             ControlMessage::Ip(IpControlMessage::TimestampingError { tx_id }),
         ];
-        let output = RecvOutput::new_for_packet(flags, 0, 0);
+        let output = RecvOutput::new_for_error_queue(flags, 0, 0);
 
         Ok((output, MessageHeader::new(None, messages)))
     }
@@ -175,6 +232,9 @@ impl DatagramSocket {
         remote: Option<&IpEndpoint>,
         flags: SendFlags,
     ) -> Result<usize> {
+        if let Some(error) = self.take_pending_error() {
+            return Err(error);
+        }
         let tx_tag = self.next_tx_tag();
         let (sent_bytes, iface_to_poll) = select_remote_and_bind(
             &self.inner,
@@ -228,7 +288,13 @@ impl DatagramSocket {
                 )
             }
             _ => inner.bind_ephemeral(remote_endpoint, &self.pollee),
+        }?;
+        if let Inner::Bound(bound) = &*inner {
+            let options = self.options.read();
+            bound.set_receive_errors(options.ip.recverr());
+            bound.set_hop_limit(options.ip.ttl().get());
         }
+        Ok(())
     }
 
     fn set_bound_device(&self, device: BoundDevice) -> Result<()> {
@@ -298,11 +364,18 @@ impl Socket for DatagramSocket {
             (options.socket.reuse_addr(), options.device)
         };
 
-        self.inner.write().bind(
+        let mut inner = self.inner.write();
+        inner.bind(
             &endpoint,
             &self.pollee,
             BindOptions { can_reuse, device },
-        )
+        )?;
+        if let Inner::Bound(bound) = &*inner {
+            let options = self.options.read();
+            bound.set_receive_errors(options.ip.recverr());
+            bound.set_hop_limit(options.ip.ttl().get());
+        }
+        Ok(())
     }
 
     fn connect(&self, socket_addr: SocketAddr) -> Result<()> {
@@ -389,7 +462,7 @@ impl Socket for DatagramSocket {
         }
 
         if flags.contains(RecvFlags::MSG_ERRQUEUE) {
-            return self.recv_error_queue(flags);
+            return self.recv_error_queue(writer, flags);
         }
 
         let (output, meta, ifindex) =
@@ -406,8 +479,7 @@ impl Socket for DatagramSocket {
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
         sock_option_mut!(match option {
             socket_errors @ SocketError => {
-                // TODO: Support socket errors for UDP sockets
-                socket_errors.set(None);
+                socket_errors.set(self.take_pending_error());
                 return Ok(());
             }
             bind_to_device @ BindToDevice => {
@@ -456,6 +528,10 @@ impl Socket for DatagramSocket {
             Err(err) => return Err(err),
             Ok(need_iface_poll) => need_iface_poll,
         };
+        if let Inner::Bound(bound) = &*inner {
+            bound.set_receive_errors(options.ip.recverr());
+            bound.set_hop_limit(options.ip.ttl().get());
+        }
 
         let iface_to_poll = need_iface_poll
             .then(|| match &*inner {
@@ -476,6 +552,24 @@ impl Socket for DatagramSocket {
 
     fn common(&self) -> &FileCommon {
         &self.common
+    }
+}
+
+fn network_error_errno(origin: UdpErrorOrigin) -> Errno {
+    match origin {
+        UdpErrorOrigin::Icmp { type_: 3, code, .. } => match code {
+            0 | 6 | 9 | 11 => Errno::ENETUNREACH,
+            1 | 10 | 12 | 13 | 14 | 15 => Errno::EHOSTUNREACH,
+            2 => Errno::ENOPROTOOPT,
+            3 => Errno::ECONNREFUSED,
+            4 => Errno::EMSGSIZE,
+            5 => Errno::EOPNOTSUPP,
+            7 => Errno::EHOSTDOWN,
+            8 => Errno::ENONET,
+            _ => Errno::EHOSTUNREACH,
+        },
+        UdpErrorOrigin::Icmp { type_: 12, .. } => Errno::EPROTO,
+        UdpErrorOrigin::Icmp { .. } => Errno::EHOSTUNREACH,
     }
 }
 

@@ -21,6 +21,7 @@ pub(super) struct IpOptionSet {
     ttl: IpTtl,
     hdrincl: bool,
     recverr: bool,
+    recvttl: bool,
     pktinfo: bool,
 }
 
@@ -34,6 +35,7 @@ impl IpOptionSet {
             ttl: IpTtl(None),
             hdrincl: false,
             recverr: false,
+            recvttl: false,
             pktinfo: false,
         }
     }
@@ -44,6 +46,7 @@ impl IpOptionSet {
             ttl: IpTtl(None),
             hdrincl: false,
             recverr: false,
+            recvttl: false,
             pktinfo: false,
         }
     }
@@ -65,6 +68,9 @@ impl IpOptionSet {
             ip_recverr @ Recverr => {
                 let recverr = self.recverr();
                 ip_recverr.set(recverr);
+            }
+            ip_recvttl @ RecvTtl => {
+                ip_recvttl.set(self.recvttl());
             }
             ip_pktinfo @ Pktinfo => {
                 let pktinfo = self.pktinfo();
@@ -102,6 +108,9 @@ impl IpOptionSet {
                 let recverr = ip_recverr.get().unwrap();
                 self.set_recverr(*recverr);
             }
+            ip_recvttl @ RecvTtl => {
+                self.set_recvttl(*ip_recvttl.get().unwrap());
+            }
             ip_pktinfo @ Pktinfo => {
                 let pktinfo = ip_pktinfo.get().unwrap();
                 self.set_pktinfo(*pktinfo);
@@ -121,6 +130,7 @@ impl_socket_options!(
     pub(crate) struct Ttl(IpTtl);
     pub(crate) struct Hdrincl(bool);
     pub(crate) struct Recverr(bool);
+    pub(crate) struct RecvTtl(bool);
     pub(crate) struct Pktinfo(bool);
 );
 

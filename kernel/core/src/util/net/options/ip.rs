@@ -8,7 +8,7 @@ use ostd::mm::VmIo;
 use super::RawSocketOption;
 use crate::{
     context::current_userspace,
-    net::socket::ip::options::{Hdrincl, IpTtl, Pktinfo, Recverr, Tos, Ttl},
+    net::socket::ip::options::{Hdrincl, IpTtl, Pktinfo, Recverr, RecvTtl, Tos, Ttl},
     prelude::*,
 };
 
@@ -75,6 +75,7 @@ pub(crate) fn new_ip_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
         CIpOptionName::TTL => Ok(Box::new(Ttl::new())),
         CIpOptionName::HDRINCL => Ok(Box::new(Hdrincl::new())),
         CIpOptionName::RECVERR => Ok(Box::new(Recverr::new())),
+        CIpOptionName::RECVTTL => Ok(Box::new(RecvTtl::new())),
         CIpOptionName::PKTINFO => Ok(Box::new(Pktinfo::new())),
         _ => return_errno_with_message!(Errno::ENOPROTOOPT, "unsupported ip level option"),
     }
@@ -115,6 +116,7 @@ impl_raw_ip_socket_option!(Ttl);
 impl_raw_ip_socket_option!(Tos);
 impl_raw_ip_socket_option!(Hdrincl);
 impl_raw_ip_socket_option!(Recverr);
+impl_raw_ip_socket_option!(RecvTtl);
 impl_raw_ip_socket_option!(Pktinfo);
 
 impl ReadIpOption for i32 {
