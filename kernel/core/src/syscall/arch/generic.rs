@@ -24,6 +24,7 @@ macro_rules! import_generic_syscall_entries {
             clock_getres::sys_clock_getres,
             clock_gettime::sys_clock_gettime,
             clone::{sys_clone, sys_clone3},
+            copy_file_range::sys_copy_file_range,
             close::{sys_close, sys_close_range},
             connect::sys_connect,
             dup::{sys_dup, sys_dup3},
@@ -401,6 +402,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_RENAMEAT2 = 276              => sys_renameat2(args[..5]);
             SYS_GETRANDOM = 278              => sys_getrandom(args[..3]);
             SYS_MEMFD_CREATE = 279           => sys_memfd_create(args[..2]);
+            SYS_COPY_FILE_RANGE = 285        => sys_copy_file_range(args[..6]);
             SYS_EXECVEAT = 281               => sys_execveat(args[..5], &mut user_ctx);
             SYS_PREADV2 = 286                => sys_preadv2(args[..6]);
             SYS_PWRITEV2 = 287               => sys_pwritev2(args[..6]);

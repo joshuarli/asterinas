@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
 
 SUBDIRS := \
+	copy_file_range \
 	empty_write \
 	ext2 \
 	fdatasync \
+	ficlone \
 	getcwd \
 	inotify \
 	isolation \
@@ -17,6 +19,7 @@ SUBDIRS := \
 	symlink \
 	sync \
 	tmpfile \
+	tmpfs \
 	utimensat \
 
 include ../common/Makefile

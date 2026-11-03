@@ -346,7 +346,6 @@ impl InodeMeta {
 
     pub(crate) fn resize(&mut self, new_size: usize) {
         self.size = new_size;
-        self.blocks = new_size.align_up(BLOCK_SIZE) / BLOCK_SIZE;
     }
 
     pub(crate) fn inc_size(&mut self) {
@@ -1101,7 +1100,6 @@ impl FileOps for RamInode {
                 inode_meta.set_ctime(now);
                 if should_expand_size {
                     inode_meta.size = new_size;
-                    inode_meta.blocks = new_size_aligned / BLOCK_SIZE;
                 }
                 drop(inode_meta);
 
@@ -1559,12 +1557,16 @@ impl Inode for RamInode {
 
     fn metadata(&self) -> Result<Metadata> {
         let rdev = self.inner.device_id().unwrap_or(0);
+        let nr_sectors_of_file = self.inner.as_file().map(|page_cache| {
+            page_cache.lock().as_vmo().nr_committed_pages() * (BLOCK_SIZE / SECTOR_SIZE)
+        });
         let inode_metadata = self.metadata.lock();
         Ok(Metadata {
             ino: self.ino as _,
             size: inode_metadata.size,
             optimal_block_size: BLOCK_SIZE,
-            nr_sectors_allocated: inode_metadata.nr_sectors_allocated(),
+            nr_sectors_allocated: nr_sectors_of_file
+                .unwrap_or_else(|| inode_metadata.nr_sectors_allocated()),
             last_access_at: inode_metadata.atime,
             last_modify_at: inode_metadata.mtime,
             last_meta_change_at: inode_metadata.ctime,

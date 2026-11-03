@@ -40,6 +40,7 @@ mod clock_adjust;
 mod clock_getres;
 mod clock_gettime;
 mod clone;
+mod copy_file_range;
 mod close;
 mod connect;
 mod constants;

@@ -4,7 +4,7 @@ use super::SyscallReturn;
 use crate::{
     dispatch_ioctl,
     fs::file::{
-        FileLike,
+        FileLike, InodeHandle, InodeType, StatusFlags,
         file_table::{FdFlags, RawFileDesc, WithFileTable, get_file_fast},
     },
     prelude::*,
@@ -49,7 +49,7 @@ pub(super) fn sys_ioctl(
 mod ioctl_defs {
     use crate::{
         ioc,
-        util::ioctl::{InData, NoData},
+        util::ioctl::{InData, NoData, PassByVal},
     };
 
     // Reference: <https://elixir.bootlin.com/linux/v6.18/source/include/uapi/asm-generic/ioctls.h>
@@ -59,6 +59,9 @@ mod ioctl_defs {
 
     pub(super) type SetNotCloseOnExec = ioc!(FIONCLEX, 0x5450, NoData);
     pub(super) type SetCloseOnExec    = ioc!(FIOCLEX,  0x5451, NoData);
+
+    // Reference: <https://elixir.bootlin.com/linux/v6.18/source/include/uapi/linux/fs.h>
+    pub(super) type CloneFile         = ioc!(FICLONE,  0x94, 9, InData<i32, PassByVal>);
 }
 
 fn handle_fd_ioctl(
@@ -91,8 +94,48 @@ fn handle_fd_ioctl(
                 Ok(())
             }))
         }
+        cmd @ CloneFile => {
+            Some(file_table.read_with(|inner| {
+                let source = inner.get_file(cmd.get().try_into()?)?.clone();
+                let destination = inner.get_file(raw_fd.try_into()?)?;
+                clone_file(&source, destination)
+            }))
+        }
         _ => None,
     })
+}
+
+fn clone_file(source: &Arc<dyn FileLike>, destination: &Arc<dyn FileLike>) -> Result<()> {
+    if source.status_flags().contains(StatusFlags::O_PATH)
+        || destination.status_flags().contains(StatusFlags::O_PATH)
+    {
+        return_errno_with_message!(Errno::EBADF, "a file is opened as a path");
+    }
+    let (Some(source_handle), Some(destination_handle)) = (
+        source.downcast_ref::<InodeHandle>(),
+        destination.downcast_ref::<InodeHandle>(),
+    ) else {
+        return_errno_with_message!(Errno::EINVAL, "both files must be regular files");
+    };
+    let (source_inode, destination_inode) = (
+        source_handle.path().inode(),
+        destination_handle.path().inode(),
+    );
+
+    if !Arc::ptr_eq(&source_inode.fs(), &destination_inode.fs()) {
+        return_errno_with_message!(Errno::EXDEV, "the files are on different file systems");
+    }
+    if !source.access_mode().is_readable() || !destination.access_mode().is_writable() {
+        return_errno_with_message!(Errno::EBADF, "the files are not open for cloning");
+    }
+    if source_inode.type_() == InodeType::Dir || destination_inode.type_() == InodeType::Dir {
+        return_errno_with_message!(Errno::EISDIR, "a file is a directory");
+    }
+    if source_inode.type_() != InodeType::File || destination_inode.type_() != InodeType::File {
+        return_errno_with_message!(Errno::EINVAL, "both files must be regular files");
+    }
+
+    return_errno_with_message!(Errno::EOPNOTSUPP, "the file system cannot clone files");
 }
 
 fn handle_file_ioctl(file: &dyn FileLike, raw_ioctl: RawIoctl) -> Option<Result<()>> {

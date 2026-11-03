@@ -458,6 +458,17 @@ impl Vmo {
         self.size.load(Ordering::Acquire)
     }
 
+    pub(crate) fn nr_committed_pages(&self) -> usize {
+        let preempt_guard = disable_preempt();
+        let mut cursor = self.pages.cursor(&preempt_guard, 0);
+
+        let mut count = usize::from(cursor.load().is_some());
+        while cursor.next_present().is_some() {
+            count += 1;
+        }
+        count
+    }
+
     /// Returns the status of writable mappings of the VMO.
     pub(crate) fn writable_mapping_status(&self) -> &WritableMappingStatus {
         // Currently, only VMOs used by `MemfdInode` (anonymous) track writable mapping status.
@@ -536,6 +547,9 @@ impl Vmo {
         if read_len == 0 {
             return Ok(());
         }
+        if !self.has_backend() {
+            return self.read_anonymous(offset, read_len, writer);
+        }
         let read_end = offset + read_len;
 
         let range = offset..read_end;
@@ -563,6 +577,27 @@ impl Vmo {
             current_idx = page_batch.last().unwrap().0 + 1;
         }
 
+        Ok(())
+    }
+
+    fn read_anonymous(&self, offset: usize, len: usize, writer: &mut VmWriter) -> Result<()> {
+        static ZERO_PAGE: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        let mut position = offset;
+        let end = offset + len;
+        while position < end {
+            let page_offset = position % PAGE_SIZE;
+            let chunk = (PAGE_SIZE - page_offset).min(end - position);
+            let page = {
+                let guard = disable_preempt();
+                self.pages.cursor(&guard, (position / PAGE_SIZE) as u64).load().map(|page| page.clone())
+            };
+            if let Some(page) = page {
+                page.reader().skip(page_offset).limit(chunk).read_fallible(writer)?;
+            } else {
+                VmReader::from(&ZERO_PAGE[..chunk]).to_fallible().read_fallible(writer)?;
+            }
+            position += chunk;
+        }
         Ok(())
     }
 
