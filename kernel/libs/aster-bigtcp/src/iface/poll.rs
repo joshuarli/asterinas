@@ -362,7 +362,6 @@ impl<E: Ext> PollContext<'_, E> {
             }
 
             processed |= socket.process(
-                self.iface.context_mut(),
                 ip_repr,
                 udp_repr,
                 udp_payload.clone(),

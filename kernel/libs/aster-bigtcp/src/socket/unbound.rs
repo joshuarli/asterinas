@@ -17,10 +17,7 @@ pub(super) fn new_tcp_socket() -> Box<RawTcpSocket> {
 pub(super) fn new_udp_socket() -> Box<RawUdpSocket> {
     let raw_udp_socket = {
         let metadata = smoltcp::socket::udp::PacketMetadata::EMPTY;
-        let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
-            vec![metadata; UDP_METADATA_LEN],
-            vec![0u8; UDP_RECV_PAYLOAD_LEN],
-        );
+        let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(vec![], vec![]);
         let tx_buffer = smoltcp::socket::udp::PacketBuffer::new(
             vec![metadata; UDP_METADATA_LEN],
             vec![0u8; UDP_SEND_PAYLOAD_LEN],

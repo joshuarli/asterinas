@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{boxed::Box, collections::VecDeque, sync::{Arc, Weak}, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use alloc::{boxed::Box, collections::VecDeque, sync::{Arc, Weak}, vec, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use aster_softirq::BottomHalfDisabled;
 use ostd::sync::SpinLock;
@@ -9,6 +9,7 @@ use spin::Once;
 use smoltcp::{
     iface::Context,
     socket::udp::UdpMetadata,
+    storage::{PacketBuffer, PacketMetadata, SliceLike},
     wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpRepr, UdpRepr},
 };
 
@@ -33,8 +34,7 @@ pub type UdpSocket<E> = Socket<UdpSocketInner, E>;
 pub struct UdpSocketInner {
     socket: SpinLock<Box<RawUdpSocket>, BottomHalfDisabled>,
     need_dispatch: AtomicBool,
-    rx_metadata: SpinLock<VecDeque<ReceivedMetadata>, BottomHalfDisabled>,
-    rx_counter: AtomicU32,
+    received: SpinLock<PacketBuffer<'static, ReceivedMetadata>, BottomHalfDisabled>,
     tx_stamps: SpinLock<VecDeque<TxTimestamp>, BottomHalfDisabled>,
     errors: SpinLock<UdpErrors, BottomHalfDisabled>,
     failure_reporter: Once<Arc<dyn UdpFailure>>,
@@ -42,7 +42,7 @@ pub struct UdpSocketInner {
 
 #[derive(Clone, Copy)]
 struct ReceivedMetadata {
-    id: u32,
+    udp: UdpMetadata,
     timestamp_ns: u64,
     ttl: u8,
 }
@@ -161,7 +161,6 @@ impl<E: Ext> UdpSocketBg<E> {
     /// Tries to process an incoming packet and returns whether the packet is processed.
     pub(crate) fn process(
         &self,
-        cx: &mut Context,
         ip_repr: &IpRepr,
         udp_repr: &UdpRepr,
         udp_payload: PacketSlice<'_>,
@@ -170,33 +169,22 @@ impl<E: Ext> UdpSocketBg<E> {
             return false;
         }
 
-        let mut socket = self.inner.socket.lock();
-
         let ttl = match ip_repr {
             IpRepr::Ipv4(header) => header.hop_limit,
             IpRepr::Ipv6(header) => header.hop_limit,
         };
-        let id = self.inner.rx_counter.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut received = self.inner.rx_metadata.lock();
-            if !socket.can_recv() {
-                received.clear();
-            }
-            if received.len() == UDP_METADATA_LEN {
-                return true;
-            }
-            received.push_back(ReceivedMetadata { id, timestamp_ns: E::wall_time_ns(), ttl });
-        }
-        let mut meta = smoltcp::phy::PacketMeta::default();
-        meta.id = id;
-
-        socket.process(
-            cx,
-            meta,
-            ip_repr,
-            udp_repr,
-            udp_payload,
-        );
+        let udp = UdpMetadata {
+            endpoint: IpEndpoint::new(ip_repr.src_addr(), udp_repr.src_port),
+            local_address: Some(ip_repr.dst_addr()),
+            meta: Default::default(),
+        };
+        let metadata = ReceivedMetadata { udp, timestamp_ns: E::wall_time_ns(), ttl };
+        let mut received = self.inner.received.lock();
+        let Ok(buffer) = received.enqueue(udp_payload.len(), metadata) else {
+            return true;
+        };
+        udp_payload.copy_to_slice(buffer);
+        drop(received);
 
         self.notify_events(SocketEvents::CAN_RECV);
 
@@ -222,8 +210,10 @@ impl<E: Ext> UdpSocketBg<E> {
         let mut socket = self.inner.socket.lock();
 
         let mut stamped = false;
+        let mut dispatched = false;
         socket
             .dispatch(cx, |cx, meta, (ip_repr, udp_repr, udp_payload)| {
+                dispatched = true;
                 dispatch(cx, &ip_repr, &udp_repr, udp_payload);
                 if meta.id != 0 {
                     let mut stamps = self.inner.tx_stamps.lock();
@@ -248,7 +238,7 @@ impl<E: Ext> UdpSocketBg<E> {
 
         self.inner
             .need_dispatch
-            .store(socket.send_queue() > 0, Ordering::Relaxed);
+            .store(dispatched, Ordering::Relaxed);
     }
 
     /// Returns whether the socket _may_ generate an outgoing packet.
@@ -329,8 +319,10 @@ impl<E: Ext> UdpSocket<E> {
         let inner = UdpSocketInner {
             socket: SpinLock::new(socket),
             need_dispatch: AtomicBool::new(false),
-            rx_metadata: SpinLock::new(VecDeque::new()),
-            rx_counter: AtomicU32::new(0),
+            received: SpinLock::new(PacketBuffer::new(
+                vec![PacketMetadata::<ReceivedMetadata>::EMPTY; UDP_METADATA_LEN],
+                vec![0; UDP_RECV_PAYLOAD_LEN],
+            )),
             tx_stamps: SpinLock::new(VecDeque::new()),
             errors: SpinLock::new(UdpErrors::default()),
             failure_reporter: Once::new(),
@@ -376,7 +368,7 @@ impl<E: Ext> UdpSocket<E> {
         self.0
             .inner
             .need_dispatch
-            .store(socket.send_queue() > 0, Ordering::Relaxed);
+            .store(true, Ordering::Relaxed);
 
         Ok(result)
     }
@@ -395,32 +387,18 @@ impl<E: Ext> UdpSocket<E> {
     where
         CopyFn: FnOnce(&[u8], UdpMetadata, u64, u8) -> R,
     {
-        let mut socket = self.0.inner.socket.lock();
-
-        let (data, meta) = match behavior {
-            ReceiveBehavior::Recv => socket.recv()?,
+        let mut received = self.0.inner.received.lock();
+        let (metadata, data): (ReceivedMetadata, &[u8]) = match behavior {
+            ReceiveBehavior::Recv => {
+                let (metadata, data) = received.dequeue().map_err(|_| smoltcp::socket::udp::RecvError::Exhausted)?;
+                (metadata, &*data)
+            }
             ReceiveBehavior::Peek => {
-                let (data, meta) = socket.peek()?;
-                (data, *meta)
+                let (metadata, data) = received.peek().map_err(|_| smoltcp::socket::udp::RecvError::Exhausted)?;
+                (*metadata, data)
             }
         };
-        let metadata = {
-            let mut received = self.0.inner.rx_metadata.lock();
-            while received.front().is_some_and(|entry| entry.id != meta.meta.id) {
-                received.pop_front();
-            }
-            let metadata = *received.front().expect("received datagram metadata is present");
-            if behavior.will_consume_data() {
-                received.pop_front();
-            }
-            metadata
-        };
-        let result = copy_fn(data, meta, metadata.timestamp_ns, metadata.ttl);
-        if behavior.will_consume_data() && !socket.can_recv() {
-            self.0.inner.rx_metadata.lock().clear();
-        }
-
-        Ok(result)
+        Ok(copy_fn(data, metadata.udp, metadata.timestamp_ns, metadata.ttl))
     }
 
     /// Takes the oldest pending transmit timestamp.
@@ -433,15 +411,11 @@ impl<E: Ext> UdpSocket<E> {
         !self.0.inner.tx_stamps.lock().is_empty()
     }
 
-    /// Calls `f` with an immutable reference to the associated [`RawUdpSocket`].
-    //
-    // NOTE: If a mutable reference is required, add a method above that correctly updates the next
-    // polling time.
-    pub fn raw_with<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&RawUdpSocket) -> R,
-    {
-        let socket = self.0.inner.socket.lock();
-        f(&socket)
+    pub fn can_recv(&self) -> bool {
+        self.0.inner.received.lock().peek().is_ok()
+    }
+
+    pub fn can_send(&self) -> bool {
+        self.0.inner.socket.lock().can_send()
     }
 }

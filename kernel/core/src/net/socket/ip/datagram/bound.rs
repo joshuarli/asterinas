@@ -178,19 +178,14 @@ impl datagram_common::Bound for BoundDatagram {
     }
 
     fn check_io_events(&self) -> IoEvents {
-        self.bound_socket.raw_with(|socket| {
-            let mut events = IoEvents::empty();
-
-            if socket.can_recv() {
-                events |= IoEvents::IN;
-            }
-
-            if socket.can_send() {
-                events |= IoEvents::OUT;
-            }
-
-            events
-        }) | if self.bound_socket.has_tx_timestamp() || self.bound_socket.has_network_error() {
+        let mut events = IoEvents::empty();
+        if self.bound_socket.can_recv() {
+            events |= IoEvents::IN;
+        }
+        if self.bound_socket.can_send() {
+            events |= IoEvents::OUT;
+        }
+        events | if self.bound_socket.has_tx_timestamp() || self.bound_socket.has_network_error() {
             IoEvents::ERR
         } else {
             IoEvents::empty()

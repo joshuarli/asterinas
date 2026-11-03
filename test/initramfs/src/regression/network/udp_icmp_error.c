@@ -84,6 +84,61 @@ FN_TEST(connected_udp_reports_port_unreachable)
 }
 END_TEST()
 
+FN_TEST(zero_length_udp_datagram_is_delivered)
+{
+	int receiver = TEST_SUCC(socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0));
+	int sender = TEST_SUCC(socket(AF_INET, SOCK_DGRAM, 0));
+	struct sockaddr_in destination = { .sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+	TEST_SUCC(bind(receiver, (struct sockaddr *)&destination, sizeof(destination)));
+	socklen_t length = sizeof(destination);
+	TEST_SUCC(getsockname(receiver, (struct sockaddr *)&destination, &length));
+	TEST_RES(sendto(sender, "", 0, 0, (struct sockaddr *)&destination, sizeof(destination)), _ret == 0);
+	struct pollfd ready = { .fd = receiver, .events = POLLIN };
+	TEST_RES(poll(&ready, 1, 2000), _ret == 1 && (ready.revents & POLLIN));
+	char byte;
+	TEST_RES(recv(receiver, &byte, sizeof(byte), 0), _ret == 0);
+	TEST_SUCC(close(sender));
+	TEST_SUCC(close(receiver));
+}
+END_TEST()
+
+FN_TEST(dropped_datagrams_do_not_block_later_packets)
+{
+	int receiver = TEST_SUCC(socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0));
+	int sender = TEST_SUCC(socket(AF_INET, SOCK_DGRAM, 0));
+	struct sockaddr_in destination = { .sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+	TEST_SUCC(bind(receiver, (struct sockaddr *)&destination, sizeof(destination)));
+	socklen_t length = sizeof(destination);
+	TEST_SUCC(getsockname(receiver, (struct sockaddr *)&destination, &length));
+	static char large[32000];
+	static char dropped[2000];
+	TEST_RES(sendto(sender, large, sizeof(large), 0, (struct sockaddr *)&destination,
+			 sizeof(destination)), _ret == sizeof(large));
+	TEST_RES(sendto(sender, large, sizeof(large), 0, (struct sockaddr *)&destination,
+			 sizeof(destination)), _ret == sizeof(large));
+	for (int i = 0; i < 254; i++)
+		CHECK_WITH(sendto(sender, dropped, sizeof(dropped), 0,
+				  (struct sockaddr *)&destination, sizeof(destination)), _ret == sizeof(dropped));
+	static char received[32000];
+	TEST_RES(recv(receiver, received, sizeof(received), 0), _ret == sizeof(received));
+	TEST_RES(sendto(sender, "a1", 2, 0, (struct sockaddr *)&destination,
+			 sizeof(destination)), _ret == 2);
+	TEST_RES(sendto(sender, "b2", 2, 0, (struct sockaddr *)&destination,
+			 sizeof(destination)), _ret == 2);
+	int markers = 0;
+	ssize_t count;
+	while ((count = recv(receiver, received, sizeof(received), 0)) >= 0) {
+		if (count == 2 && !memcmp(received, "a1", 2)) markers |= 1;
+		if (count == 2 && !memcmp(received, "b2", 2)) markers |= 2;
+	}
+	TEST_RES(markers, _ret == 3);
+	TEST_SUCC(close(sender));
+	TEST_SUCC(close(receiver));
+}
+END_TEST()
+
 FN_TEST(received_udp_reports_the_sent_ttl)
 {
 	int receiver = TEST_SUCC(socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0));
