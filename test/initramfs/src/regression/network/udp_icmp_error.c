@@ -97,7 +97,10 @@ FN_TEST(zero_length_udp_datagram_is_delivered)
 	struct pollfd ready = { .fd = receiver, .events = POLLIN };
 	TEST_RES(poll(&ready, 1, 2000), _ret == 1 && (ready.revents & POLLIN));
 	char byte;
+	TEST_RES(recv(receiver, &byte, sizeof(byte), MSG_PEEK), _ret == 0);
+	TEST_RES(poll(&ready, 1, 0), _ret == 1 && (ready.revents & POLLIN));
 	TEST_RES(recv(receiver, &byte, sizeof(byte), 0), _ret == 0);
+	TEST_RES(poll(&ready, 1, 0), _ret == 0);
 	TEST_SUCC(close(sender));
 	TEST_SUCC(close(receiver));
 }
