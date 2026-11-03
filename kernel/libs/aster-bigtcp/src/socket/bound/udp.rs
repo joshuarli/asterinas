@@ -26,6 +26,12 @@ use crate::{
 
 pub struct UdpSocket<E: Ext>(Arc<UdpSocketBg<E>>);
 
+#[derive(Clone, Copy)]
+pub enum UdpNextHop {
+    Routed,
+    Direct,
+}
+
 pub(crate) struct UdpSocketBg<E: Ext> {
     bound: UdpReservation<E>,
     inner: UdpSocketInner,
@@ -55,6 +61,7 @@ struct TxDatagram {
     destination: IpEndpoint,
     ttl: u8,
     tos: u8,
+    next_hop: UdpNextHop,
     tag: u32,
     payload: Vec<u8>,
 }
@@ -174,7 +181,7 @@ impl<E: Ext> UdpSocketBg<E> {
     }
 
     pub(crate) fn can_receive_error(&self, source: IpEndpoint, ifindex: u32) -> bool {
-        let bound = self.bound.endpoint();
+        let bound = self.bound.receive_endpoint();
         self.bound.device().is_none_or(|device| device == ifindex)
             && bound.port == source.port
             && (bound.addr.is_unspecified() || bound.addr == source.addr)
@@ -248,7 +255,7 @@ impl<E: Ext> UdpSocketBg<E> {
     }
 
     fn accepts(&self, ip_repr: &IpRepr, udp_repr: &UdpRepr, ifindex: u32) -> bool {
-        let bound = self.bound.endpoint();
+        let bound = self.bound.receive_endpoint();
         let peer = IpEndpoint::new(ip_repr.src_addr(), udp_repr.src_port);
         self.bound.device().is_none_or(|device| device == ifindex)
             && (bound.addr.is_unspecified() || ip_repr.dst_addr() == bound.addr)
@@ -259,15 +266,15 @@ impl<E: Ext> UdpSocketBg<E> {
     pub(crate) fn receive_priority(&self, ip_repr: &IpRepr, udp_repr: &UdpRepr, ifindex: u32) -> Option<u8> {
         let open = self.open.lock();
         if !*open || !self.accepts(ip_repr, udp_repr, ifindex) { return None; }
-        let specific = !self.bound.endpoint().addr.is_unspecified();
+        let specific = !self.bound.receive_endpoint().addr.is_unspecified();
         let connected = self.inner.errors.lock().peer.is_some();
-        Some(u8::from(specific) + u8::from(connected) * 2)
+        Some(u8::from(specific) * 4 + u8::from(connected) * 2 + u8::from(self.bound.device().is_some()))
     }
 
     /// Tries to generate an outgoing packet and dispatches the generated packet.
     pub(crate) fn dispatch<D>(&self, ifindex: u32, cx: &mut Context, dispatch: D)
     where
-        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8),
+        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8, UdpNextHop),
     {
         let open = self.open.lock();
         if !*open { return; }
@@ -278,7 +285,7 @@ impl<E: Ext> UdpSocketBg<E> {
         let ip_repr = IpRepr::new(packet.source, packet.destination.addr, IpProtocol::Udp,
             UDP_HEADER_LEN + packet.payload.len(), packet.ttl);
         let udp_repr = UdpRepr { src_port: self.bound.endpoint().port, dst_port: packet.destination.port };
-        dispatch(cx, &ip_repr, &udp_repr, &packet.payload, packet.tos);
+        dispatch(cx, &ip_repr, &udp_repr, &packet.payload, packet.tos, packet.next_hop);
         let open = self.open.lock();
         let notify_send = *open;
         let notify_stamp = *open && packet.tag != 0;
@@ -309,6 +316,11 @@ impl<E: Ext> UdpSocket<E> {
 
     pub fn set_error_peer(&self, peer: Option<IpEndpoint>) {
         self.0.inner.errors.lock().peer = peer;
+    }
+
+    pub fn set_receive_address(&self, address: IpAddress) {
+        let open = self.0.open.lock();
+        if *open { self.0.bound.set_receive_address(address); }
     }
 
     pub fn set_receive_errors(&self, enabled: bool) {
@@ -375,6 +387,7 @@ impl<E: Ext> UdpSocket<E> {
         iface: u32,
         source: IpAddress,
         tos: u8,
+        next_hop: UdpNextHop,
         f: F,
     ) -> Result<Result<R, Err>, SendError>
     where
@@ -392,7 +405,7 @@ impl<E: Ext> UdpSocket<E> {
         if result.is_err() { return Ok(result); }
         let meta = meta.into();
         queue.enqueue(TxDatagram { iface, source, destination: meta.endpoint,
-            ttl: self.0.inner.ttl.load(Ordering::Relaxed), tos, tag: meta.meta.id, payload })?;
+            ttl: self.0.inner.ttl.load(Ordering::Relaxed), tos, next_hop, tag: meta.meta.id, payload })?;
         Ok(result)
     }
 
@@ -456,7 +469,7 @@ mod test {
     fn packet(iface: u32, size: usize) -> TxDatagram {
         let address = IpAddress::Ipv4(Ipv4Address::LOCALHOST);
         TxDatagram { iface, source: address, destination: IpEndpoint::new(address, 1234),
-            ttl: 64, tos: 0, tag: 0, payload: vec![0; size] }
+            ttl: 64, tos: 0, next_hop: UdpNextHop::Routed, tag: 0, payload: vec![0; size] }
     }
 
     #[ktest]

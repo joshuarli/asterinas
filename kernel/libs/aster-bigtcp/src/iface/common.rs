@@ -57,6 +57,7 @@ pub struct IfaceCommon<E: Ext> {
 pub(super) struct TxPacketWithDst {
     pub(super) packet: TxPacket<NetworkLayer>,
     pub(super) dst_addr: IpAddress,
+    pub(super) direct: bool,
     pub(super) failure: Option<(Arc<dyn UdpFailure>, IpEndpoint)>,
 }
 
