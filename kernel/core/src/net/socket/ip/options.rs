@@ -22,6 +22,7 @@ pub(super) struct IpOptionSet {
     hdrincl: bool,
     recverr: bool,
     recvttl: bool,
+    recvtos: bool,
     pktinfo: bool,
 }
 
@@ -36,6 +37,7 @@ impl IpOptionSet {
             hdrincl: false,
             recverr: false,
             recvttl: false,
+            recvtos: false,
             pktinfo: false,
         }
     }
@@ -47,6 +49,7 @@ impl IpOptionSet {
             hdrincl: false,
             recverr: false,
             recvttl: false,
+            recvtos: false,
             pktinfo: false,
         }
     }
@@ -72,6 +75,9 @@ impl IpOptionSet {
             ip_recvttl @ RecvTtl => {
                 ip_recvttl.set(self.recvttl());
             }
+            ip_recvtos @ RecvTos => {
+                ip_recvtos.set(self.recvtos());
+            }
             ip_pktinfo @ Pktinfo => {
                 let pktinfo = self.pktinfo();
                 ip_pktinfo.set(pktinfo);
@@ -90,9 +96,7 @@ impl IpOptionSet {
         sock_option_ref!(match option {
             ip_tos @ Tos => {
                 let old_value = self.tos();
-                let mut val = *ip_tos.get().unwrap() as u8;
-                val &= !INET_ECN_MASK;
-                val |= old_value & INET_ECN_MASK;
+                let val = socket.tos_value(*ip_tos.get().unwrap() as u8, old_value);
                 self.set_tos(val);
             }
             ip_ttl @ Ttl => {
@@ -110,6 +114,9 @@ impl IpOptionSet {
             }
             ip_recvttl @ RecvTtl => {
                 self.set_recvttl(*ip_recvttl.get().unwrap());
+            }
+            ip_recvtos @ RecvTos => {
+                self.set_recvtos(*ip_recvtos.get().unwrap());
             }
             ip_pktinfo @ Pktinfo => {
                 let pktinfo = ip_pktinfo.get().unwrap();
@@ -131,6 +138,7 @@ impl_socket_options!(
     pub(crate) struct Hdrincl(bool);
     pub(crate) struct Recverr(bool);
     pub(crate) struct RecvTtl(bool);
+    pub(crate) struct RecvTos(bool);
     pub(crate) struct Pktinfo(bool);
 );
 
@@ -153,4 +161,8 @@ impl IpTtl {
 
 pub(super) trait SetIpLevelOption {
     fn set_hdrincl(&self, _hdrincl: bool) -> Result<()>;
+
+    fn tos_value(&self, requested: u8, _old: u8) -> u8 {
+        requested
+    }
 }

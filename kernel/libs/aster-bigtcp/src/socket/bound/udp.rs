@@ -35,6 +35,7 @@ pub struct UdpSocketInner {
     socket: SpinLock<Box<RawUdpSocket>, BottomHalfDisabled>,
     need_dispatch: AtomicBool,
     received: SpinLock<PacketBuffer<'static, ReceivedMetadata>, BottomHalfDisabled>,
+    tx_tos: SpinLock<VecDeque<u8>, BottomHalfDisabled>,
     tx_stamps: SpinLock<VecDeque<TxTimestamp>, BottomHalfDisabled>,
     errors: SpinLock<UdpErrors, BottomHalfDisabled>,
     failure_reporter: Once<Arc<dyn UdpFailure>>,
@@ -45,6 +46,7 @@ struct ReceivedMetadata {
     udp: UdpMetadata,
     timestamp_ns: u64,
     ttl: u8,
+    tos: u8,
 }
 
 struct UdpFailureReporter<E: Ext> {
@@ -164,6 +166,7 @@ impl<E: Ext> UdpSocketBg<E> {
         ip_repr: &IpRepr,
         udp_repr: &UdpRepr,
         udp_payload: PacketSlice<'_>,
+        tos: u8,
     ) -> bool {
         if !self.accepts(ip_repr, udp_repr) {
             return false;
@@ -178,7 +181,7 @@ impl<E: Ext> UdpSocketBg<E> {
             local_address: Some(ip_repr.dst_addr()),
             meta: Default::default(),
         };
-        let metadata = ReceivedMetadata { udp, timestamp_ns: E::wall_time_ns(), ttl };
+        let metadata = ReceivedMetadata { udp, timestamp_ns: E::wall_time_ns(), ttl, tos };
         let mut received = self.inner.received.lock();
         let Ok(buffer) = received.enqueue(udp_payload.len(), metadata) else {
             return true;
@@ -205,16 +208,16 @@ impl<E: Ext> UdpSocketBg<E> {
     /// Tries to generate an outgoing packet and dispatches the generated packet.
     pub(crate) fn dispatch<D>(&self, cx: &mut Context, dispatch: D)
     where
-        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8]),
+        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8),
     {
         let mut socket = self.inner.socket.lock();
 
         let mut stamped = false;
-        let mut dispatched = false;
+        let mut queued_tos = self.inner.tx_tos.lock();
+        let tos = queued_tos.pop_front();
         socket
             .dispatch(cx, |cx, meta, (ip_repr, udp_repr, udp_payload)| {
-                dispatched = true;
-                dispatch(cx, &ip_repr, &udp_repr, udp_payload);
+                dispatch(cx, &ip_repr, &udp_repr, udp_payload, tos.expect("queued UDP packet has TOS"));
                 if meta.id != 0 {
                     let mut stamps = self.inner.tx_stamps.lock();
                     if stamps.len() == MAX_PENDING_TX_STAMPS {
@@ -238,7 +241,7 @@ impl<E: Ext> UdpSocketBg<E> {
 
         self.inner
             .need_dispatch
-            .store(dispatched, Ordering::Relaxed);
+            .store(!queued_tos.is_empty(), Ordering::Relaxed);
     }
 
     /// Returns whether the socket _may_ generate an outgoing packet.
@@ -323,6 +326,7 @@ impl<E: Ext> UdpSocket<E> {
                 vec![PacketMetadata::<ReceivedMetadata>::EMPTY; UDP_METADATA_LEN],
                 vec![0; UDP_RECV_PAYLOAD_LEN],
             )),
+            tx_tos: SpinLock::new(VecDeque::new()),
             tx_stamps: SpinLock::new(VecDeque::new()),
             errors: SpinLock::new(UdpErrors::default()),
             failure_reporter: Once::new(),
@@ -351,6 +355,7 @@ impl<E: Ext> UdpSocket<E> {
         &self,
         size: usize,
         meta: impl Into<UdpMetadata>,
+        tos: u8,
         f: F,
     ) -> Result<R, SendError>
     where
@@ -363,6 +368,7 @@ impl<E: Ext> UdpSocket<E> {
         }
 
         let buffer = socket.send(size, meta)?;
+        self.0.inner.tx_tos.lock().push_back(tos);
         let result = f(buffer);
 
         self.0
@@ -376,7 +382,7 @@ impl<E: Ext> UdpSocket<E> {
     /// Receives some data.
     ///
     /// `copy_fn` also gets the wall-clock time, in nanoseconds since the Unix epoch, at which the
-    /// packet arrived, and the packet's received hop limit.
+    /// packet arrived, the received hop limit, and the IPv4 type of service.
     ///
     /// Polling the iface is _not_ required after this method succeeds.
     pub fn recv<CopyFn, R>(
@@ -385,7 +391,7 @@ impl<E: Ext> UdpSocket<E> {
         copy_fn: CopyFn,
     ) -> Result<R, smoltcp::socket::udp::RecvError>
     where
-        CopyFn: FnOnce(&[u8], UdpMetadata, u64, u8) -> R,
+        CopyFn: FnOnce(&[u8], UdpMetadata, u64, u8, u8) -> R,
     {
         let mut received = self.0.inner.received.lock();
         let (metadata, data): (ReceivedMetadata, &[u8]) = match behavior {
@@ -398,7 +404,7 @@ impl<E: Ext> UdpSocket<E> {
                 (*metadata, data)
             }
         };
-        Ok(copy_fn(data, metadata.udp, metadata.timestamp_ns, metadata.ttl))
+        Ok(copy_fn(data, metadata.udp, metadata.timestamp_ns, metadata.ttl, metadata.tos))
     }
 
     /// Takes the oldest pending transmit timestamp.
