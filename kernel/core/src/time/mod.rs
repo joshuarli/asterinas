@@ -26,6 +26,13 @@ pub(crate) type suseconds_t = i64;
 const NSEC_PER_USEC: i64 = 1_000;
 const USEC_PER_SEC: i64 = 1_000_000;
 pub(crate) const NSEC_PER_SEC: i64 = 1_000_000_000;
+pub(crate) const USER_HZ: u64 = 100;
+
+pub(crate) fn user_clock_ticks(duration: Duration) -> u64 {
+    duration.as_secs().saturating_mul(USER_HZ).saturating_add(
+        u64::from(duration.subsec_nanos()) / (NSEC_PER_SEC as u64 / USER_HZ),
+    )
+}
 
 pub(super) fn init() {
     system_time::init();

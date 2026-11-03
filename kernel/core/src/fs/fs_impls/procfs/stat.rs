@@ -21,7 +21,7 @@ use crate::{
     process::collect_process_creation_count,
     sched::nr_queued_and_running,
     thread::collect_context_switch_count,
-    time::{START_TIME, SystemTime, cpu_time_stats::CpuTimeStatsManager},
+    time::{START_TIME, SystemTime, cpu_time_stats::CpuTimeStatsManager, user_clock_ticks},
 };
 
 /// Represents the inode at `/proc/stat`.
@@ -44,16 +44,16 @@ impl StatFileOps {
         writeln!(
             printer,
             "cpu {} {} {} {} {} {} {} {} {} {}",
-            global_stats.user.as_u64(),
-            global_stats.nice.as_u64(),
-            global_stats.system.as_u64(),
-            global_stats.idle.as_u64(),
-            global_stats.iowait.as_u64(),
-            global_stats.irq.as_u64(),
-            global_stats.softirq.as_u64(),
-            global_stats.steal.as_u64(),
-            global_stats.guest.as_u64(),
-            global_stats.guest_nice.as_u64()
+            user_clock_ticks(global_stats.user.as_duration()),
+            user_clock_ticks(global_stats.nice.as_duration()),
+            user_clock_ticks(global_stats.system.as_duration()),
+            user_clock_ticks(global_stats.idle.as_duration()),
+            user_clock_ticks(global_stats.iowait.as_duration()),
+            user_clock_ticks(global_stats.irq.as_duration()),
+            user_clock_ticks(global_stats.softirq.as_duration()),
+            user_clock_ticks(global_stats.steal.as_duration()),
+            user_clock_ticks(global_stats.guest.as_duration()),
+            user_clock_ticks(global_stats.guest_nice.as_duration())
         )?;
 
         // Per-CPU statistics:
@@ -63,16 +63,16 @@ impl StatFileOps {
                 printer,
                 "cpu{} {} {} {} {} {} {} {} {} {} {}",
                 cpu_id.as_usize(),
-                cpu_stats.user.as_u64(),
-                cpu_stats.nice.as_u64(),
-                cpu_stats.system.as_u64(),
-                cpu_stats.idle.as_u64(),
-                cpu_stats.iowait.as_u64(),
-                cpu_stats.irq.as_u64(),
-                cpu_stats.softirq.as_u64(),
-                cpu_stats.steal.as_u64(),
-                cpu_stats.guest.as_u64(),
-                cpu_stats.guest_nice.as_u64()
+                user_clock_ticks(cpu_stats.user.as_duration()),
+                user_clock_ticks(cpu_stats.nice.as_duration()),
+                user_clock_ticks(cpu_stats.system.as_duration()),
+                user_clock_ticks(cpu_stats.idle.as_duration()),
+                user_clock_ticks(cpu_stats.iowait.as_duration()),
+                user_clock_ticks(cpu_stats.irq.as_duration()),
+                user_clock_ticks(cpu_stats.softirq.as_duration()),
+                user_clock_ticks(cpu_stats.steal.as_duration()),
+                user_clock_ticks(cpu_stats.guest.as_duration()),
+                user_clock_ticks(cpu_stats.guest_nice.as_duration())
             )?;
         }
 
