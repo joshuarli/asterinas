@@ -54,12 +54,12 @@ struct UdpFailureReporter<E: Ext> {
 }
 
 impl<E: Ext> UdpFailure for UdpFailureReporter<E> {
-    fn report(&self, destination: IpEndpoint, offender: IpAddress, payload: Vec<u8>) {
+    fn report(&self, destination: IpEndpoint, offender: IpAddress, payload: Vec<u8>, tos: u8) {
         if let Some(socket) = self.socket.upgrade() {
             socket.report_error(UdpError {
                 destination,
                 payload,
-                origin: UdpErrorOrigin::Icmp { offender, type_: 3, code: 1, info: 0, ttl: 64 },
+                origin: UdpErrorOrigin::Icmp { offender, type_: 3, code: 1, info: 0, ttl: 64, tos },
                 timestamp_ns: 0,
             });
         }
@@ -68,7 +68,7 @@ impl<E: Ext> UdpFailure for UdpFailureReporter<E> {
 
 #[derive(Clone, Copy, Debug)]
 pub enum UdpErrorOrigin {
-    Icmp { offender: IpAddress, type_: u8, code: u8, info: u32, ttl: u8 },
+    Icmp { offender: IpAddress, type_: u8, code: u8, info: u32, ttl: u8, tos: u8 },
 }
 
 impl UdpErrorOrigin {

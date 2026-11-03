@@ -60,7 +60,7 @@ pub(super) struct TxPacketWithDst {
 }
 
 pub(crate) trait UdpFailure: Send + Sync {
-    fn report(&self, destination: smoltcp::wire::IpEndpoint, offender: IpAddress, payload: Vec<u8>);
+    fn report(&self, destination: smoltcp::wire::IpEndpoint, offender: IpAddress, payload: Vec<u8>, tos: u8);
 }
 
 pub(super) enum PhyProcessResult {

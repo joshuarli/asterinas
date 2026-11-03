@@ -79,6 +79,9 @@ FN_TEST(unconnected_udp_recverr_reports_the_original_datagram)
 	int fd = TEST_SUCC(socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0));
 	int enabled = 1;
 	TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_RECVERR, &enabled, sizeof(enabled)));
+	TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &enabled, sizeof(enabled)));
+	int sent_tos = 0xb9;
+	TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_TOS, &sent_tos, sizeof(sent_tos)));
 	struct sockaddr_in destination = peer("192.0.2.252");
 	TEST_RES(sendto(fd, "probe", 5, 0, (struct sockaddr *)&destination, sizeof(destination)), _ret == 5);
 	struct pollfd event = { .fd = fd, .events = POLLIN };
@@ -92,7 +95,15 @@ FN_TEST(unconnected_udp_recverr_reports_the_original_datagram)
 	TEST_RES(recvmsg(fd, &msg, MSG_ERRQUEUE), _ret == 5 && !memcmp(data, "probe", 5));
 	TEST_RES(actual.sin_addr.s_addr, _ret == destination.sin_addr.s_addr);
 	TEST_RES(actual.sin_port, _ret == destination.sin_port);
-	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+	struct cmsghdr *cmsg = NULL;
+	int received_tos = -1;
+	for (struct cmsghdr *current = CMSG_FIRSTHDR(&msg); current; current = CMSG_NXTHDR(&msg, current)) {
+		if (current->cmsg_level == IPPROTO_IP && current->cmsg_type == IP_TOS && current->cmsg_len >= CMSG_LEN(1))
+			received_tos = *(unsigned char *)CMSG_DATA(current);
+		if (current->cmsg_level == IPPROTO_IP && current->cmsg_type == IP_RECVERR)
+			cmsg = current;
+	}
+	TEST_RES(received_tos, _ret == 0xd8);
 	TEST_RES(cmsg, _ret && _ret->cmsg_level == IPPROTO_IP && _ret->cmsg_type == IP_RECVERR);
 	if (cmsg && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct sock_extended_err))) {
 		struct sock_extended_err error;

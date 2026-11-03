@@ -203,6 +203,11 @@ impl DatagramSocket {
             {
                 messages.push(ControlMessage::Ip(IpControlMessage::TimeToLive(ttl)));
             }
+            if options.ip.recvtos()
+                && let UdpErrorOrigin::Icmp { tos, .. } = error.origin
+            {
+                messages.push(ControlMessage::Ip(IpControlMessage::TypeOfService(tos)));
+            }
             if options.socket.recv_timestamp_ns() {
                 messages.push(ControlMessage::Ip(IpControlMessage::TimestampNs(time)));
             } else if options.socket.recv_timestamp() {

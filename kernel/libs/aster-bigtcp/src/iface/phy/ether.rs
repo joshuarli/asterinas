@@ -28,7 +28,7 @@ use crate::{
         iface::internal::IfaceInternal,
         time::get_network_timestamp,
         phy::neighbors::{Due, Neighbors, Queued},
-        wire::{arp, ether},
+        wire::{arp, ether, icmp},
     },
     packet::{FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
 };
@@ -220,7 +220,7 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
                             let mut bytes = vec![0; packet.packet.len()];
                             packet.packet.reader().read(&mut VmWriter::from(bytes.as_mut_slice()));
                             if let Some((offender, payload)) = queued_udp_payload(&bytes) {
-                                reporter.report(*destination, offender.into(), payload.to_vec());
+                                reporter.report(*destination, offender.into(), payload.to_vec(), icmp::reply_tos(bytes[1]));
                             }
                         }
                     }
