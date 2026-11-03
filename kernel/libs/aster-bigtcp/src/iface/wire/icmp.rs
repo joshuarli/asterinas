@@ -29,7 +29,7 @@ pub(in crate::iface) fn parse_udp_error(
         return None;
     }
     let type_ = packet[0];
-    if !matches!(type_, 3 | 11 | 12) {
+    if !matches!((type_, packet[1]), (3, 0..=15) | (11, 0) | (12, _)) {
         return None;
     }
     let quoted = &packet[HEADER_LEN..];
@@ -55,10 +55,10 @@ pub(in crate::iface) fn parse_udp_error(
         destination: IpEndpoint::new(destination.into(), destination_port),
         type_,
         code: packet[1],
-        info: if type_ == 3 && packet[1] == 4 {
-            u32::from(u16::from_be_bytes([packet[6], packet[7]]))
-        } else {
-            0
+        info: match (type_, packet[1]) {
+            (3, 4) => u32::from(u16::from_be_bytes([packet[6], packet[7]])),
+            (12, _) => u32::from(packet[4]),
+            _ => 0,
         },
         payload: &udp[8..payload_end],
     })
