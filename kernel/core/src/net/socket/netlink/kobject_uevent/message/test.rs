@@ -11,7 +11,7 @@ use crate::{
         netlink::{
             GroupIdSet, NetlinkSocketAddr, NetlinkUeventSocket,
             kobject_uevent::{
-                UeventMessage,
+                UeventMessage, broadcast_add_uevent,
                 message::{
                     syn_uevent::{SyntheticUevent, Uuid},
                     uevent::Uevent,
@@ -91,4 +91,34 @@ fn multicast_synthetic_uevent() {
         s,
         "add@/devices/virtual/net/lo\0ACTION=add\0DEVPATH=/devices/virtual/net/lo\0SUBSYSTEM=net\0SYNTH_UUID=0\0INTERFACE=lo\0IFINDEX=1\0SEQNUM=1\0"
     );
+}
+
+#[ktest]
+fn registered_device_addition_uevent() {
+    crate::net::socket::netlink::init();
+
+    let socket = NetlinkUeventSocket::new(true, SockType::SOCK_DGRAM);
+    let socket_addr = SocketAddr::Netlink(NetlinkSocketAddr::new(101, GroupIdSet::new(0x1)));
+    socket.bind(socket_addr).unwrap();
+
+    broadcast_add_uevent(
+        "/devices/virtual/block/vda".to_string(),
+        "block".to_string(),
+        vec![
+            ("MAJOR".to_string(), "254".to_string()),
+            ("DEVNAME".to_string(), "vda".to_string()),
+        ],
+    )
+    .unwrap();
+
+    let mut buffer = vec![0u8; 1024];
+    let mut writer = VmWriter::from(buffer.as_mut_slice()).to_fallible();
+    let (output, _) = socket.try_recv(&mut writer, RecvFlags::empty()).unwrap();
+    let s = core::str::from_utf8(&buffer[..output.len()]).unwrap();
+
+    assert!(s.starts_with(
+        "add@/devices/virtual/block/vda\0ACTION=add\0DEVPATH=/devices/virtual/block/vda\0SUBSYSTEM=block\0MAJOR=254\0DEVNAME=vda\0SEQNUM="
+    ));
+    assert!(s.ends_with('\0'));
+    assert!(!s.contains("SYNTH_UUID"));
 }
