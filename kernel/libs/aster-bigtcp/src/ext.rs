@@ -10,7 +10,7 @@ use crate::{iface::ScheduleNextPoll, socket::SocketEventObserver};
 /// The purpose of having this trait is to allow users of this crate to inject multiple types
 /// without the hassle of writing multiple trait bounds, which can be achieved by using the types
 /// associated with this trait.
-pub trait Ext {
+pub trait Ext: 'static {
     /// The type for ifaces to schedule the next poll.
     type ScheduleNextPoll: ScheduleNextPoll;
 

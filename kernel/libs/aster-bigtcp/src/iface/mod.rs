@@ -17,6 +17,7 @@ const IFNAMESIZE: usize = 16;
 pub type InterfaceName = aster_util::fixed_str::FixedCStr<IFNAMESIZE>;
 
 pub use common::{BoundPort, BoundTcpPort, BoundUdpPort, InterfaceFlags, InterfaceType};
+pub(crate) use common::UdpFailure;
 pub use iface::Iface;
 pub(crate) use packet_slice::PacketSlice;
 pub use phy::{EtherIface, IpIface};

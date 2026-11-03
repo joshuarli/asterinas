@@ -37,6 +37,7 @@ sleep 0.2
 ./tcp_wrapped_buffer_io
 ./udp_broadcast
 ./udp_err
+./udp_icmp_error
 ./unix_datagram_err
 ./unix_seqpacket_err
 ./unix_stream_err

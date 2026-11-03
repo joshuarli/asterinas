@@ -2,7 +2,7 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use ostd::mm::{Infallible, VmReader};
+use ostd::mm::{Infallible, VmReader, VmWriter};
 use smoltcp::{
     storage::SliceLike,
     wire::{
@@ -27,7 +27,7 @@ use crate::{
     ext::Ext,
     iface::poll_iface::IsUnicast,
     packet::{ApplicationLayer, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
-    socket::{TcpConnectionBg, TcpProcessResult},
+    socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin},
     socket_table::{ConnectionKey, ListenerKey, SocketTable},
 };
 
@@ -147,7 +147,42 @@ impl<E: Ext> PollContext<'_, E> {
             IpProtocol::Udp => {
                 self.parse_and_process_udp(phy, &ip_repr, packet, checksum_caps.udp.rx())
             }
+            IpProtocol::Icmp if matches!(&ip_repr.inner, IpRepr::Ipv4(_)) => {
+                self.process_icmp(&ip_repr.inner, packet);
+                None
+            }
             _ => None,
+        }
+    }
+
+    fn process_icmp(
+        &mut self,
+        ip_repr: &IpRepr,
+        packet: RxPacket<TransportLayer>,
+    ) {
+        let mut bytes = alloc::vec![0; packet.len()];
+        packet.reader().read(&mut VmWriter::from(bytes.as_mut_slice()));
+        let Some(error) = icmp::parse_udp_error(&bytes, true) else {
+            return;
+        };
+        if error.source.addr != ip_repr.dst_addr() || !self.iface.is_unicast_local(error.source.addr) {
+            return;
+        }
+        for socket in self.sockets.udp_socket_iter() {
+            if socket.can_receive_error(error.source) {
+                socket.report_error(UdpError {
+                    destination: error.destination,
+                    payload: error.payload.to_vec(),
+                    timestamp_ns: 0,
+                    origin: UdpErrorOrigin::Icmp {
+                        offender: ip_repr.src_addr(),
+                        type_: error.type_,
+                        code: error.code,
+                        info: error.info,
+                        ttl: match ip_repr { IpRepr::Ipv4(header) => header.hop_limit, _ => 0 },
+                    },
+                });
+            }
         }
     }
 
@@ -407,6 +442,7 @@ impl<E: Ext> PollContext<'_, E> {
         Some(TxPacketWithDst {
             packet,
             dst_addr: reply_ip_repr.dst_addr(),
+            failure: None,
         })
     }
 
@@ -425,6 +461,7 @@ impl<E: Ext> PollContext<'_, E> {
         Some(TxPacketWithDst {
             packet,
             dst_addr: ip_repr.dst_addr(),
+            failure: None,
         })
     }
 
@@ -447,7 +484,7 @@ impl<E: Ext> PollContext<'_, E> {
             dst_addr = IpAddress::Ipv4(Ipv4Address::BROADCAST);
         }
 
-        Some(TxPacketWithDst { packet, dst_addr })
+        Some(TxPacketWithDst { packet, dst_addr, failure: None })
     }
 
     fn copy_payload(phy: &dyn PollPhy, payload: &[u8]) -> Option<TxPacket<ApplicationLayer>> {
@@ -622,25 +659,55 @@ impl<E: Ext> PollContext<'_, E> {
                 if is_broadcast || !this.iface.is_unicast_local(ip_repr.dst_addr()) {
                     tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload);
                     if !is_broadcast {
+                        if let Some(packet) = tx_packet.as_mut() {
+                            packet.failure = Some((
+                                socket.failure_reporter(),
+                                smoltcp::wire::IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port),
+                            ));
+                        }
                         return;
                     }
                 }
 
                 if !socket.can_process(udp_repr.dst_port) {
-                    // TODO: Generate the ICMP message here once we're able to handle incoming ICMP
-                    // messages.
-                    let _ = this.process_udp(ip_repr, udp_repr, PacketSlice::from(udp_payload));
+                    let processed = this.process_udp(ip_repr, udp_repr, PacketSlice::from(udp_payload));
+                    if !processed && !is_broadcast {
+                        socket.report_error(UdpError {
+                            destination: smoltcp::wire::IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port),
+                            payload: udp_payload.to_vec(),
+                            timestamp_ns: 0,
+                            origin: UdpErrorOrigin::Icmp {
+                                offender: ip_repr.dst_addr(),
+                                type_: 3,
+                                code: 3,
+                                info: 0,
+                                ttl: 64,
+                            },
+                        });
+                    }
                     return;
                 }
 
                 // We cannot call `process_udp` now because it may cause deadlocks. We will copy
                 // the payload and call `process_udp` after releasing the socket lock.
-                deferred = Some((ip_repr.clone(), *udp_repr, udp_payload.to_vec()));
+                deferred = Some((ip_repr.clone(), *udp_repr, udp_payload.to_vec(), is_broadcast));
             });
 
-            if let Some((ip_repr, udp_repr, payload)) = deferred {
-                let _ =
-                    self.process_udp(&ip_repr, &udp_repr, PacketSlice::from(payload.as_slice()));
+            if let Some((ip_repr, udp_repr, payload, is_broadcast)) = deferred {
+                if !self.process_udp(&ip_repr, &udp_repr, PacketSlice::from(payload.as_slice())) && !is_broadcast {
+                    socket.report_error(UdpError {
+                        destination: smoltcp::wire::IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port),
+                        payload,
+                        timestamp_ns: 0,
+                        origin: UdpErrorOrigin::Icmp {
+                            offender: ip_repr.dst_addr(),
+                            type_: 3,
+                            code: 3,
+                            info: 0,
+                            ttl: 64,
+                        },
+                    });
+                }
             }
 
             if tx_packet.is_some() {

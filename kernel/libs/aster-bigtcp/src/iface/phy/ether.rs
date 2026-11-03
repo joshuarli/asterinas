@@ -37,7 +37,7 @@ pub struct EtherIface<D, E: Ext> {
     driver: D,
     common: IfaceCommon<E>,
     ether_addr: EthernetAddress,
-    neighbors: SpinLock<Neighbors<TxPacket<NetworkLayer>>, BottomHalfDisabled>,
+    neighbors: SpinLock<Neighbors<TxPacketWithDst>, BottomHalfDisabled>,
     released: SpinLock<VecDeque<TxPacket<LinkLayer>>, BottomHalfDisabled>,
 }
 
@@ -179,7 +179,7 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
             let queued = self
                 .neighbors
                 .lock()
-                .queue(next_hop_ip, packet.packet, len, now_ms);
+                .queue(next_hop_ip, packet, len, now_ms);
             return match queued {
                 Queued::ProbeNow => self.arp_request(next_hop_ip, ipv4_cidrs),
                 Queued::Waiting | Queued::Dropped => None,
@@ -215,6 +215,15 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
                     }
                 }
                 Due::Failed(address, packets) => {
+                    for packet in &packets {
+                        if let Some((reporter, destination)) = &packet.failure {
+                            let mut bytes = vec![0; packet.packet.len()];
+                            packet.packet.reader().read(&mut VmWriter::from(bytes.as_mut_slice()));
+                            if let Some((offender, payload)) = queued_udp_payload(&bytes) {
+                                reporter.report(*destination, offender.into(), payload.to_vec());
+                            }
+                        }
+                    }
                     ostd::debug!(
                         "{} packets for the unreachable neighbor {} were dropped",
                         packets.len(),
@@ -320,7 +329,7 @@ impl<D, E: Ext> EtherIface<D, E> {
                 let mut released = self.released.lock();
                 for packet in waiting {
                     released.push_back(ether::emit(
-                        packet,
+                        packet.packet,
                         &EthernetRepr {
                             src_addr: self.ether_addr,
                             dst_addr: *source_hardware_addr,
@@ -381,4 +390,20 @@ impl<D, E: Ext> EtherIface<D, E> {
         let packet = arp::emit(packet, arp_repr);
         Some(ether::emit(packet, &ether_repr))
     }
+}
+
+fn queued_udp_payload(packet: &[u8]) -> Option<(Ipv4Address, &[u8])> {
+    if packet.len() < 28 || packet[0] >> 4 != 4 || packet[9] != 17 {
+        return None;
+    }
+    let header_len = usize::from(packet[0] & 15) * 4;
+    if header_len < 20 || packet.len() < header_len + 8 {
+        return None;
+    }
+    let udp = &packet[header_len..];
+    let len = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
+    if len < 8 || len > udp.len() {
+        return None;
+    }
+    Some((Ipv4Address::new(packet[12], packet[13], packet[14], packet[15]), &udp[8..len]))
 }

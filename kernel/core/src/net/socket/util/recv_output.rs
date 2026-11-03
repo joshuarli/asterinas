@@ -39,6 +39,16 @@ impl RecvOutput {
         Self { len, flags }
     }
 
+    pub(in crate::net) fn new_for_error_queue(
+        input_flags: RecvFlags,
+        copied_len: usize,
+        message_len: usize,
+    ) -> Self {
+        let mut output = Self::new_for_packet(input_flags, copied_len, message_len);
+        output.flags |= RecvFlags::MSG_ERRQUEUE;
+        output
+    }
+
     /// Returns the message size.
     pub(crate) const fn len(&self) -> usize {
         self.len

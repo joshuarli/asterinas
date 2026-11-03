@@ -56,6 +56,11 @@ pub struct IfaceCommon<E: Ext> {
 pub(super) struct TxPacketWithDst {
     pub(super) packet: TxPacket<NetworkLayer>,
     pub(super) dst_addr: IpAddress,
+    pub(super) failure: Option<(Arc<dyn UdpFailure>, smoltcp::wire::IpEndpoint)>,
+}
+
+pub(crate) trait UdpFailure: Send + Sync {
+    fn report(&self, destination: smoltcp::wire::IpEndpoint, offender: IpAddress, payload: Vec<u8>);
 }
 
 pub(super) enum PhyProcessResult {

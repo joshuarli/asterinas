@@ -6,7 +6,7 @@ use crate::{
     net::socket::util::{CControlHeader, RecvFlags},
     prelude::*,
     time::{timespec_t, timeval_t},
-    util::net::CSocketOptionLevel,
+    util::net::{CSocketAddrFamily, CSocketOptionLevel},
 };
 
 /// Control messages an IPv4 datagram socket delivers with a received message.
@@ -25,9 +25,12 @@ pub(crate) enum IpControlMessage {
     Timestamping(Duration),
     /// `IP_RECVERR` describing a transmit timestamp (`SO_EE_ORIGIN_TIMESTAMPING`).
     TimestampingError { tx_id: u32 },
+    NetworkError { errno: u32, origin: u8, type_: u8, code: u8, info: u32, offender: Option<[u8; 4]> },
+    TimeToLive(u8),
 }
 
 const SOL_IP_PKTINFO: i32 = 8;
+const SOL_IP_TTL: i32 = 2;
 const SOL_IP_RECVERR: i32 = 11;
 const SCM_TIMESTAMP: i32 = 29;
 const SCM_TIMESTAMPNS: i32 = 35;
@@ -64,9 +67,25 @@ struct SockExtendedErr {
     data: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod)]
+struct SockExtendedErrWithOffender {
+    error: SockExtendedErr,
+    family: u16,
+    port: u16,
+    address: [u8; 4],
+    padding: [u8; 8],
+}
+
 impl IpControlMessage {
     pub(crate) fn write_to(&self, writer: &mut VmWriter) -> Result<(CControlHeader, RecvFlags)> {
         match self {
+            Self::TimeToLive(ttl) => write_payload(
+                writer,
+                CSocketOptionLevel::SOL_IP,
+                SOL_IP_TTL,
+                &i32::from(*ttl),
+            ),
             Self::PacketInfo { ifindex, local, destination } => write_payload(
                 writer,
                 CSocketOptionLevel::SOL_IP,
@@ -107,6 +126,18 @@ impl IpControlMessage {
                     pad: 0,
                     info: SCM_TSTAMP_SND,
                     data: *tx_id,
+                },
+            ),
+            Self::NetworkError { errno, origin, type_, code, info, offender } => write_payload(
+                writer,
+                CSocketOptionLevel::SOL_IP,
+                SOL_IP_RECVERR,
+                &SockExtendedErrWithOffender {
+                    error: SockExtendedErr { errno: *errno, origin: *origin, type_: *type_, code: *code, pad: 0, info: *info, data: 0 },
+                    family: if offender.is_some() { CSocketAddrFamily::AF_INET as u16 } else { CSocketAddrFamily::AF_UNSPEC as u16 },
+                    port: 0,
+                    address: offender.unwrap_or([0; 4]),
+                    padding: [0; 8],
                 },
             ),
         }
