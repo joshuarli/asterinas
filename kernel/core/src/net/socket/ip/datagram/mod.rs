@@ -48,6 +48,7 @@ pub(super) mod observer;
 mod unbound;
 
 const SO_EE_ORIGIN_ICMP: u8 = 2;
+const IPV4_MAX_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
 
 pub(crate) struct DatagramSocket {
     // Lock order: `inner` first, `options` second
@@ -234,6 +235,9 @@ impl DatagramSocket {
     ) -> Result<usize> {
         if let Some(error) = self.take_pending_error() {
             return Err(error);
+        }
+        if reader.sum_lens() > IPV4_MAX_UDP_PAYLOAD {
+            return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the IPv4 length limit");
         }
         let tx_tag = self.next_tx_tag();
         let (sent_bytes, iface_to_poll) = select_remote_and_bind(
