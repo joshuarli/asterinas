@@ -38,6 +38,7 @@ sleep 0.2
 ./udp_broadcast
 ./udp_err
 ./udp_icmp_error
+./udp_length
 ./unix_datagram_err
 ./unix_seqpacket_err
 ./unix_stream_err
