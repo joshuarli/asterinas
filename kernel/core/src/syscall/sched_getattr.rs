@@ -8,9 +8,10 @@ use super::{
 };
 use crate::{
     prelude::*,
-    process::pid_table,
-    sched::{LinuxSchedPolicy, Nice, RealTimePolicy, SchedAttr, SchedPolicy},
-    thread::Tid,
+    process::{ResourceType, UserNamespace, credentials::capabilities::CapSet, pid_table, posix_thread::AsPosixThread},
+    sched::{LinuxSchedPolicy, Nice, RealTimePolicy, SchedAttr, SchedPolicy, UserFairPolicy, UserSchedAttr},
+    security::lsm::hooks as lsm_hooks,
+    thread::{Thread, Tid},
     util::CopyCompat,
 };
 
@@ -40,6 +41,15 @@ pub(super) struct LinuxSchedAttr {
     pub(super) sched_util_min: u32,
     pub(super) sched_util_max: u32,
 }
+
+// Reference: <https://elixir.bootlin.com/linux/v6.17.7/source/include/uapi/linux/sched.h#L120>
+pub(super) const SCHED_RESET_ON_FORK: u32 = 0x4000_0000;
+// Reference: <https://elixir.bootlin.com/linux/v6.17.7/source/include/uapi/linux/sched.h#L130>
+const SCHED_FLAG_RESET_ON_FORK: u64 = 0x1;
+
+// Reference: <https://elixir.bootlin.com/linux/v6.17.7/source/kernel/sched/syscalls.c#L331>
+const MIN_FAIR_SLICE_NS: u64 = 100_000;
+const MAX_FAIR_SLICE_NS: u64 = 100_000_000;
 
 // Reference: <https://elixir.bootlin.com/linux/v6.17.7/source/include/uapi/linux/sched/types.h#L7>
 const SCHED_ATTR_SIZE_VER0: u32 = 48;
@@ -73,6 +83,7 @@ impl TryFrom<SchedPolicy> for LinuxSchedAttr {
             // latter policy are invisible to the user API.
             SchedPolicy::Fair(Nice::MAX) => LinuxSchedAttr {
                 sched_policy: LinuxSchedPolicy::Idle as u32,
+                sched_nice: Nice::MAX.value().get().into(),
                 ..Default::default()
             },
 
@@ -112,7 +123,7 @@ impl TryFrom<LinuxSchedAttr> for SchedPolicy {
                 return_errno_with_message!(Errno::EINVAL, "invalid scheduling priority")
             }
 
-            LinuxSchedPolicy::Normal => SchedPolicy::Fair(Nice::new(
+            LinuxSchedPolicy::Normal | LinuxSchedPolicy::Batch => SchedPolicy::Fair(Nice::new(
                 i8::try_from(value.sched_nice)
                     .ok()
                     .and_then(|n| n.try_into().ok())
@@ -124,13 +135,58 @@ impl TryFrom<LinuxSchedAttr> for SchedPolicy {
             // latter policy are invisible to the user API.
             LinuxSchedPolicy::Idle => SchedPolicy::Fair(Nice::MAX),
 
-            LinuxSchedPolicy::Batch
-            | LinuxSchedPolicy::Iso
-            | LinuxSchedPolicy::Deadline
-            | LinuxSchedPolicy::Ext => {
+            LinuxSchedPolicy::Iso | LinuxSchedPolicy::Deadline | LinuxSchedPolicy::Ext => {
                 return_errno_with_message!(Errno::EINVAL, "invalid scheduling policy")
             }
         })
+    }
+}
+
+impl LinuxSchedAttr {
+    pub(super) fn user_attr(&self) -> UserSchedAttr {
+        let is_fair = matches!(
+            LinuxSchedPolicy::try_from(self.sched_policy),
+            Ok(LinuxSchedPolicy::Normal | LinuxSchedPolicy::Batch | LinuxSchedPolicy::Idle)
+        );
+
+        UserSchedAttr {
+            fair_policy: match LinuxSchedPolicy::try_from(self.sched_policy) {
+                Ok(LinuxSchedPolicy::Batch) => UserFairPolicy::Batch,
+                Ok(LinuxSchedPolicy::Idle) => UserFairPolicy::Idle,
+                _ => UserFairPolicy::Normal,
+            },
+            idle_nice: Nice::default(),
+            reset_on_fork: self.sched_flags & SCHED_FLAG_RESET_ON_FORK != 0,
+            slice_ns: if is_fair && self.sched_runtime != 0 {
+                self.sched_runtime.clamp(MIN_FAIR_SLICE_NS, MAX_FAIR_SLICE_NS)
+            } else {
+                0
+            },
+        }
+    }
+
+    pub(super) fn with_user_attr(mut self, user: UserSchedAttr) -> Self {
+        let is_fair = self.sched_policy == LinuxSchedPolicy::Normal as u32
+            || self.sched_policy == LinuxSchedPolicy::Idle as u32;
+
+        if is_fair {
+            self.sched_policy = match user.fair_policy {
+                UserFairPolicy::Normal => LinuxSchedPolicy::Normal,
+                UserFairPolicy::Batch => LinuxSchedPolicy::Batch,
+                UserFairPolicy::Idle => LinuxSchedPolicy::Idle,
+            } as u32;
+            if user.fair_policy == UserFairPolicy::Idle {
+                self.sched_nice = user.idle_nice.value().get().into();
+            }
+        }
+        if user.reset_on_fork {
+            self.sched_flags |= SCHED_FLAG_RESET_ON_FORK;
+        }
+        if is_fair {
+            self.sched_runtime = user.slice_ns;
+        }
+
+        self
     }
 }
 
@@ -213,6 +269,93 @@ pub(super) fn access_sched_attr_with<T>(
     f(thread.sched_attr())
 }
 
+pub(super) enum SchedChange {
+    Attribute(LinuxSchedAttr),
+    Policy(LinuxSchedAttr),
+    Priority(u32),
+}
+
+pub(super) fn change_sched_attr(tid: Tid, ctx: &Context, change: SchedChange) -> Result<()> {
+    if tid.cast_signed() < 0 {
+        return_errno_with_message!(Errno::EINVAL, "all negative TIDs are not valid");
+    }
+    if tid == 0 {
+        return change_thread_sched_attr(ctx.thread, ctx, change);
+    }
+    let Some(thread) = pid_table::pid_table_mut().get_thread(tid) else {
+        return_errno_with_message!(Errno::ESRCH, "the target thread does not exist");
+    };
+    change_thread_sched_attr(&thread, ctx, change)
+}
+
+fn change_thread_sched_attr(thread: &Thread, ctx: &Context, change: SchedChange) -> Result<()> {
+    let Some(target) = thread.as_posix_thread() else {
+        return_errno_with_message!(Errno::ESRCH, "the target is not a userspace thread");
+    };
+    let target_process = target.process();
+    let same_owner = {
+        let caller = ctx.posix_thread.credentials();
+        let target = target.credentials();
+        caller.euid() == target.euid() || caller.euid() == target.ruid()
+    };
+    let privileged = lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+        UserNamespace::get_init_singleton().as_ref(),
+        ctx.posix_thread,
+        CapSet::SYS_NICE,
+    )).is_ok();
+    let limits = target_process.resource_limits();
+    let nice_limit = limits.get_rlimit(ResourceType::RLIMIT_NICE).get_cur();
+    let rt_limit = limits.get_rlimit(ResourceType::RLIMIT_RTPRIO).get_cur();
+    thread.sched_attr().update_user_policy(|old_policy, old_user| {
+        let old = LinuxSchedAttr::try_from(old_policy)?.with_user_attr(old_user);
+        let (requested, legacy) = match change {
+            SchedChange::Attribute(attr) => (attr, false),
+            SchedChange::Policy(mut attr) => {
+                attr.sched_nice = old.sched_nice;
+                (attr, true)
+            }
+            SchedChange::Priority(priority) => {
+                let mut attr = old;
+                attr.sched_priority = priority;
+                (attr, true)
+            }
+        };
+        if requested.sched_flags & !SCHED_FLAG_RESET_ON_FORK != 0 {
+            return_errno_with_message!(Errno::EINVAL, "unsupported scheduling flags");
+        }
+        let policy = SchedPolicy::try_from(requested)?;
+        let mut user = requested.user_attr();
+        if legacy {
+            user.slice_ns = old_user.slice_ns;
+        }
+        if user.fair_policy == UserFairPolicy::Idle {
+            user.idle_nice = if old_user.fair_policy == UserFairPolicy::Idle {
+                old_user.idle_nice
+            } else {
+                i8::try_from(old.sched_nice).ok().and_then(|nice| nice.try_into().ok()).unwrap_or_default()
+            };
+        }
+        if !privileged {
+            let rt = matches!(policy, SchedPolicy::RealTime { .. });
+            let old_rt = matches!(old_policy, SchedPolicy::RealTime { .. });
+            let raise_nice = matches!(requested.sched_policy, 0 | 3)
+                && requested.sched_nice < old.sched_nice
+                && (20 - i64::from(requested.sched_nice)) as u64 > nice_limit;
+            let leave_idle = old_user.fair_policy == UserFairPolicy::Idle
+                && user.fair_policy != UserFairPolicy::Idle
+                && (20 - i64::from(old.sched_nice)) as u64 > nice_limit;
+            let raise_rt = rt && ((!old_rt || requested.sched_policy != old.sched_policy) && rt_limit == 0
+                || requested.sched_priority > old.sched_priority && u64::from(requested.sched_priority) > rt_limit);
+            if !same_owner || raise_nice || leave_idle || raise_rt
+                || old_user.reset_on_fork && !user.reset_on_fork
+            {
+                return_errno_with_message!(Errno::EPERM, "scheduling change requires permission");
+            }
+        }
+        Ok((policy, user, ()))
+    })
+}
+
 pub(super) fn sys_sched_getattr(
     tid: Tid,
     addr: Vaddr,
@@ -228,10 +371,10 @@ pub(super) fn sys_sched_getattr(
         return_errno_with_message!(Errno::EINVAL, "invalid flags");
     }
 
-    let policy = access_sched_attr_with(tid, ctx, |attr| Ok(attr.policy()))?;
-    let attr: LinuxSchedAttr = policy
-        .try_into()
-        .expect("all user-visible scheduling attributes should be valid");
+    let (policy, user) = access_sched_attr_with(tid, ctx, |attr| Ok(attr.user_policy()))?;
+    let attr: LinuxSchedAttr = LinuxSchedAttr::try_from(policy)
+        .expect("all user-visible scheduling attributes should be valid")
+        .with_user_attr(user);
     write_linux_sched_attr_to_user(attr, addr, user_size, ctx)?;
 
     Ok(SyscallReturn::Return(0))

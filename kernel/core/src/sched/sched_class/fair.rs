@@ -16,8 +16,8 @@ use ostd::{
 };
 
 use super::{
-    CurrentRuntime, SchedAttr, SchedClassRq,
-    time::{base_slice_clocks, min_period_clocks},
+    CurrentRuntime, SchedAttr, SchedClassRq, UserFairPolicy,
+    time::{base_slice_clocks, min_period_clocks, nanoseconds_to_clocks},
 };
 use crate::{
     sched::nice::{Nice, NiceValue},
@@ -141,8 +141,16 @@ impl FairAttr {
     }
 
     pub(crate) fn update(&self, nice: Nice) {
+        self.update_weight(nice_to_weight(nice));
+    }
+
+    pub(crate) fn update_idle(&self) {
+        self.update_weight(3);
+    }
+
+    fn update_weight(&self, weight: u64) {
         let mut pending_weight = self.pending_weight.lock();
-        *pending_weight = nice_to_weight(nice);
+        *pending_weight = weight;
         self.weight.store(
             self.weight.load(Ordering::Relaxed) | HAS_PENDING,
             Ordering::Relaxed,
@@ -279,10 +287,14 @@ impl FairClassRq {
 
 impl SchedClassRq for FairClassRq {
     fn enqueue(&mut self, entity: Arc<Task>, flags: Option<EnqueueFlags>) {
-        let fair_attr = &entity.as_thread().unwrap().sched_attr().fair;
-        let vruntime = match flags {
-            Some(EnqueueFlags::Spawn) => self.min_vruntime + self.vtime_slice(),
-            _ => self.min_vruntime,
+        let sched_attr = entity.as_thread().unwrap().sched_attr();
+        let fair_attr = &sched_attr.fair;
+        let penalize_wakeup = flags == Some(EnqueueFlags::Wake)
+            && sched_attr.user().fair_policy == UserFairPolicy::Batch;
+        let vruntime = if flags == Some(EnqueueFlags::Spawn) || penalize_wakeup {
+            self.min_vruntime + self.vtime_slice()
+        } else {
+            self.min_vruntime
         };
         let (_old_weight, weight) = fair_attr.fetch_weight();
 
@@ -336,9 +348,16 @@ impl SchedClassRq for FairClassRq {
                     return false;
                 }
 
+                let slice_ns = attr.user().slice_ns;
+                let (time_slice, vtime_slice) = if slice_ns == 0 {
+                    (self.time_slice(weight), self.vtime_slice())
+                } else {
+                    let time_slice = nanoseconds_to_clocks(slice_ns);
+                    (time_slice, time_slice.saturating_mul(WEIGHT_0) / weight)
+                };
                 matches!(flags, UpdateFlags::Wait)
-                    || rt.period_delta > self.time_slice(weight)
-                    || vruntime > self.min_vruntime + self.vtime_slice()
+                    || rt.period_delta > time_slice
+                    || vruntime > self.min_vruntime + vtime_slice
             }
             UpdateFlags::Exit => !self.is_empty(),
         }

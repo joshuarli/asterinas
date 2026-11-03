@@ -47,6 +47,12 @@ pub(crate) fn base_slice_clocks() -> u64 {
     consts().0
 }
 
+pub(crate) fn nanoseconds_to_clocks(nanoseconds: u64) -> u64 {
+    let (numerator, denominator) = tsc_factors();
+    (u128::from(nanoseconds) * u128::from(denominator) / u128::from(numerator))
+        .min(u128::from(u64::MAX)) as u64
+}
+
 /// Returns the minimum scheduling period, measured in TSC clock units.
 pub(crate) fn min_period_clocks() -> u64 {
     consts().1

@@ -39,11 +39,27 @@ pub(crate) enum LinuxSchedPolicy {
     Normal = 0,
     Fifo = 1,
     RoundRobin = 2,
-    Batch = 3, // Not supported.
+    Batch = 3,
     Iso = 4,   // Reserved but not implemented yet on Linux.
     Idle = 5,
     Deadline = 6, // Not supported.
     Ext = 7,      // Not supported.
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum UserFairPolicy {
+    #[default]
+    Normal,
+    Batch,
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct UserSchedAttr {
+    pub(crate) fair_policy: UserFairPolicy,
+    pub(crate) idle_nice: Nice,
+    pub(crate) reset_on_fork: bool,
+    pub(crate) slice_ns: u64,
 }
 
 /// Projects internal scheduling policies onto Linux's user-visible policy codes.
@@ -146,7 +162,4 @@ impl SchedPolicyState {
         *this = policy;
     }
 
-    pub(crate) fn update<T>(&self, update: impl FnOnce(&mut SchedPolicy) -> T) -> T {
-        update(&mut self.policy.disable_irq().lock())
-    }
 }

@@ -21,7 +21,7 @@ use crate::{
         posix_thread::{ThreadName, thread_local::SuppUserContext},
         signal::{sig_mask::AtomicSigMask, sig_queues::SigQueues},
     },
-    sched::{Nice, SchedPolicy},
+    sched::{Nice, SchedPolicy, UserSchedAttr},
     thread::{Thread, Tid, task},
     time::{TimerManager, clocks::ProfClock},
     vm::vmar::VmarHandle,
@@ -45,6 +45,7 @@ pub(crate) struct PosixThreadBuilder {
     sig_mask: AtomicSigMask,
     sig_queues: SigQueues,
     sched_policy: SchedPolicy,
+    sched_user: UserSchedAttr,
     supp_user_context: SuppUserContext,
     user_ns: Option<Arc<UserNamespace>>,
     ns_proxy: Option<Arc<NsProxy>>,
@@ -73,6 +74,7 @@ impl PosixThreadBuilder {
             sig_mask: AtomicSigMask::new_empty(),
             sig_queues: SigQueues::new(),
             sched_policy: SchedPolicy::Fair(Nice::default()),
+            sched_user: UserSchedAttr::default(),
             supp_user_context: SuppUserContext::new(),
             user_ns: None,
             ns_proxy: None,
@@ -148,6 +150,12 @@ impl PosixThreadBuilder {
         self
     }
 
+    pub(crate) fn scheduling(mut self, (policy, user): (SchedPolicy, UserSchedAttr)) -> Self {
+        self.sched_policy = policy;
+        self.sched_user = user;
+        self
+    }
+
     pub(crate) fn build(self) -> Arc<Task> {
         let Self {
             tid,
@@ -163,6 +171,7 @@ impl PosixThreadBuilder {
             sig_mask,
             sig_queues,
             sched_policy,
+            sched_user,
             supp_user_context,
             user_ns,
             ns_proxy,
@@ -216,6 +225,7 @@ impl PosixThreadBuilder {
                 cpu_affinity,
                 sched_policy,
             ));
+            thread.sched_attr().set_user(sched_user);
 
             let thread_local = ThreadLocal::new(
                 set_child_tid,

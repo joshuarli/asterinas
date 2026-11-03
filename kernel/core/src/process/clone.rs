@@ -31,7 +31,7 @@ use crate::{
         posix_thread::{PosixThread, ThreadLocal, allocate_posix_tid},
         stats::PROCESS_CREATION_COUNTER,
     },
-    sched::Nice,
+    sched::{Nice, SchedPolicy, UserFairPolicy},
     thread::{AsThread, Tid},
     vm::vmar::{Vmar, VmarHandle},
 };
@@ -450,6 +450,7 @@ fn clone_child_task(
             credentials,
             child_vmar,
         )
+        .scheduling(ctx.thread.sched_attr().for_child())
         .process(posix_thread.weak_process().clone())
         .sig_mask(sig_mask)
         .file_table(child_file_table)
@@ -560,7 +561,12 @@ fn clone_child_process(
     let child_resource_limits = process.resource_limits().clone();
 
     // Inherit the parent's nice value
-    let child_nice = process.nice().load(Ordering::Relaxed);
+    let child_schedule = ctx.thread.sched_attr().for_child();
+    let child_nice = match child_schedule {
+        (_, user) if user.fair_policy == UserFairPolicy::Idle => user.idle_nice,
+        (SchedPolicy::Fair(nice), _) => nice,
+        _ => process.nice().load(Ordering::Relaxed),
+    };
 
     // Inherit the parent's OOM score adjustment
     let child_oom_score_adj = process.oom_score_adj().load(Ordering::Relaxed);
@@ -586,6 +592,7 @@ fn clone_child_process(
                 credentials,
                 child_vmar,
             )
+            .scheduling(child_schedule)
             .sig_mask(child_sig_mask)
             .file_table(child_file_table)
             .fs(child_fs)

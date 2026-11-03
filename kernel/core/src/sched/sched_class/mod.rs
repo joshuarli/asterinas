@@ -26,7 +26,7 @@ use super::{
     nice::Nice,
     stats::{SchedulerStats, set_stats_from_scheduler},
 };
-use crate::thread::{AsThread, Thread};
+use crate::{prelude::Result, thread::{AsThread, Thread}};
 
 mod policy;
 mod time;
@@ -38,7 +38,7 @@ mod stop;
 
 use self::policy::{SchedPolicyKind, SchedPolicyState};
 pub(crate) use self::{
-    policy::{LinuxSchedPolicy, SchedPolicy},
+    policy::{LinuxSchedPolicy, SchedPolicy, UserFairPolicy, UserSchedAttr},
     real_time::{RealTimePolicy, RealTimePriority},
 };
 
@@ -148,6 +148,8 @@ pub(crate) struct SchedAttr {
     last_cpu: AtomicCpuId,
     real_time: real_time::RealTimeAttr,
     fair: fair::FairAttr,
+    user: SpinLock<UserSchedAttr>,
+    user_update: SpinLock<()>,
 }
 
 impl SchedAttr {
@@ -167,7 +169,58 @@ impl SchedAttr {
                 SchedPolicy::Fair(nice) => nice,
                 _ => Nice::default(),
             }),
+            user: SpinLock::new(UserSchedAttr::default()),
+            user_update: SpinLock::new(()),
         }
+    }
+
+    pub(crate) fn user(&self) -> UserSchedAttr {
+        *self.user.disable_irq().lock()
+    }
+
+    pub(crate) fn set_user(&self, user: UserSchedAttr) {
+        *self.user.disable_irq().lock() = user;
+        if user.fair_policy == UserFairPolicy::Idle {
+            self.fair.update_idle();
+        }
+    }
+
+    pub(crate) fn for_child(&self) -> (SchedPolicy, UserSchedAttr) {
+        let (mut policy, mut user) = self.user_policy();
+        if user.reset_on_fork {
+            user.slice_ns = 0;
+            if user.fair_policy == UserFairPolicy::Idle && user.idle_nice.value().get() < 0 {
+                user.idle_nice = Nice::default();
+            }
+            policy = match policy {
+                SchedPolicy::RealTime { .. } => {
+                    user.fair_policy = UserFairPolicy::Normal;
+                    SchedPolicy::Fair(Nice::default())
+                }
+                SchedPolicy::Fair(nice) if nice.value().get() < 0 => {
+                    SchedPolicy::Fair(Nice::default())
+                }
+                other => other,
+            };
+            user.reset_on_fork = false;
+        }
+        (policy, user)
+    }
+
+    pub(crate) fn user_policy(&self) -> (SchedPolicy, UserSchedAttr) {
+        let _guard = self.user_update.disable_irq().lock();
+        (self.policy(), self.user())
+    }
+
+    pub(crate) fn update_user_policy<T>(
+        &self,
+        update: impl FnOnce(SchedPolicy, UserSchedAttr) -> Result<(SchedPolicy, UserSchedAttr, T)>,
+    ) -> Result<T> {
+        let _guard = self.user_update.disable_irq().lock();
+        let (policy, user, result) = update(self.policy(), self.user())?;
+        self.set_policy(policy);
+        self.set_user(user);
+        Ok(result)
     }
 
     /// Retrieves the current scheduling policy of the thread.
@@ -191,20 +244,6 @@ impl SchedAttr {
             SchedPolicy::Fair(nice) => self.fair.update(nice),
             _ => {}
         });
-    }
-
-    pub(crate) fn update_policy<T>(&self, f: impl FnOnce(&mut SchedPolicy) -> T) -> T {
-        self.policy.update(|policy| {
-            let ret = f(policy);
-            match *policy {
-                SchedPolicy::RealTime { rt_prio, rt_policy } => {
-                    self.real_time.update(rt_prio.get(), rt_policy);
-                }
-                SchedPolicy::Fair(nice) => self.fair.update(nice),
-                _ => {}
-            }
-            ret
-        })
     }
 
     pub(crate) fn last_cpu(&self) -> Option<CpuId> {
