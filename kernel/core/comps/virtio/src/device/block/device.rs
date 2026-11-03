@@ -84,13 +84,10 @@ impl BlockDevice {
         );
         let name = Self::formatted_device_name(index);
 
+        let max_segments = device.max_segments_per_request();
         let block_device = Arc::new(BlockDevice {
             device,
-            // Each bio request includes an additional 1 request and 1 response descriptor,
-            // therefore this upper bound is set to (QUEUE_SIZE - 2).
-            queue: BioRequestSingleQueue::with_max_nr_segments_per_bio(
-                (DeviceInner::QUEUE_SIZE - 2) as usize,
-            ),
+            queue: BioRequestSingleQueue::with_max_nr_segments_per_bio(max_segments),
             id,
             name,
             identity,
@@ -165,6 +162,16 @@ struct DeviceInner {
 
 impl DeviceInner {
     const QUEUE_SIZE: u16 = 64;
+
+    /// Returns how many data segments one request may carry.
+    ///
+    /// A request also takes a header and a status descriptor out of the queue.
+    fn max_segments_per_request(&self) -> usize {
+        self.features.max_segments_per_request(
+            self.config_manager.seg_max(),
+            Self::QUEUE_SIZE as usize - 2,
+        )
+    }
 
     /// Creates and inits the device.
     fn init(mut device_transport: DeviceTransport) -> Result<Arc<Self>, VirtioDeviceError> {

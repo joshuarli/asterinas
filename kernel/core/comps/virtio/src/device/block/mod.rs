@@ -31,13 +31,28 @@ bitflags! {
         const DISCARD       = 1 << 13;
         const WRITE_ZEROES  = 1 << 14;
 
-        const ALL_SUPPORTED = Self::BLK_SIZE.bits() | Self::FLUSH.bits();
+        const ALL_SUPPORTED = Self::BLK_SIZE.bits() | Self::FLUSH.bits() | Self::SEG_MAX.bits();
     }
 }
 
 impl BlockFeatures {
     pub(super) fn negotiated_with_device(device_features: u64) -> Self {
         BlockFeatures::from_bits_truncate(device_features) & Self::ALL_SUPPORTED
+    }
+
+    /// Returns how many data segments one request may carry.
+    ///
+    /// A device that does not offer `VIRTIO_BLK_F_SEG_MAX` accepts one data segment per request,
+    /// and Firecracker rejects a request with more.
+    ///
+    /// Reference:
+    /// <https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html#x1-2790004>
+    pub(super) fn max_segments_per_request(self, seg_max: u32, queue_limit: usize) -> usize {
+        if self.contains(Self::SEG_MAX) {
+            (seg_max as usize).clamp(1, queue_limit)
+        } else {
+            1
+        }
     }
 }
 
@@ -183,6 +198,11 @@ impl ConfigManager<VirtioBlockConfig> {
         blk_config
     }
 
+    pub(self) fn seg_max(&self) -> u32 {
+        self.read_once::<u32>(offset_of!(VirtioBlockConfig, seg_max))
+            .unwrap()
+    }
+
     pub(self) fn block_size(&self) -> usize {
         self.read_once::<u32>(offset_of!(VirtioBlockConfig, blk_size))
             .unwrap() as usize
@@ -197,5 +217,38 @@ impl ConfigManager<VirtioBlockConfig> {
             .unwrap() as usize;
 
         (cap_high << 32) | cap_low
+    }
+}
+
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::ktest;
+
+    use super::BlockFeatures;
+
+    #[ktest]
+    fn a_device_without_seg_max_takes_one_segment_per_request() {
+        let features = BlockFeatures::FLUSH | BlockFeatures::BLK_SIZE;
+
+        assert_eq!(features.max_segments_per_request(126, 62), 1);
+        assert_eq!(features.max_segments_per_request(0, 62), 1);
+    }
+
+    #[ktest]
+    fn a_device_with_seg_max_is_limited_by_it_and_by_the_queue() {
+        let features = BlockFeatures::FLUSH | BlockFeatures::SEG_MAX;
+
+        assert_eq!(features.max_segments_per_request(8, 62), 8);
+        assert_eq!(features.max_segments_per_request(126, 62), 62);
+        assert_eq!(features.max_segments_per_request(0, 62), 1);
+    }
+
+    #[ktest]
+    fn seg_max_is_negotiated_only_when_the_device_offers_it() {
+        let offered = BlockFeatures::SEG_MAX.bits() | BlockFeatures::FLUSH.bits();
+        let not_offered = BlockFeatures::FLUSH.bits();
+
+        assert!(BlockFeatures::negotiated_with_device(offered).contains(BlockFeatures::SEG_MAX));
+        assert!(!BlockFeatures::negotiated_with_device(not_offered).contains(BlockFeatures::SEG_MAX));
     }
 }
