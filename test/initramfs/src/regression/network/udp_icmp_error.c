@@ -238,6 +238,21 @@ FN_TEST(received_icmp_error_is_matched_to_the_original_udp_socket)
 	packet.icmp.checksum = 0;
 	packet.icmp.checksum = checksum(&packet.icmp, packet_len - sizeof(packet.outer));
 	struct pollfd event = { .fd = sender, .events = POLLIN };
+	packet.icmp.type = ICMP_DEST_UNREACH;
+	packet.icmp.code = 16;
+	packet.icmp.checksum = 0;
+	packet.icmp.checksum = checksum(&packet.icmp, packet_len - sizeof(packet.outer));
+	TEST_RES(sendto(raw, &packet, packet_len, 0, (struct sockaddr *)&target, sizeof(target)), _ret == (ssize_t)packet_len);
+	TEST_RES(poll(&event, 1, 100), _ret == 0);
+	packet.icmp.type = ICMP_TIME_EXCEEDED;
+	packet.icmp.code = ICMP_EXC_FRAGTIME;
+	packet.icmp.checksum = 0;
+	packet.icmp.checksum = checksum(&packet.icmp, packet_len - sizeof(packet.outer));
+	TEST_RES(sendto(raw, &packet, packet_len, 0, (struct sockaddr *)&target, sizeof(target)), _ret == (ssize_t)packet_len);
+	TEST_RES(poll(&event, 1, 100), _ret == 0);
+	packet.icmp.code = ICMP_EXC_TTL;
+	packet.icmp.checksum = 0;
+	packet.icmp.checksum = checksum(&packet.icmp, packet_len - sizeof(packet.outer));
 	packet.icmp.checksum ^= 1;
 	TEST_RES(sendto(raw, &packet, packet_len, 0, (struct sockaddr *)&target, sizeof(target)), _ret == (ssize_t)packet_len);
 	TEST_RES(poll(&event, 1, 100), _ret == 0);
@@ -274,6 +289,24 @@ FN_TEST(received_icmp_error_is_matched_to_the_original_udp_socket)
 		TEST_RES(error.ee_origin, _ret == SO_EE_ORIGIN_ICMP);
 		TEST_RES(error.ee_type, _ret == ICMP_TIME_EXCEEDED);
 		TEST_RES(error.ee_code, _ret == ICMP_EXC_TTL);
+	}
+	packet.icmp.type = ICMP_PARAMETERPROB;
+	packet.icmp.code = 0;
+	((unsigned char *)&packet.icmp)[4] = 17;
+	packet.icmp.checksum = 0;
+	packet.icmp.checksum = checksum(&packet.icmp, packet_len - sizeof(packet.outer));
+	TEST_RES(sendto(raw, &packet, packet_len, 0, (struct sockaddr *)&target, sizeof(target)), _ret == (ssize_t)packet_len);
+	TEST_RES(poll(&event, 1, 2000), _ret == 1 && (event.revents & POLLERR));
+	msg.msg_controllen = sizeof(control.data);
+	msg.msg_namelen = sizeof(quoted_destination);
+	TEST_RES(recvmsg(sender, &msg, MSG_ERRQUEUE), _ret == 5);
+	cmsg = CMSG_FIRSTHDR(&msg);
+	TEST_RES(cmsg, _ret && _ret->cmsg_level == IPPROTO_IP && _ret->cmsg_type == IP_RECVERR);
+	if (cmsg && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct sock_extended_err))) {
+		struct sock_extended_err error;
+		memcpy(&error, CMSG_DATA(cmsg), sizeof(error));
+		TEST_RES(error.ee_errno, _ret == EPROTO);
+		TEST_RES(error.ee_info, _ret == 17);
 	}
 	TEST_SUCC(close(raw));
 	TEST_SUCC(close(sender));
