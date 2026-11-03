@@ -996,6 +996,10 @@ impl SetSocketLevelOption for (&State, &TcpOptionSet, &SocketTimeouts) {
 }
 
 impl SetIpLevelOption for State {
+    fn tos_value(&self, requested: u8, old: u8) -> u8 {
+        (requested & !super::options::INET_ECN_MASK) | (old & super::options::INET_ECN_MASK)
+    }
+
     fn set_hdrincl(&self, _hdrincl: bool) -> Result<()> {
         return_errno_with_message!(
             Errno::ENOPROTOOPT,

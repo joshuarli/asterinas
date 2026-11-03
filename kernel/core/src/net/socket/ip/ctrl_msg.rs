@@ -15,6 +15,7 @@ use crate::{
 /// <https://www.kernel.org/doc/Documentation/networking/timestamping.txt>.
 #[derive(Debug)]
 pub(crate) enum IpControlMessage {
+    TypeOfService(u8),
     /// `IP_PKTINFO`: the interface and addresses a datagram arrived on.
     PacketInfo { ifindex: i32, local: [u8; 4], destination: [u8; 4] },
     /// `SCM_TIMESTAMP`: the arrival time as a `timeval`.
@@ -31,6 +32,7 @@ pub(crate) enum IpControlMessage {
 
 const SOL_IP_PKTINFO: i32 = 8;
 const SOL_IP_TTL: i32 = 2;
+const SOL_IP_TOS: i32 = 1;
 const SOL_IP_RECVERR: i32 = 11;
 const SCM_TIMESTAMP: i32 = 29;
 const SCM_TIMESTAMPNS: i32 = 35;
@@ -80,6 +82,7 @@ struct SockExtendedErrWithOffender {
 impl IpControlMessage {
     pub(crate) fn write_to(&self, writer: &mut VmWriter) -> Result<(CControlHeader, RecvFlags)> {
         match self {
+            Self::TypeOfService(tos) => write_payload(writer, CSocketOptionLevel::SOL_IP, SOL_IP_TOS, tos),
             Self::TimeToLive(ttl) => write_payload(
                 writer,
                 CSocketOptionLevel::SOL_IP,

@@ -335,7 +335,7 @@ impl<E: Ext> PollContext<'_, E> {
         // Parse the UDP header. Ignore the packet if the header is ill-formed.
         let (packet, udp_repr) = udp::parse(packet, &ip_repr.inner, verify_checksum)?;
 
-        if !self.process_udp(&ip_repr.inner, &udp_repr, packet.reader().into()) {
+        if !self.process_udp(&ip_repr.inner, &udp_repr, packet.reader().into(), ip_repr.tos) {
             return self.generate_icmp_unreachable(
                 phy,
                 &ip_repr.inner,
@@ -352,6 +352,7 @@ impl<E: Ext> PollContext<'_, E> {
         ip_repr: &IpRepr,
         udp_repr: &UdpRepr,
         udp_payload: PacketSlice<'_>,
+        tos: u8,
     ) -> bool {
         let mut processed = false;
         let is_unicast = self.iface.context().is_unicast(ip_repr.dst_addr());
@@ -365,6 +366,7 @@ impl<E: Ext> PollContext<'_, E> {
                 ip_repr,
                 udp_repr,
                 udp_payload.clone(),
+                tos,
             );
             if processed && is_unicast {
                 break;
@@ -470,12 +472,13 @@ impl<E: Ext> PollContext<'_, E> {
         ip_repr: &IpRepr,
         udp_repr: &UdpRepr,
         payload: &[u8],
+        tos: u8,
     ) -> Option<TxPacketWithDst> {
         let checksum_caps = self.iface.context().checksum_caps();
 
         let packet = Self::copy_payload(phy, payload)?;
         let packet = udp::emit(packet, ip_repr, udp_repr, checksum_caps.udp.tx());
-        let packet = ip::emit(packet, ip_repr, checksum_caps.ipv4.tx());
+        let packet = ip::emit_with_tos(packet, ip_repr, checksum_caps.ipv4.tx(), tos);
 
         let mut dst_addr = ip_repr.dst_addr();
         if !self.iface.context().is_unicast(dst_addr) {
@@ -650,13 +653,13 @@ impl<E: Ext> PollContext<'_, E> {
             let mut deferred = None;
 
             let (cx, pending, ipv4_cidrs) = self.iface.inner_mut();
-            socket.dispatch(cx, |cx, ip_repr, udp_repr, udp_payload| {
+            socket.dispatch(cx, |cx, ip_repr, udp_repr, udp_payload, tos| {
                 let iface = PollableIfaceMut::new(cx, pending, ipv4_cidrs);
                 let mut this = PollContext::new(iface, self.sockets, &mut actions);
 
                 let is_broadcast = this.iface.context().is_broadcast(&ip_repr.dst_addr());
                 if is_broadcast || !this.iface.is_unicast_local(ip_repr.dst_addr()) {
-                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload);
+                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos);
                     if !is_broadcast {
                         if let Some(packet) = tx_packet.as_mut() {
                             packet.failure = Some((
@@ -669,7 +672,7 @@ impl<E: Ext> PollContext<'_, E> {
                 }
 
                 if !socket.can_process(udp_repr.dst_port) {
-                    let processed = this.process_udp(ip_repr, udp_repr, PacketSlice::from(udp_payload));
+                    let processed = this.process_udp(ip_repr, udp_repr, PacketSlice::from(udp_payload), tos);
                     if !processed && !is_broadcast {
                         socket.report_error(UdpError {
                             destination: smoltcp::wire::IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port),
@@ -689,11 +692,11 @@ impl<E: Ext> PollContext<'_, E> {
 
                 // We cannot call `process_udp` now because it may cause deadlocks. We will copy
                 // the payload and call `process_udp` after releasing the socket lock.
-                deferred = Some((ip_repr.clone(), *udp_repr, udp_payload.to_vec(), is_broadcast));
+                deferred = Some((ip_repr.clone(), *udp_repr, udp_payload.to_vec(), is_broadcast, tos));
             });
 
-            if let Some((ip_repr, udp_repr, payload, is_broadcast)) = deferred {
-                if !self.process_udp(&ip_repr, &udp_repr, PacketSlice::from(payload.as_slice())) && !is_broadcast {
+            if let Some((ip_repr, udp_repr, payload, is_broadcast, tos)) = deferred {
+                if !self.process_udp(&ip_repr, &udp_repr, PacketSlice::from(payload.as_slice()), tos) && !is_broadcast {
                     socket.report_error(UdpError {
                         destination: smoltcp::wire::IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port),
                         payload,

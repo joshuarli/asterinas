@@ -66,6 +66,7 @@ fn do_parse_v4(
     let repr = IpReprWithLen {
         inner: IpRepr::Ipv4(inner),
         header_len,
+        tos: header.dscp_ecn.0,
     };
     Some((pkt.peel(header_len), repr))
 }
@@ -93,6 +94,7 @@ fn do_parse_v6(
     let repr = IpReprWithLen {
         inner: IpRepr::Ipv6(inner),
         header_len: size_of::<HeaderV6>(),
+        tos: 0,
     };
     Some((pkt.peel(size_of::<HeaderV6>()), repr))
 }
@@ -102,8 +104,17 @@ pub(in crate::iface) fn emit(
     ip_repr: &IpRepr,
     csum: bool,
 ) -> TxPacket<NetworkLayer> {
+    emit_with_tos(pkt, ip_repr, csum, 0)
+}
+
+pub(in crate::iface) fn emit_with_tos(
+    pkt: TxPacket<TransportLayer>,
+    ip_repr: &IpRepr,
+    csum: bool,
+    tos: u8,
+) -> TxPacket<NetworkLayer> {
     match ip_repr {
-        IpRepr::Ipv4(ipv4_repr) => emit_v4(pkt, ipv4_repr, csum),
+        IpRepr::Ipv4(ipv4_repr) => emit_v4(pkt, ipv4_repr, csum, tos),
         IpRepr::Ipv6(ipv6_repr) => emit_v6(pkt, ipv6_repr),
     }
 }
@@ -112,12 +123,13 @@ fn emit_v4(
     pkt: TxPacket<TransportLayer>,
     ipv4_repr: &Ipv4Repr,
     csum: bool,
+    tos: u8,
 ) -> TxPacket<NetworkLayer> {
     debug_assert_eq!(ipv4_repr.payload_len, pkt.len());
 
     let mut header = HeaderV4 {
         ver_ihl: VersionAndIhl::new(Version::V4, size_of::<HeaderV4>()),
-        dscp_ecn: DscpAndEcn::new(Dscp::Cs0, Ecn::NotEct),
+        dscp_ecn: DscpAndEcn(tos),
         totlen: ((ipv4_repr.payload_len + size_of::<HeaderV4>()) as u16).into(),
         // If necessary, we should fill the identification field.
         ident: 0u16.into(),
@@ -156,6 +168,7 @@ fn emit_v6(pkt: TxPacket<TransportLayer>, ipv6_repr: &Ipv6Repr) -> TxPacket<Netw
 pub(in crate::iface) struct IpReprWithLen {
     pub inner: IpRepr,
     pub header_len: usize,
+    pub tos: u8,
 }
 
 #[repr(C)]

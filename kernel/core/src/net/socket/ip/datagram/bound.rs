@@ -24,6 +24,7 @@ pub(super) struct ReceivedMeta {
     pub(super) local_address: Option<IpAddress>,
     pub(super) arrived_at: Duration,
     pub(super) ttl: u8,
+    pub(super) tos: u8,
 }
 
 pub(super) struct BoundDatagram {
@@ -71,7 +72,7 @@ impl BoundDatagram {
     ) -> Result<(RecvOutput, ReceivedMeta)> {
         let result = self.bound_socket.recv(
             flags.receive_behavior(),
-            |packet, udp_metadata, arrived_at_ns, ttl| {
+            |packet, udp_metadata, arrived_at_ns, ttl, tos| {
                 let message_len = packet.len();
                 let copied_res = writer
                     .write(&mut VmReader::from(packet))
@@ -81,6 +82,7 @@ impl BoundDatagram {
                     local_address: udp_metadata.local_address,
                     arrived_at: Duration::from_nanos(arrived_at_ns),
                     ttl,
+                    tos,
                 };
                 (copied_res, meta, message_len)
             },
@@ -107,12 +109,13 @@ impl BoundDatagram {
         reader: &mut dyn MultiRead,
         remote: &IpEndpoint,
         tx_tag: u32,
+        tos: u8,
     ) -> Result<usize> {
         let mut meta = aster_bigtcp::socket::UdpMetadata::from(*remote);
         meta.meta.id = tx_tag;
         let result = self
             .bound_socket
-            .send(reader.sum_lens(), meta, |socket_buffer| {
+            .send(reader.sum_lens(), meta, tos, |socket_buffer| {
                 // FIXME: If copy failed, we should not send any packet.
                 // But current smoltcp API seems not to support this behavior.
                 reader
@@ -174,7 +177,7 @@ impl datagram_common::Bound for BoundDatagram {
         remote: &Self::Endpoint,
         _flags: SendFlags,
     ) -> Result<usize> {
-        self.try_send_tagged(reader, remote, 0)
+        self.try_send_tagged(reader, remote, 0, 0)
     }
 
     fn check_io_events(&self) -> IoEvents {

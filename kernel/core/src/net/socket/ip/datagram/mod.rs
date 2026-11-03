@@ -139,6 +139,9 @@ impl DatagramSocket {
         if options.ip.recvttl() {
             messages.push(ControlMessage::Ip(IpControlMessage::TimeToLive(meta.ttl)));
         }
+        if options.ip.recvtos() {
+            messages.push(ControlMessage::Ip(IpControlMessage::TypeOfService(meta.tos)));
+        }
 
         if options.socket.recv_timestamp_ns() {
             messages.push(ControlMessage::Ip(IpControlMessage::TimestampNs(
@@ -240,6 +243,7 @@ impl DatagramSocket {
             return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the IPv4 length limit");
         }
         let tx_tag = self.next_tx_tag();
+        let tos = self.options.read().ip.tos();
         let (sent_bytes, iface_to_poll) = select_remote_and_bind(
             &self.inner,
             remote,
@@ -253,7 +257,7 @@ impl DatagramSocket {
                 self.bind_ephemeral(remote_endpoint)
             },
             |bound_datagram, remote_endpoint| {
-                let sent_bytes = bound_datagram.try_send_tagged(reader, remote_endpoint, tx_tag)?;
+                let sent_bytes = bound_datagram.try_send_tagged(reader, remote_endpoint, tx_tag, tos)?;
                 let iface_to_poll = bound_datagram.iface().clone();
                 Ok((sent_bytes, iface_to_poll))
             },
