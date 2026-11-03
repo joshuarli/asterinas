@@ -54,6 +54,16 @@ pub(crate) enum UserFairPolicy {
     Idle,
 }
 
+impl UserFairPolicy {
+    pub(crate) fn linux_policy(self) -> LinuxSchedPolicy {
+        match self {
+            Self::Normal => LinuxSchedPolicy::Normal,
+            Self::Batch => LinuxSchedPolicy::Batch,
+            Self::Idle => LinuxSchedPolicy::Idle,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct UserSchedAttr {
     pub(crate) fair_policy: UserFairPolicy,

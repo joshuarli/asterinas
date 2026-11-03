@@ -170,11 +170,7 @@ impl LinuxSchedAttr {
             || self.sched_policy == LinuxSchedPolicy::Idle as u32;
 
         if is_fair {
-            self.sched_policy = match user.fair_policy {
-                UserFairPolicy::Normal => LinuxSchedPolicy::Normal,
-                UserFairPolicy::Batch => LinuxSchedPolicy::Batch,
-                UserFairPolicy::Idle => LinuxSchedPolicy::Idle,
-            } as u32;
+            self.sched_policy = user.fair_policy.linux_policy() as u32;
             if user.fair_policy == UserFairPolicy::Idle {
                 self.sched_nice = user.idle_nice.value().get().into();
             }

@@ -5,7 +5,9 @@
 #include <linux/sched.h>
 #include <linux/sched/types.h>
 #include <sched.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -30,10 +32,28 @@ static int sched_getattr(pid_t pid, struct sched_attr *attr, unsigned int size,
 static struct sched_param param;
 static struct sched_attr attr;
 
+static long proc_stat_field(int field)
+{
+	char buf[4096];
+	FILE *file = fopen("/proc/self/stat", "r");
+	if (!file || !fgets(buf, sizeof(buf), file))
+		return -1;
+	fclose(file);
+	char *end = strrchr(buf, ')');
+	if (!end)
+		return -1;
+	char *save;
+	char *token = strtok_r(end + 2, " ", &save);
+	for (int current = 3; token && current < field; current++)
+		token = strtok_r(NULL, " ", &save);
+	return token ? strtol(token, NULL, 10) : -1;
+}
+
 FN_TEST(batch_policy_is_reported_as_set)
 {
 	TEST_SUCC(sched_setscheduler(0, SCHED_BATCH, &param));
 	TEST_RES(sched_getscheduler(0), _ret == SCHED_BATCH);
+	TEST_RES(proc_stat_field(41), _ret == SCHED_BATCH);
 
 	TEST_RES(sched_getattr(0, &attr, sizeof(attr), 0),
 		 attr.sched_policy == SCHED_BATCH && attr.sched_flags == 0 &&
@@ -124,6 +144,8 @@ FN_TEST(reset_on_fork_is_reported_as_set)
 {
 	TEST_SUCC(sched_setscheduler(0, SCHED_IDLE | SCHED_RESET_ON_FORK,
 				     &param));
+	TEST_RES(proc_stat_field(41), _ret == SCHED_IDLE);
+	TEST_RES(proc_stat_field(18), _ret == 20 + getpriority(PRIO_PROCESS, 0));
 	TEST_RES(sched_getscheduler(0),
 		 _ret == (SCHED_IDLE | SCHED_RESET_ON_FORK));
 

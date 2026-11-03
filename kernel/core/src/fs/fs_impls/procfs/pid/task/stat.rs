@@ -19,7 +19,7 @@ use crate::{
         posix_thread::{AsPosixThread, SleepingState},
         signal::{HandlePendingSignal, sig_action::SigAction, sig_mask::SigMask},
     },
-    sched::{LinuxSchedPolicy, RealTimePriority, SchedPolicy},
+    sched::{LinuxSchedPolicy, RealTimePriority, SchedPolicy, UserFairPolicy},
     thread::Thread,
     time::user_clock_ticks,
     vm::vmar::RssType,
@@ -352,7 +352,7 @@ fn sched_values(thread: &Thread) -> (i32, u8, i32) {
     const RT_PRIORITY_LIMIT: u8 = MAX_RT_PRIORITY + 1;
     const NICE_TO_PRIORITY_OFFSET: i32 = 20;
 
-    let policy = thread.sched_attr().policy();
+    let (policy, user) = thread.sched_attr().user_policy();
 
     let (priority, rt_priority) = match policy {
         SchedPolicy::Stop => (-i32::from(MAX_RT_PRIORITY) - 1, MAX_RT_PRIORITY),
@@ -368,10 +368,16 @@ fn sched_values(thread: &Thread) -> (i32, u8, i32) {
             let rt_priority = RT_PRIORITY_LIMIT - rt_prio.get();
             (-i32::from(rt_priority) - 1, rt_priority)
         }
-        SchedPolicy::Fair(nice) => (NICE_TO_PRIORITY_OFFSET + nice.value().get() as i32, 0),
+        SchedPolicy::Fair(nice) => {
+            let nice = if user.fair_policy == UserFairPolicy::Idle { user.idle_nice } else { nice };
+            (NICE_TO_PRIORITY_OFFSET + nice.value().get() as i32, 0)
+        }
         SchedPolicy::Idle => (NICE_TO_PRIORITY_OFFSET, 0),
     };
-    let linux_policy = LinuxSchedPolicy::from(policy);
+    let linux_policy = match policy {
+        SchedPolicy::Fair(_) => user.fair_policy.linux_policy(),
+        _ => LinuxSchedPolicy::from(policy),
+    };
 
     (priority, rt_priority, linux_policy as i32)
 }
