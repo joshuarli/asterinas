@@ -41,6 +41,44 @@ mod qemu_isa_debug {
     }
 }
 
+mod qemu_acpi {
+    //! The ACPI power management registers that QEMU's q35 machine provides.
+    //!
+    //! Reference: <https://elixir.bootlin.com/qemu/v10.1.2/source/hw/acpi/core.c>
+
+    use crate::arch::device::io_port::PortWrite;
+
+    const PM1A_CONTROL_PORT: u16 = 0x604;
+    const SLEEP_ENABLE_SOFT_OFF: u16 = 1 << 13;
+
+    pub(super) fn try_power_off() {
+        // SAFETY: Writing the soft-off request to the PM1a control register of QEMU powers the
+        // machine off. On other platforms, this port is either unassigned or part of a device
+        // that treats the write as a request to leave the running state; the system is being
+        // shut down, so no kernel memory is at stake.
+        unsafe { PortWrite::write_to_port(PM1A_CONTROL_PORT, SLEEP_ENABLE_SOFT_OFF) };
+    }
+}
+
+mod keyboard_controller {
+    //! The reset line of the legacy keyboard controller.
+    //!
+    //! Firecracker has no ACPI power management. It ends the VM, and exits, when the guest asks the
+    //! emulated i8042 controller to reset the CPU.
+    //!
+    //! Reference: <https://github.com/firecracker-microvm/firecracker/blob/v1.17.0/src/vmm/src/devices/legacy/i8042.rs>
+
+    use crate::arch::device::io_port::PortWrite;
+
+    const COMMAND_PORT: u16 = 0x64;
+    const COMMAND_RESET_CPU: u8 = 0xFE;
+
+    pub(super) fn try_reset() {
+        // SAFETY: Resetting the CPU does not touch kernel memory; the system is being shut down.
+        unsafe { PortWrite::write_to_port(COMMAND_PORT, COMMAND_RESET_CPU) };
+    }
+}
+
 pub(super) fn init() {
     use super::cpu::cpuid;
 
@@ -58,10 +96,18 @@ pub(super) fn init() {
 
 /// Attempts to power off the system using an architecture-specific mechanism.
 ///
-/// On x86, this function attempts to power off the system through QEMU's ISA debug-exit device if
-/// QEMU was detected during initialization. Otherwise, it does nothing and returns.
+/// On x86, this function first tries QEMU's ISA debug-exit device if QEMU was detected during
+/// initialization, so that the exit code reaches QEMU. A hypervisor that identifies itself as KVM
+/// or QEMU then gets the ACPI soft-off request of the q35 machine and, for VMMs without ACPI such
+/// as Firecracker, the reset command of the keyboard controller, which ends their VM. Otherwise,
+/// it does nothing and returns.
 pub fn try_poweroff(code: crate::power::ExitCode) {
     qemu_isa_debug::try_exit_qemu(code);
+
+    if super::cpu::cpuid::query_if_running_in_qemu() {
+        qemu_acpi::try_power_off();
+        keyboard_controller::try_reset();
+    }
 }
 
 /// Attempts to restart the system using an architecture-specific mechanism.
