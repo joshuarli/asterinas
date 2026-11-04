@@ -8,7 +8,8 @@ use ostd::mm::VmIo;
 use super::RawSocketOption;
 use crate::{
     context::current_userspace,
-    net::socket::ip::options::{Hdrincl, IpTtl, Mtu, MtuDiscover, Pktinfo, Recverr, RecvTos, RecvTtl, Tos, Ttl},
+    net::socket::options::SocketOption,
+    net::socket::ip::options::{Hdrincl, IpOptions, IpTtl, Mtu, MtuDiscover, Pktinfo, Recverr, RecvTos, RecvTtl, Tos, Ttl},
     prelude::*,
 };
 
@@ -71,6 +72,7 @@ pub(crate) enum CIpOptionName {
 pub(crate) fn new_ip_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
     let name = CIpOptionName::try_from(name).map_err(|_| Errno::ENOPROTOOPT)?;
     match name {
+        CIpOptionName::OPTIONS => Ok(Box::new(IpOptions::new())),
         CIpOptionName::TOS => Ok(Box::new(Tos::new())),
         CIpOptionName::TTL => Ok(Box::new(Ttl::new())),
         CIpOptionName::HDRINCL => Ok(Box::new(Hdrincl::new())),
@@ -82,6 +84,24 @@ pub(crate) fn new_ip_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
         CIpOptionName::PKTINFO => Ok(Box::new(Pktinfo::new())),
         _ => return_errno_with_message!(Errno::ENOPROTOOPT, "unsupported ip level option"),
     }
+}
+
+impl RawSocketOption for IpOptions {
+    fn read_from_user(&mut self, addr: Vaddr, max_len: u32) -> Result<()> {
+        if max_len > 40 { return_errno_with_message!(Errno::EINVAL, "IPv4 options exceed 40 bytes"); }
+        let mut bytes = vec![0; max_len as usize];
+        if !bytes.is_empty() { current_userspace!().read_bytes(addr, &mut bytes)?; }
+        self.set(bytes);
+        Ok(())
+    }
+    fn write_to_user(&self, addr: Vaddr, max_len: &mut u32) -> Result<usize> {
+        let bytes = self.get().unwrap();
+        let len = bytes.len().min(*max_len as usize);
+        if len != 0 { current_userspace!().write_bytes(addr, &bytes[..len])?; }
+        Ok(len)
+    }
+    fn as_sock_option_mut(&mut self) -> &mut dyn SocketOption { self }
+    fn as_sock_option(&self) -> &dyn SocketOption { self }
 }
 
 trait ReadIpOption: Sized {

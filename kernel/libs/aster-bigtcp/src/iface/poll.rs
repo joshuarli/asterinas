@@ -29,7 +29,7 @@ use crate::{
     ext::Ext,
     iface::poll_iface::IsUnicast,
     packet::{ApplicationLayer, FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
-    socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin, UdpFragmentation, UdpNextHop, UdpSocketBg},
+    socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin, UdpFragmentation, UdpIpv4Options, UdpNextHop, UdpSocketBg},
     socket_table::{ConnectionKey, ListenerKey, SocketTable, hash_local_remote},
 };
 
@@ -542,16 +542,28 @@ impl<E: Ext> PollContext<'_, E> {
         tos: u8,
         next_hop: UdpNextHop,
         fragmentation: UdpFragmentation,
+        ipv4_options: Option<&UdpIpv4Options>,
     ) -> Option<TxPacketWithDst> {
         let checksum_caps = self.iface.context().checksum_caps();
 
         let packet = Self::copy_payload(phy, payload)?;
-        let packet = udp::emit(packet, ip_repr, udp_repr,
-            checksum_caps.udp.tx() || matches!(fragmentation, UdpFragmentation::Allow(_)));
-        let packet = ip::emit_with_tos(packet, ip_repr, checksum_caps.ipv4.tx(), tos,
-            matches!(fragmentation, UdpFragmentation::DontFragment));
-
+        let mut checksum_ip = ip_repr.clone();
+        if let (IpRepr::Ipv4(ip), Some(options)) = (&mut checksum_ip, ipv4_options)
+            && let Some(first_hop) = options.first_hop()
+        { ip.dst_addr = first_hop; }
+        let packet = udp::emit(packet, &checksum_ip, udp_repr,
+            checksum_caps.udp.tx() || ipv4_options.is_some() || matches!(fragmentation, UdpFragmentation::Allow(_)));
+        let dont_fragment = matches!(fragmentation, UdpFragmentation::DontFragment);
         let mut dst_addr = ip_repr.dst_addr();
+        let packet = match (ip_repr, ipv4_options) {
+            (IpRepr::Ipv4(ip), Some(options)) => {
+                let dst = options.first_hop().unwrap_or(ip.dst_addr);
+                dst_addr = dst.into();
+                ip::emit_v4_with_options(packet, ip, dst, tos, dont_fragment, options.bytes())
+            }
+            (_, None) => ip::emit_with_tos(packet, ip_repr, checksum_caps.ipv4.tx(), tos, dont_fragment),
+            _ => return None,
+        };
         if !self.iface.context().is_unicast(dst_addr) {
             // Force the link layer to emit a broadcast link-layer address.
             dst_addr = IpAddress::Ipv4(Ipv4Address::BROADCAST);
@@ -757,17 +769,24 @@ impl<E: Ext> PollContext<'_, E> {
             let mut deferred = None;
 
             let (cx, pending, fragments, reassembly, ipv4_cidrs) = self.iface.inner_mut();
-            socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation| {
+            socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation, ipv4_options| {
                 let iface = PollableIfaceMut::new(cx, pending, fragments, reassembly, ipv4_cidrs);
                 let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.udp_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, &mut actions);
 
+                if ipv4_options.is_some() {
+                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation, ipv4_options);
+                    if let Some(packet) = tx_packet.as_mut() {
+                        packet.failure = Some((socket.failure_reporter(), smoltcp::wire::IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port)));
+                    }
+                    return;
+                }
                 let is_broadcast = this.iface.context().is_broadcast(&ip_repr.dst_addr());
                 if phy.is_loopback() && this.iface.is_unicast_local(ip_repr.dst_addr()) && !is_broadcast {
-                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation);
+                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation, None);
                     return;
                 }
                 if is_broadcast || !this.iface.is_unicast_local(ip_repr.dst_addr()) {
-                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation);
+                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation, None);
                     if !is_broadcast {
                         if let Some(packet) = tx_packet.as_mut() {
                             packet.failure = Some((

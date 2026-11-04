@@ -4,7 +4,7 @@ use core::time::Duration;
 
 use aster_bigtcp::{
     errors::udp::{RecvError, SendError},
-    socket::{UdpError, UdpErrorOrigin, UdpFragmentation, UdpNextHop},
+    socket::{UdpError, UdpErrorOrigin, UdpFragmentation, UdpIpv4Options, UdpNextHop},
     wire::{IpAddress, IpEndpoint},
 };
 
@@ -128,12 +128,13 @@ impl BoundDatagram {
         tos: u8,
         next_hop: UdpNextHop,
         fragmentation: UdpFragmentation,
+        ipv4_options: Option<UdpIpv4Options>,
     ) -> Result<usize> {
         let mut meta = aster_bigtcp::socket::UdpMetadata::from(*remote);
         meta.meta.id = tx_tag;
         let result = self
             .bound_socket
-            .send(reader.sum_lens(), meta, iface.index(), source, tos, next_hop, fragmentation, |socket_buffer| {
+            .send(reader.sum_lens(), meta, iface.index(), source, tos, next_hop, fragmentation, ipv4_options, |socket_buffer| {
                 reader
                     .read(&mut VmWriter::from(socket_buffer))
                     .map_err(Into::into)
@@ -195,7 +196,7 @@ impl datagram_common::Bound for BoundDatagram {
         let iface = lookup_iface(remote.addr)?;
         let local = self.local_endpoint();
         let source = if local.addr.is_unspecified() { get_ephemeral_endpoint_on(&iface, remote)?.addr } else { local.addr };
-        self.try_send_tagged(reader, remote, &iface, source, 0, 0, UdpNextHop::Routed, UdpFragmentation::DontFragment)
+        self.try_send_tagged(reader, remote, &iface, source, 0, 0, UdpNextHop::Routed, UdpFragmentation::DontFragment, None)
     }
 
     fn check_io_events(&self) -> IoEvents {

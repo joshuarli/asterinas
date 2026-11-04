@@ -5,7 +5,7 @@ use core::{
     time::Duration,
 };
 
-use aster_bigtcp::{iface::InterfaceType, socket::UdpErrorOrigin, wire::{IpAddress, IpEndpoint}};
+use aster_bigtcp::{iface::InterfaceType, socket::UdpErrorOrigin, wire::{IpAddress, IpEndpoint, Ipv4Address}};
 use bound::{BoundDatagram, ReceivedMeta};
 use unbound::{BindOptions, UnboundDatagram};
 
@@ -20,7 +20,7 @@ use crate::{
             Socket,
             ip::{
                 common::{get_ephemeral_endpoint_on, icmp_error_errno, map_unspecified_to_localhost},
-                options::{IpOptionSet, Mtu, MtuDiscover, PathMtuDiscovery, SetIpLevelOption},
+                options::{IpOptionSet, IpOptions, Mtu, MtuDiscover, PathMtuDiscovery, SetIpLevelOption},
             },
             new_udp_socket_common,
             options::{
@@ -71,6 +71,7 @@ struct OptionSet {
     device: BoundDevice,
     dont_route: bool,
     mtu_discover: PathMtuDiscovery,
+    packet_options: Option<PacketOptions>,
 }
 
 impl OptionSet {
@@ -83,7 +84,60 @@ impl OptionSet {
             device: BoundDevice::NONE,
             dont_route: false,
             mtu_discover: PathMtuDiscovery::Want,
+            packet_options: None,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PacketOptions {
+    bytes: Vec<u8>,
+    source_route: Option<usize>,
+}
+
+impl PacketOptions {
+    fn parse(input: &[u8]) -> Result<Option<Self>> {
+        if input.is_empty() { return Ok(None); }
+        if input.len() > 40 { return_errno_with_message!(Errno::EINVAL, "IPv4 options exceed 40 bytes"); }
+        let mut bytes = input.to_vec();
+        bytes.resize(bytes.len().next_multiple_of(4), 0);
+        let mut offset = 0;
+        let mut source_route = None;
+        while offset < bytes.len() {
+            match bytes[offset] {
+                0 => { bytes[offset..].fill(0); break; }
+                1 => offset += 1,
+                131 => {
+                    if source_route.is_some() || offset + 3 > bytes.len() {
+                        return_errno_with_message!(Errno::EINVAL, "invalid source route option");
+                    }
+                    let len = usize::from(bytes[offset + 1]);
+                    if len < 7 || (len - 3) % 4 != 0 || bytes[offset + 2] != 4 || offset + len > bytes.len() {
+                        return_errno_with_message!(Errno::EINVAL, "invalid source route option");
+                    }
+                    source_route = Some(offset);
+                    offset += len;
+                }
+                _ => return_errno_with_message!(Errno::EOPNOTSUPP, "unsupported IPv4 option"),
+            }
+        }
+        if source_route.is_some() { check_current_net_raw()?; }
+        Ok(Some(Self { bytes, source_route }))
+    }
+
+    fn first_hop(&self) -> Option<Ipv4Address> {
+        let offset = self.source_route? + 3;
+        Some(Ipv4Address::new(self.bytes[offset], self.bytes[offset + 1], self.bytes[offset + 2], self.bytes[offset + 3]))
+    }
+
+    fn wire_options(&self, destination: Ipv4Address) -> Option<aster_bigtcp::socket::UdpIpv4Options> {
+        let mut bytes = self.bytes.clone();
+        if let Some(offset) = self.source_route {
+            let len = usize::from(bytes[offset + 1]);
+            bytes.copy_within(offset + 7..offset + len, offset + 3);
+            bytes[offset + len - 4..offset + len].copy_from_slice(&destination.octets());
+        }
+        aster_bigtcp::socket::UdpIpv4Options::new(self.first_hop(), bytes)
     }
 }
 
@@ -257,10 +311,14 @@ impl DatagramSocket {
             return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the IPv4 length limit");
         }
         let tx_tag = self.next_tx_tag();
-        let (tos, dont_route, mtu_discovery) = {
+        let (tos, dont_route, mtu_discovery, packet_options, can_broadcast) = {
             let options = self.options.read();
-            (options.ip.tos(), options.dont_route || flags.contains(SendFlags::MSG_DONTROUTE), options.mtu_discover)
+            (options.ip.tos(), options.dont_route || flags.contains(SendFlags::MSG_DONTROUTE), options.mtu_discover, options.packet_options.clone(), options.socket.broadcast())
         };
+        let option_len = packet_options.as_ref().map_or(0, |options| options.bytes.len());
+        if reader.sum_lens() + option_len > IPV4_MAX_UDP_PAYLOAD {
+            return_errno_with_message!(Errno::EMSGSIZE, "IPv4 options and UDP datagram exceed the IPv4 length limit");
+        }
         let (sent_bytes, iface_to_poll) = select_remote_and_bind(
             &self.inner,
             remote,
@@ -275,20 +333,24 @@ impl DatagramSocket {
             },
             |bound_datagram, remote_endpoint| {
                 let remote_endpoint = map_unspecified_to_localhost(*remote_endpoint);
-                let iface = self.output_iface(&remote_endpoint, dont_route)?;
-                let path_mtu = iface.path_mtu(remote_endpoint.addr);
+                let route_endpoint = IpEndpoint::new(packet_options.as_ref().and_then(PacketOptions::first_hop).map_or(remote_endpoint.addr, IpAddress::Ipv4), remote_endpoint.port);
+                if !can_broadcast && is_broadcast_endpoint(&route_endpoint) {
+                    return_errno_with_message!(Errno::EACCES, "broadcast requires SO_BROADCAST");
+                }
+                let iface = self.output_iface(&route_endpoint, dont_route)?;
+                let path_mtu = iface.path_mtu(route_endpoint.addr);
                 let mtu = match mtu_discovery {
                     PathMtuDiscovery::Do | PathMtuDiscovery::Want => path_mtu.mtu,
                     _ => iface.mtu(),
                 };
                 if matches!(mtu_discovery, PathMtuDiscovery::Do | PathMtuDiscovery::Probe | PathMtuDiscovery::Interface)
-                    && reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > mtu
+                    && reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN + option_len > mtu
                 {
                     return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the path MTU");
                 }
                 let local = bound_datagram.local_endpoint();
                 let source = if local.addr.is_unspecified() || is_broadcast_endpoint(&local) {
-                    get_ephemeral_endpoint_on(&iface, &remote_endpoint)?.addr
+                    get_ephemeral_endpoint_on(&iface, &route_endpoint)?.addr
                 } else {
                     local.addr
                 };
@@ -296,10 +358,15 @@ impl DatagramSocket {
                 let fragmentation = match mtu_discovery {
                     PathMtuDiscovery::Dont => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu.mtu),
                     PathMtuDiscovery::Omit => aster_bigtcp::socket::UdpFragmentation::Allow(iface.mtu()),
-                    PathMtuDiscovery::Want if path_mtu.locked || reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > path_mtu.mtu => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu.mtu),
+                    PathMtuDiscovery::Want if path_mtu.locked || reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN + option_len > path_mtu.mtu => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu.mtu),
                     _ => aster_bigtcp::socket::UdpFragmentation::DontFragment,
                 };
-                let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos, next_hop, fragmentation)?;
+                let ipv4_options = match (&packet_options, remote_endpoint.addr) {
+                    (Some(options), IpAddress::Ipv4(destination)) => Some(options.wire_options(destination).ok_or_else(|| Error::from(Errno::EINVAL))?),
+                    (Some(_), _) => return_errno_with_message!(Errno::EAFNOSUPPORT, "IPv4 options require an IPv4 destination"),
+                    (None, _) => None,
+                };
+                let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos, next_hop, fragmentation, ipv4_options)?;
                 Ok((sent_bytes, iface))
             },
         )?;
@@ -437,9 +504,13 @@ impl Socket for DatagramSocket {
             );
         }
 
-        let dont_route = self.options.read().dont_route;
+        let (dont_route, first_hop) = {
+            let options = self.options.read();
+            (options.dont_route, options.packet_options.as_ref().and_then(PacketOptions::first_hop))
+        };
+        let route_endpoint = IpEndpoint::new(first_hop.map_or(endpoint.addr, IpAddress::Ipv4), endpoint.port);
         self.bind_ephemeral()?;
-        let iface = self.output_iface(&endpoint, dont_route)?;
+        let iface = self.output_iface(&route_endpoint, dont_route)?;
         let mut inner = self.inner.write();
         if let Inner::Bound(bound) = &mut *inner {
             let local = bound.local_endpoint().addr;
@@ -449,7 +520,7 @@ impl Socket for DatagramSocket {
                 return_errno_with_message!(Errno::EINVAL, "a loopback source cannot use a non-loopback route");
             }
             if local.is_unspecified() {
-                bound.set_connected_source(get_ephemeral_endpoint_on(&iface, &endpoint)?.addr);
+                bound.set_connected_source(get_ephemeral_endpoint_on(&iface, &route_endpoint)?.addr);
             }
         }
         inner.connect(&endpoint, &self.pollee)
@@ -541,10 +612,18 @@ impl Socket for DatagramSocket {
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
         sock_option_mut!(match option {
+            ip_options @ IpOptions => {
+                ip_options.set(self.options.read().packet_options.as_ref().map_or_else(Vec::new, |options| options.bytes.clone()));
+                return Ok(());
+            }
             ip_mtu @ Mtu => {
                 let remote = *self.inner.read().peer_addr().ok_or_else(|| Error::from(Errno::ENOTCONN))?;
-                let dont_route = self.options.read().dont_route;
-                let iface = self.output_iface(&remote, dont_route)?;
+                let (dont_route, first_hop) = {
+                    let options = self.options.read();
+                    (options.dont_route, options.packet_options.as_ref().and_then(PacketOptions::first_hop))
+                };
+                let route = IpEndpoint::new(first_hop.map_or(remote.addr, IpAddress::Ipv4), remote.port);
+                let iface = self.output_iface(&route, dont_route)?;
                 ip_mtu.set(iface.path_mtu(remote.addr).mtu as i32);
                 return Ok(());
             }
@@ -585,6 +664,11 @@ impl Socket for DatagramSocket {
 
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
         sock_option_ref!(match option {
+            ip_options @ IpOptions => {
+                let parsed = PacketOptions::parse(ip_options.get().unwrap())?;
+                self.options.write().packet_options = parsed;
+                return Ok(());
+            }
             ip_mtu_discover @ MtuDiscover => {
                 let mode = PathMtuDiscovery::try_from(*ip_mtu_discover.get().unwrap())?;
                 let inner = self.inner.read();

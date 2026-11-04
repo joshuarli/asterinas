@@ -157,7 +157,7 @@ where
     let header = reader.read_val::<HeaderV4>().ok()?;
     let header_len = header.ver_ihl.header_len();
     if header.ver_ihl.version() != Some(Version::V4)
-        || header_len != size_of::<HeaderV4>()
+        || header_len < size_of::<HeaderV4>() || header_len > 60 || header_len > pkt.len()
         || header.flags_frag.flags().intersects(Flags::DF | Flags::MF)
         || header.flags_frag.fragment_offset() != 0
         || usize::from(u16::from(header.totlen)) != pkt.len()
@@ -166,6 +166,8 @@ where
     }
     let fragment_len = mtu.checked_sub(header_len)? & !7;
     if fragment_len == 0 { return None; }
+    let mut options = vec![0; header_len - size_of::<HeaderV4>()];
+    reader.read(&mut VmWriter::from(options.as_mut_slice()));
     let mut payload = vec![0; pkt.len() - header_len];
     reader.read(&mut VmWriter::from(payload.as_mut_slice()));
     let mut fragments = Vec::new();
@@ -181,9 +183,14 @@ where
         fragment_header.flags_frag = FlagsAndFragmentOffset::new(flags, offset / 8);
         fragment_header.csum = 0;
         if csum {
-            fragment_header.csum = !Checksum::new().with_bytes(fragment_header.as_bytes()).finish();
+            fragment_header.csum = !Checksum::new().with_bytes(fragment_header.as_bytes()).with_bytes(&options).finish();
         }
-        fragments.push(builder.build().prepend_and_pack(&fragment_header));
+        let mut fragment = builder.build();
+        let mut writer = fragment.prepend_writer(header_len);
+        writer.write_val(&fragment_header).ok()?;
+        if writer.write(&mut VmReader::from(options.as_slice())) != options.len() { return None; }
+        drop(writer);
+        fragments.push(fragment.pack(header_len));
     }
     Some(fragments)
 }
@@ -231,6 +238,26 @@ fn do_parse_v4(
         reader.limit(header_len);
         if Checksum::new().with_reader(reader).finish() != u16::MAX {
             return None;
+        }
+    }
+
+    if header_len > size_of::<HeaderV4>() {
+        let mut options = vec![0; header_len - size_of::<HeaderV4>()];
+        let mut reader = pkt.reader();
+        reader.skip(size_of::<HeaderV4>());
+        reader.read(&mut VmWriter::from(options.as_mut_slice()));
+        let mut offset = 0;
+        while offset < options.len() {
+            match options[offset] {
+                0 => break,
+                1 => offset += 1,
+                131 | 137 => return None,
+                _ => {
+                    let len = usize::from(*options.get(offset + 1)?);
+                    if len < 2 || offset + len > options.len() { return None; }
+                    offset += len;
+                }
+            }
         }
     }
 
@@ -296,6 +323,35 @@ pub(in crate::iface) fn emit_with_tos(
         IpRepr::Ipv4(ipv4_repr) => emit_v4(pkt, ipv4_repr, csum, tos, dont_fragment),
         IpRepr::Ipv6(ipv6_repr) => emit_v6(pkt, ipv6_repr),
     }
+}
+
+pub(in crate::iface) fn emit_v4_with_options(
+    mut pkt: TxPacket<TransportLayer>,
+    ipv4_repr: &Ipv4Repr,
+    dst: smoltcp::wire::Ipv4Address,
+    tos: u8,
+    dont_fragment: bool,
+    options: &[u8],
+) -> TxPacket<NetworkLayer> {
+    let header_len = size_of::<HeaderV4>() + options.len();
+    let mut header = HeaderV4 {
+        ver_ihl: VersionAndIhl::new(Version::V4, header_len),
+        dscp_ecn: DscpAndEcn(tos),
+        totlen: ((ipv4_repr.payload_len + header_len) as u16).into(),
+        ident: if dont_fragment { 0 } else { NEXT_FRAGMENT_ID.fetch_add(1, Ordering::Relaxed) }.into(),
+        flags_frag: FlagsAndFragmentOffset::new(if dont_fragment { Flags::DF } else { Flags::empty() }, 0),
+        ttl: ipv4_repr.hop_limit,
+        proto: ipv4_repr.next_header.into(),
+        csum: 0,
+        src: ipv4_repr.src_addr.octets(),
+        dst: dst.octets(),
+    };
+    header.csum = !Checksum::new().with_bytes(header.as_bytes()).with_bytes(options).finish();
+    let mut writer = pkt.prepend_writer(header_len);
+    writer.write_val(&header).unwrap();
+    writer.write(&mut VmReader::from(options));
+    drop(writer);
+    pkt.pack(header_len)
 }
 
 fn emit_v4(
