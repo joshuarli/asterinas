@@ -21,6 +21,7 @@ use crate::{
 
 mod fs;
 mod kernel;
+mod net;
 mod vm;
 
 /// Represents the inode at `/proc/sys`.
@@ -37,6 +38,7 @@ impl SysDirOps {
     const STATIC_ENTRIES: &'static [StaticEntry] = &[
         ("fs", InodeType::Dir, FsDirOps::new_inode),
         ("kernel", InodeType::Dir, KernelDirOps::new_inode),
+        ("net", InodeType::Dir, net::NetDirOps::new_inode),
         ("vm", InodeType::Dir, VmDirOps::new_inode),
     ];
 }
