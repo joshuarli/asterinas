@@ -53,13 +53,14 @@ impl Ipv4Reassembly {
         let header = packet.reader().read_val::<HeaderV4>().ok()?;
         let flags = header.flags_frag.flags();
         let offset = header.flags_frag.fragment_offset() * 8;
-        if offset == 0 && !flags.contains(Flags::MF) { return Some(packet); }
-        if !accepts_destination(header.dst.into()) { return None; }
         let header_len = header.ver_ihl.header_len();
         let total_len = usize::from(u16::from(header.totlen));
-        if header_len < size_of::<HeaderV4>() || total_len < header_len || total_len > packet.len()
-            || flags.contains(Flags::DF) || flags.contains(Flags::R)
-        {
+        if header_len < size_of::<HeaderV4>() || total_len < header_len || total_len > packet.len() {
+            return None;
+        }
+        validate_input_options(&packet, header_len)?;
+        if offset == 0 && !flags.contains(Flags::MF) { return Some(packet); }
+        if !accepts_destination(header.dst.into()) || flags.contains(Flags::DF) || flags.contains(Flags::R) {
             return None;
         }
         let fragment_len = total_len - header_len;
@@ -142,6 +143,28 @@ impl Ipv4Reassembly {
         if header_written != header.len() || data_written != total { return None; }
         builder.build().to_rx_packet()
     }
+}
+
+fn validate_input_options(packet: &RxPacket<NetworkLayer>, header_len: usize) -> Option<()> {
+    if header_len == size_of::<HeaderV4>() { return Some(()); }
+    let mut options = vec![0; header_len - size_of::<HeaderV4>()];
+    let mut reader = packet.reader();
+    reader.skip(size_of::<HeaderV4>());
+    reader.read(&mut VmWriter::from(options.as_mut_slice()));
+    let mut offset = 0;
+    while offset < options.len() {
+        match options[offset] {
+            0 => break,
+            1 => offset += 1,
+            131 | 137 => return None,
+            _ => {
+                let len = usize::from(*options.get(offset + 1)?);
+                if len < 2 || offset + len > options.len() { return None; }
+                offset += len;
+            }
+        }
+    }
+    Some(())
 }
 
 pub(in crate::iface) fn fragment<F>(
@@ -241,25 +264,7 @@ fn do_parse_v4(
         }
     }
 
-    if header_len > size_of::<HeaderV4>() {
-        let mut options = vec![0; header_len - size_of::<HeaderV4>()];
-        let mut reader = pkt.reader();
-        reader.skip(size_of::<HeaderV4>());
-        reader.read(&mut VmWriter::from(options.as_mut_slice()));
-        let mut offset = 0;
-        while offset < options.len() {
-            match options[offset] {
-                0 => break,
-                1 => offset += 1,
-                131 | 137 => return None,
-                _ => {
-                    let len = usize::from(*options.get(offset + 1)?);
-                    if len < 2 || offset + len > options.len() { return None; }
-                    offset += len;
-                }
-            }
-        }
-    }
+    validate_input_options(&pkt, header_len)?;
 
     let inner = Ipv4Repr {
         src_addr: header.src.into(),
@@ -565,6 +570,33 @@ mod test {
             let header = packet.reader().read_val::<HeaderV4>().unwrap();
             assert_eq!(u16::from(header.ident), identifier);
         }
+    }
+
+    #[ktest]
+    fn source_route_on_a_later_fragment_is_rejected_before_reassembly() {
+        let original = fragmentable_packet();
+        let mut fragments = fragment(&original, 36, true, FreshTxPacket::alloc).unwrap().into_iter();
+        let first = fragments.next().unwrap().to_rx_packet().unwrap();
+        let last = fragments.next().unwrap();
+        let mut reader = last.reader();
+        let mut header = reader.read_val::<HeaderV4>().unwrap();
+        let mut payload = [0u8; 16];
+        reader.read(&mut VmWriter::from(payload.as_mut_slice()));
+        let options = [1, 131, 7, 4, 192, 0, 2, 9];
+        header.ver_ihl = VersionAndIhl::new(Version::V4, 28);
+        header.totlen = 44u16.into();
+        header.csum = 0;
+        header.csum = !Checksum::new().with_bytes(header.as_bytes()).with_bytes(&options).finish();
+        let mut builder = FreshTxPacket::<NetworkLayer>::alloc(44).unwrap().to_builder();
+        for bytes in [header.as_bytes(), options.as_slice(), payload.as_slice()] {
+            let written = builder.append_writer().write(&mut VmReader::from(bytes));
+            builder.commit(written);
+        }
+        let disallowed = builder.build().to_rx_packet().unwrap();
+        let mut reassembly = Ipv4Reassembly::new();
+        assert!(reassembly.receive(first, 0, true, |_| true).is_none());
+        assert!(reassembly.receive(disallowed, 0, true, |_| true).is_none());
+        assert!(reassembly.receive(last.to_rx_packet().unwrap(), 0, true, |_| true).is_some());
     }
 
     #[ktest]
