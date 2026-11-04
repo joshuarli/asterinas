@@ -639,10 +639,12 @@ impl<E: Ext> PollContext<'_, E> {
             (_, None) => ip::emit_with_tos(packet, ip_repr, checksum_caps.ipv4.tx(), tos, dont_fragment),
             _ => return None,
         };
-        if !self.iface.context().is_unicast(dst_addr) {
-            // Force the link layer to emit a broadcast link-layer address.
+        let next_hop = if !self.iface.context().is_unicast(dst_addr) {
             dst_addr = IpAddress::Ipv4(Ipv4Address::BROADCAST);
-        }
+            IpNextHop::Direct
+        } else {
+            next_hop
+        };
 
         Some(TxPacketWithDst { packet, dst_addr, next_hop, fragment_mtu: match fragmentation { UdpFragmentation::Allow(mtu) => Some(mtu), UdpFragmentation::DontFragment => None }, failure: None })
     }
