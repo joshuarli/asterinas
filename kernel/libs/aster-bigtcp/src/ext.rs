@@ -30,6 +30,6 @@ pub trait Ext: 'static {
     /// Schedules processing of an IP packet forwarded to an interface.
     fn wake_forwarded_ip(_ifindex: u32) {}
 
-    /// Resolves a TCP output route without taking an interface lock.
-    fn tcp_route(_destination: IpAddress, _mark: u32) -> Option<Result<(Arc<dyn Iface<Self>>, IpNextHop, PathMtuRoute), ()>> where Self: Sized { None }
+    /// Resolves an IP output route without taking an interface lock.
+    fn ip_route(_destination: IpAddress, _mark: u32) -> Option<Result<(Arc<dyn Iface<Self>>, IpNextHop, PathMtuRoute), ()>> where Self: Sized { None }
 }
