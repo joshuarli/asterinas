@@ -91,6 +91,15 @@ pub mod tcp {
         }
     }
 
+    /// A pending error caused by TCP reset.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ResetError {
+        /// The peer reset a connection after closing its sending half.
+        BrokenPipe,
+        /// The connection was reset.
+        ConnReset,
+    }
+
     /// An error returned by [`TcpConnection::send`].
     ///
     /// [`TcpConnection::send`]: crate::socket::TcpConnection::send
