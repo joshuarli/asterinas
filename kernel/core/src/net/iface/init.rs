@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use alloc::format;
 use core::slice::Iter;
 
 use aster_bigtcp::{
@@ -15,13 +16,10 @@ use crate::{net::iface::sched::PollScheduler, prelude::*};
 struct NetworkStack {
     ifaces: Vec<Arc<Iface>>,
     udp: Arc<UdpRegistry<super::ext::BigtcpExt>>,
+    devices: Vec<(String, Arc<Iface>)>,
 }
 
 static NETWORK: Once<NetworkStack> = Once::new();
-
-fn virtio_iface() -> Option<&'static Arc<Iface>> {
-    NETWORK.get().unwrap().ifaces.get(1)
-}
 
 pub(in crate::net) fn iter_all_ifaces() -> Iter<'static, Arc<Iface>> {
     NETWORK.get().unwrap().ifaces.iter()
@@ -31,29 +29,28 @@ pub(in crate::net) fn udp_registry() -> &'static Arc<UdpRegistry<super::ext::Big
     &NETWORK.get().unwrap().udp
 }
 
-// TODO: Support multiple network devices and avoid the hardcoded device name.
 const VIRTIO_DEVICE_NAME: &str = aster_virtio::device::network::DEVICE_NAME;
 
 pub(in crate::net) fn init() {
     NETWORK.call_once(|| {
         let udp = UdpRegistry::new();
-        let mut ifaces = Vec::with_capacity(2);
-
-        // Initialize loopback before virtio
-        // to ensure the loopback interface index is ahead of virtio.
+        let mut ifaces = Vec::new();
         ifaces.push(new_loopback(udp.clone()));
-
-        if let Some(iface_virtio) = new_virtio(udp.clone()) {
-            ifaces.push(iface_virtio);
+        let mut devices = Vec::new();
+        for (name, device) in aster_network::all_devices() {
+            if !name.starts_with(VIRTIO_DEVICE_NAME) { continue; }
+            let iface = new_virtio(device, devices.len(), udp.clone());
+            ifaces.push(iface.clone());
+            devices.push((name, iface));
         }
-
-        NetworkStack { ifaces, udp }
+        NetworkStack { ifaces, udp, devices }
     });
 
-    if let Some(iface_virtio) = virtio_iface() {
-        let callback = || iface_virtio.poll();
-        aster_network::register_recv_callback(VIRTIO_DEVICE_NAME, callback);
-        aster_network::register_send_callback(VIRTIO_DEVICE_NAME, callback);
+    for (name, iface) in &NETWORK.get().unwrap().devices {
+        let rx_iface = iface.clone();
+        let tx_iface = iface.clone();
+        aster_network::register_recv_callback(name, move || rx_iface.poll());
+        aster_network::register_send_callback(name, move || tx_iface.poll());
     }
 
     super::config::init();
@@ -109,10 +106,12 @@ fn new_loopback(udp: Arc<UdpRegistry<super::ext::BigtcpExt>>) -> Arc<Iface> {
     ) as Arc<Iface>
 }
 
-fn new_virtio(udp: Arc<UdpRegistry<super::ext::BigtcpExt>>) -> Option<Arc<Iface>> {
+fn new_virtio(
+    virtio_net: Arc<SpinLock<dyn AnyNetworkDevice, BottomHalfDisabled>>,
+    index: usize,
+    udp: Arc<UdpRegistry<super::ext::BigtcpExt>>,
+) -> Arc<Iface> {
     use aster_bigtcp::iface::EtherIface;
-
-    let virtio_net = aster_network::get_device(VIRTIO_DEVICE_NAME)?;
 
     let ether_addr = virtio_net.lock().mac_addr();
 
@@ -134,12 +133,12 @@ fn new_virtio(udp: Arc<UdpRegistry<super::ext::BigtcpExt>>) -> Option<Arc<Iface>
     // User space brings it up and configures it.
     let flags = InterfaceFlags::BROADCAST | InterfaceFlags::MULTICAST;
 
-    Some(EtherIface::new(
+    EtherIface::new(
         Wrapper(virtio_net),
         ether_addr,
-        InterfaceName::from_str_truncated("eth0"),
+        InterfaceName::from_str_truncated(&format!("eth{index}")),
         PollScheduler::new(),
         flags,
         udp,
-    ))
+    )
 }
