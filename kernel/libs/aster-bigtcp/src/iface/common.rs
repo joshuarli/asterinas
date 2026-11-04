@@ -234,14 +234,18 @@ impl<E: Ext> IfaceCommon<E> {
     }
 
     pub(super) fn set_ipv4_cidrs(&self, cidrs: &[Ipv4Cidr]) -> Result<(), AddressTableFull> {
-        self.interface.lock().set_ipv4_cidrs(cidrs)
+        self.interface.lock().set_ipv4_cidrs(cidrs)?;
+        self.udp.clear_path_mtu(self.index);
+        Ok(())
     }
 
     pub(super) fn set_ipv4_gateway_routes(
         &self,
         routes: &[(Ipv4Cidr, Ipv4Address)],
     ) -> Result<(), RouteTableFull> {
-        self.interface.lock().set_ipv4_gateway_routes(routes)
+        self.interface.lock().set_ipv4_gateway_routes(routes)?;
+        self.udp.clear_path_mtu(self.index);
+        Ok(())
     }
 
     pub(super) fn ipv6_cidr(&self) -> Option<Ipv6Cidr> {
@@ -249,7 +253,7 @@ impl<E: Ext> IfaceCommon<E> {
     }
 
     pub(super) fn path_mtu(&self, destination: IpAddress, interface_mtu: usize) -> super::PathMtu {
-        self.interface.lock().path_mtu(destination, interface_mtu)
+        self.udp.path_mtu(self.index, destination, interface_mtu)
     }
 
     pub(super) fn routes(&self) -> Vec<Route> {
@@ -351,7 +355,7 @@ impl<E: Ext> IfaceCommon<E> {
         let mut sockets = self.sockets.lock();
         let mut socket_actions = Vec::new();
 
-        let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, self.index, &mut socket_actions);
+        let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, &self.udp, self.index, &mut socket_actions);
         context.poll_ingress(device, phy, &self.taps);
         context.poll_egress(device, phy, &self.taps);
 
