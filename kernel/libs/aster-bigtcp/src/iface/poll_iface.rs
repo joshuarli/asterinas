@@ -24,6 +24,12 @@ fn is_unicast_local_v4(addresses: &[smoltcp::wire::Ipv4Cidr], destination: smolt
     })
 }
 
+pub(crate) struct PathMtuEntry {
+    destination: smoltcp::wire::IpAddress,
+    mtu: usize,
+    expires_at_ms: i64,
+}
+
 /// An interface with auxiliary data that makes it pollable.
 ///
 /// This is used, for example, when updating a socket's next poll time and finding a socket to
@@ -33,6 +39,7 @@ pub(crate) struct PollableIface<E: Ext> {
     pending_conns: PendingConnSet<E>,
     pending_fragments: VecDeque<TxPacketWithDst>,
     reassembly: Ipv4Reassembly,
+    path_mtu: Vec<PathMtuEntry>,
     /// The IPv4 addresses of the interface, primary first.
     ///
     /// `smoltcp` keeps its own copy, but exposes only the first IPv4 address while it is
@@ -55,6 +62,7 @@ impl<E: Ext> PollableIface<E> {
             pending_conns: PendingConnSet::new(),
             pending_fragments: VecDeque::new(),
             reassembly: Ipv4Reassembly::new(),
+            path_mtu: Vec::new(),
             ipv4_cidrs,
         }
     }
@@ -65,6 +73,7 @@ impl<E: Ext> PollableIface<E> {
             pending_conns: &mut self.pending_conns,
             pending_fragments: &mut self.pending_fragments,
             reassembly: &mut self.reassembly,
+            path_mtu: &mut self.path_mtu,
             ipv4_cidrs: &self.ipv4_cidrs,
         }
     }
@@ -100,6 +109,7 @@ impl<E: Ext> PollableIface<E> {
                     .expect("the address table capacity was checked");
             }
         });
+        self.path_mtu.clear();
         self.ipv4_cidrs = cidrs.to_vec();
         Ok(())
     }
@@ -131,7 +141,14 @@ impl<E: Ext> PollableIface<E> {
                     .expect("the route table capacity was checked");
             }
         });
+        if result.is_ok() { self.path_mtu.clear(); }
         result
+    }
+
+    pub(super) fn path_mtu(&mut self, destination: smoltcp::wire::IpAddress, interface_mtu: usize) -> usize {
+        let now = super::time::get_network_timestamp().total_millis();
+        self.path_mtu.retain(|entry| entry.expires_at_ms > now);
+        self.path_mtu.iter().find(|entry| entry.destination == destination).map_or(interface_mtu, |entry| entry.mtu.min(interface_mtu))
     }
 
     pub(super) fn ipv6_cidr(&self) -> Option<smoltcp::wire::Ipv6Cidr> {
@@ -213,6 +230,7 @@ pub(crate) struct PollableIfaceMut<'a, E: Ext> {
     pending_conns: &'a mut PendingConnSet<E>,
     pending_fragments: &'a mut VecDeque<TxPacketWithDst>,
     reassembly: &'a mut Ipv4Reassembly,
+    path_mtu: &'a mut Vec<PathMtuEntry>,
     ipv4_cidrs: &'a [smoltcp::wire::Ipv4Cidr],
 }
 
@@ -225,6 +243,7 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
         pending_conns: &'a mut PendingConnSet<E>,
         pending_fragments: &'a mut VecDeque<TxPacketWithDst>,
         reassembly: &'a mut Ipv4Reassembly,
+        path_mtu: &'a mut Vec<PathMtuEntry>,
         ipv4_cidrs: &'a [smoltcp::wire::Ipv4Cidr],
     ) -> Self {
         Self {
@@ -232,6 +251,7 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
             pending_conns,
             pending_fragments,
             reassembly,
+            path_mtu,
             ipv4_cidrs,
         }
     }
@@ -243,14 +263,26 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
         &mut PendingConnSet<E>,
         &mut VecDeque<TxPacketWithDst>,
         &mut Ipv4Reassembly,
+        &mut Vec<PathMtuEntry>,
         &'a [smoltcp::wire::Ipv4Cidr],
     ) {
-        (self.context, self.pending_conns, self.pending_fragments, self.reassembly, self.ipv4_cidrs)
+        (self.context, self.pending_conns, self.pending_fragments, self.reassembly, self.path_mtu, self.ipv4_cidrs)
     }
 
     /// Returns the IPv4 addresses of the interface, primary first.
     pub(crate) fn ipv4_cidrs(&self) -> &'a [smoltcp::wire::Ipv4Cidr] {
         self.ipv4_cidrs
+    }
+
+    pub(super) fn update_path_mtu(&mut self, destination: smoltcp::wire::IpAddress, mtu: usize) {
+        let now = self.context.now().total_millis();
+        self.path_mtu.retain(|entry| entry.expires_at_ms > now);
+        if let Some(entry) = self.path_mtu.iter_mut().find(|entry| entry.destination == destination) {
+            if mtu <= entry.mtu { entry.mtu = mtu; entry.expires_at_ms = now + 600_000; }
+            return;
+        }
+        if self.path_mtu.len() == 256 { self.path_mtu.remove(0); }
+        self.path_mtu.push(PathMtuEntry { destination, mtu, expires_at_ms: now + 600_000 });
     }
 
     pub(super) fn pending_fragments(&mut self) -> &mut VecDeque<TxPacketWithDst> {

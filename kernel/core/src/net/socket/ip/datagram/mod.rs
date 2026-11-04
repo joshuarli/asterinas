@@ -20,7 +20,7 @@ use crate::{
             Socket,
             ip::{
                 common::{get_ephemeral_endpoint_on, map_unspecified_to_localhost},
-                options::{IpOptionSet, MtuDiscover, PathMtuDiscovery, SetIpLevelOption},
+                options::{IpOptionSet, Mtu, MtuDiscover, PathMtuDiscovery, SetIpLevelOption},
             },
             new_udp_socket_common,
             options::{
@@ -276,10 +276,15 @@ impl DatagramSocket {
             |bound_datagram, remote_endpoint| {
                 let remote_endpoint = map_unspecified_to_localhost(*remote_endpoint);
                 let iface = self.output_iface(&remote_endpoint, dont_route)?;
+                let path_mtu = iface.path_mtu(remote_endpoint.addr);
+                let mtu = match mtu_discovery {
+                    PathMtuDiscovery::Do | PathMtuDiscovery::Want => path_mtu,
+                    _ => iface.mtu(),
+                };
                 if matches!(mtu_discovery, PathMtuDiscovery::Do | PathMtuDiscovery::Probe | PathMtuDiscovery::Interface)
-                    && reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > iface.mtu()
+                    && reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > mtu
                 {
-                    return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the interface MTU");
+                    return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the path MTU");
                 }
                 let local = bound_datagram.local_endpoint();
                 let source = if local.addr.is_unspecified() || is_broadcast_endpoint(&local) {
@@ -289,8 +294,9 @@ impl DatagramSocket {
                 };
                 let next_hop = if dont_route { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed };
                 let fragmentation = match mtu_discovery {
-                    PathMtuDiscovery::Dont | PathMtuDiscovery::Omit => aster_bigtcp::socket::UdpFragmentation::Allow,
-                    PathMtuDiscovery::Want if reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > iface.mtu() => aster_bigtcp::socket::UdpFragmentation::Allow,
+                    PathMtuDiscovery::Dont => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu),
+                    PathMtuDiscovery::Omit => aster_bigtcp::socket::UdpFragmentation::Allow(iface.mtu()),
+                    PathMtuDiscovery::Want if reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > path_mtu => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu),
                     _ => aster_bigtcp::socket::UdpFragmentation::DontFragment,
                 };
                 let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos, next_hop, fragmentation)?;
@@ -318,6 +324,7 @@ impl DatagramSocket {
         if let Inner::Bound(bound) = &*inner {
             let options = self.options.read();
             bound.set_receive_errors(options.ip.recverr());
+            bound.set_ignore_fragmentation_error(options.mtu_discover == PathMtuDiscovery::Dont);
             bound.set_hop_limit(options.ip.ttl().get());
         }
         Ok(())
@@ -412,6 +419,7 @@ impl Socket for DatagramSocket {
         if let Inner::Bound(bound) = &*inner {
             let options = self.options.read();
             bound.set_receive_errors(options.ip.recverr());
+            bound.set_ignore_fragmentation_error(options.mtu_discover == PathMtuDiscovery::Dont);
             bound.set_hop_limit(options.ip.ttl().get());
         }
         Ok(())
@@ -531,6 +539,13 @@ impl Socket for DatagramSocket {
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
         sock_option_mut!(match option {
+            ip_mtu @ Mtu => {
+                let remote = *self.inner.read().peer_addr().ok_or_else(|| Error::from(Errno::ENOTCONN))?;
+                let dont_route = self.options.read().dont_route;
+                let iface = self.output_iface(&remote, dont_route)?;
+                ip_mtu.set(iface.path_mtu(remote.addr) as i32);
+                return Ok(());
+            }
             ip_mtu_discover @ MtuDiscover => {
                 ip_mtu_discover.set(self.options.read().mtu_discover as i32);
                 return Ok(());
@@ -569,7 +584,12 @@ impl Socket for DatagramSocket {
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
         sock_option_ref!(match option {
             ip_mtu_discover @ MtuDiscover => {
-                self.options.write().mtu_discover = PathMtuDiscovery::try_from(*ip_mtu_discover.get().unwrap())?;
+                let mode = PathMtuDiscovery::try_from(*ip_mtu_discover.get().unwrap())?;
+                let inner = self.inner.read();
+                self.options.write().mtu_discover = mode;
+                if let Inner::Bound(bound) = &*inner {
+                    bound.set_ignore_fragmentation_error(mode == PathMtuDiscovery::Dont);
+                }
                 return Ok(());
             }
             bind_to_device @ BindToDevice => {
@@ -606,6 +626,7 @@ impl Socket for DatagramSocket {
         };
         if let Inner::Bound(bound) = &*inner {
             bound.set_receive_errors(options.ip.recverr());
+            bound.set_ignore_fragmentation_error(options.mtu_discover == PathMtuDiscovery::Dont);
             bound.set_hop_limit(options.ip.ttl().get());
         }
 

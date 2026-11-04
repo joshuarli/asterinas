@@ -168,6 +168,7 @@ impl_socket_options!(
     pub(crate) struct RecvTos(bool);
     pub(crate) struct Pktinfo(bool);
     pub(crate) struct MtuDiscover(i32);
+    pub(crate) struct Mtu(i32);
 );
 
 #[derive(Clone, Copy, Debug)]

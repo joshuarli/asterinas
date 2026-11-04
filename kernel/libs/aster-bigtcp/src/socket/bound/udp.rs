@@ -34,7 +34,7 @@ pub enum UdpNextHop {
 
 #[derive(Clone, Copy)]
 pub enum UdpFragmentation {
-    Allow,
+    Allow(usize),
     DontFragment,
 }
 
@@ -146,6 +146,7 @@ pub struct UdpError {
 struct UdpErrors {
     peer: Option<IpEndpoint>,
     recverr: bool,
+    ignore_fragmentation_error: bool,
     pending: Option<UdpErrorOrigin>,
     queue: VecDeque<UdpError>,
     queued_bytes: usize,
@@ -194,11 +195,16 @@ impl<E: Ext> UdpSocketBg<E> {
             && (bound.addr.is_unspecified() || bound.addr == source.addr)
     }
 
+    pub(crate) fn matches_error_destination(&self, destination: IpEndpoint) -> bool {
+        self.inner.errors.lock().peer.is_none_or(|peer| peer == destination)
+    }
+
     pub(crate) fn report_error(&self, mut error: UdpError) {
         let open = self.open.lock();
         if !*open { return; }
         let mut errors = self.inner.errors.lock();
-        if errors.peer.is_some_and(|peer| peer != error.destination)
+        if errors.ignore_fragmentation_error && matches!(error.origin, UdpErrorOrigin::Icmp { type_: 3, code: 4, .. })
+            || errors.peer.is_some_and(|peer| peer != error.destination)
             || errors.peer.is_none() && !errors.recverr
             || !errors.recverr && !error.origin.is_hard()
         {
@@ -328,6 +334,10 @@ impl<E: Ext> UdpSocket<E> {
     pub fn set_receive_address(&self, address: IpAddress) {
         let open = self.0.open.lock();
         if *open { self.0.bound.set_receive_address(address); }
+    }
+
+    pub fn set_ignore_fragmentation_error(&self, ignore: bool) {
+        self.0.inner.errors.lock().ignore_fragmentation_error = ignore;
     }
 
     pub fn set_receive_errors(&self, enabled: bool) {

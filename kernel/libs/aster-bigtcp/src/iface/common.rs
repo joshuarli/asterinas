@@ -58,6 +58,7 @@ pub(crate) struct TxPacketWithDst {
     pub(super) packet: TxPacket<NetworkLayer>,
     pub(super) dst_addr: IpAddress,
     pub(super) direct: bool,
+    pub(super) fragment_mtu: Option<usize>,
     pub(super) failure: Option<(Arc<dyn UdpFailure>, IpEndpoint)>,
 }
 
@@ -245,6 +246,10 @@ impl<E: Ext> IfaceCommon<E> {
 
     pub(super) fn ipv6_cidr(&self) -> Option<Ipv6Cidr> {
         self.interface.lock().ipv6_cidr()
+    }
+
+    pub(super) fn path_mtu(&self, destination: IpAddress, interface_mtu: usize) -> usize {
+        self.interface.lock().path_mtu(destination, interface_mtu)
     }
 
     pub(super) fn routes(&self) -> Vec<Route> {

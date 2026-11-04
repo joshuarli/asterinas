@@ -181,8 +181,10 @@ impl<E: Ext> PollContext<'_, E> {
         if error.source.addr != ip_repr.inner.dst_addr() || !self.iface.is_unicast_local(error.source.addr) {
             return;
         }
+        let mut matched = false;
         for socket in self.udp_sockets {
-            if socket.can_receive_error(error.source, self.ifindex) {
+            if socket.can_receive_error(error.source, self.ifindex) && socket.matches_error_destination(error.destination) {
+                matched = true;
                 socket.report_error(UdpError {
                     destination: error.destination,
                     payload: error.payload.to_vec(),
@@ -197,6 +199,9 @@ impl<E: Ext> PollContext<'_, E> {
                     },
                 });
             }
+        }
+        if matched && error.type_ == 3 && error.code == 4 && error.info != 0 {
+            self.iface.update_path_mtu(error.destination.addr, (error.info as usize).max(552));
         }
     }
 
@@ -465,6 +470,7 @@ impl<E: Ext> PollContext<'_, E> {
             packet,
             dst_addr: reply_ip_repr.dst_addr(),
             direct: false,
+            fragment_mtu: None,
             failure: None,
         })
     }
@@ -485,6 +491,7 @@ impl<E: Ext> PollContext<'_, E> {
             packet,
             dst_addr: ip_repr.dst_addr(),
             direct: false,
+            fragment_mtu: None,
             failure: None,
         })
     }
@@ -503,7 +510,7 @@ impl<E: Ext> PollContext<'_, E> {
 
         let packet = Self::copy_payload(phy, payload)?;
         let packet = udp::emit(packet, ip_repr, udp_repr,
-            checksum_caps.udp.tx() || matches!(fragmentation, UdpFragmentation::Allow));
+            checksum_caps.udp.tx() || matches!(fragmentation, UdpFragmentation::Allow(_)));
         let packet = ip::emit_with_tos(packet, ip_repr, checksum_caps.ipv4.tx(), tos,
             matches!(fragmentation, UdpFragmentation::DontFragment));
 
@@ -513,7 +520,7 @@ impl<E: Ext> PollContext<'_, E> {
             dst_addr = IpAddress::Ipv4(Ipv4Address::BROADCAST);
         }
 
-        Some(TxPacketWithDst { packet, dst_addr, direct: matches!(next_hop, UdpNextHop::Direct), failure: None })
+        Some(TxPacketWithDst { packet, dst_addr, direct: matches!(next_hop, UdpNextHop::Direct), fragment_mtu: match fragmentation { UdpFragmentation::Allow(mtu) => Some(mtu), UdpFragmentation::DontFragment => None }, failure: None })
     }
 
     fn copy_payload(phy: &dyn PollPhy, payload: &[u8]) -> Option<TxPacket<ApplicationLayer>> {
@@ -556,15 +563,17 @@ impl<E: Ext> PollContext<'_, E> {
             };
 
             let packet = if let Some(mut packet) = packet {
-                if packet.packet.len() > device.mtu() {
+                let mtu = packet.fragment_mtu.unwrap_or(device.mtu()).min(device.mtu());
+                if packet.packet.len() > mtu {
                     let csum = self.iface.context().checksum_caps().ipv4.tx();
-                    if let Some(fragments) = ip::fragment(&packet.packet, device.mtu(), csum, |len| phy.alloc_tx_buffer(len)) {
+                    if let Some(fragments) = ip::fragment(&packet.packet, mtu, csum, |len| phy.alloc_tx_buffer(len)) {
                         let pending = self.iface.pending_fragments();
                         for (index, fragment) in fragments.into_iter().enumerate() {
                             pending.push_back(TxPacketWithDst {
                                 packet: fragment,
                                 dst_addr: packet.dst_addr,
                                 direct: packet.direct,
+                                fragment_mtu: None,
                                 failure: if index == 0 { packet.failure.take() } else { None },
                             });
                         }
@@ -707,9 +716,9 @@ impl<E: Ext> PollContext<'_, E> {
 
             let mut deferred = None;
 
-            let (cx, pending, fragments, reassembly, ipv4_cidrs) = self.iface.inner_mut();
+            let (cx, pending, fragments, reassembly, path_mtu, ipv4_cidrs) = self.iface.inner_mut();
             socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation| {
-                let iface = PollableIfaceMut::new(cx, pending, fragments, reassembly, ipv4_cidrs);
+                let iface = PollableIfaceMut::new(cx, pending, fragments, reassembly, path_mtu, ipv4_cidrs);
                 let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.ifindex, &mut actions);
 
                 let is_broadcast = this.iface.context().is_broadcast(&ip_repr.dst_addr());
