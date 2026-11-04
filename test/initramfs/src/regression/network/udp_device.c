@@ -241,16 +241,24 @@ FN_TEST(an_unprivileged_user_may_set_the_first_device)
 }
 END_TEST()
 
-#ifdef __asterinas__
-FN_TEST(the_wildcard_address_needs_a_device_to_bind)
+FN_TEST(a_wildcard_socket_receives_without_device_binding)
 {
-	int fd = udp_socket();
+	int receiver = udp_socket();
+	int sender = udp_socket();
+	char text[16];
+	int port;
 
-	TEST_ERRNO(bind_any(fd, 0), EADDRNOTAVAIL);
-	close(fd);
+	TEST_SUCC(bind_any(receiver, 0));
+	port = TEST_SUCC(bound_port(receiver));
+	TEST_RES(send_to_loopback(sender, port, "wildcard"), _ret == 8);
+	TEST_RES(receive_text(receiver, text, sizeof(text)),
+		 _ret == 8 && strcmp(text, "wildcard") == 0);
+	close(receiver);
+	close(sender);
 }
 END_TEST()
 
+#ifdef __asterinas__
 FN_TEST(a_bound_socket_cannot_change_its_device)
 {
 	int fd = udp_socket();
