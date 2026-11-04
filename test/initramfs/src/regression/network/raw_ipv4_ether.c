@@ -69,7 +69,7 @@ static uint16_t checksum(const void *data, size_t length)
 
 FN_TEST(raw_ipv4_echo_crosses_ethernet)
 {
- int fd = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP)); if (fd < 0) return;
+ int fd = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP)); if (fd < 0) { __TEST_SUMMARY(); return; }
  int ttl = 37, tos = 16;
  TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)));
  TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)));

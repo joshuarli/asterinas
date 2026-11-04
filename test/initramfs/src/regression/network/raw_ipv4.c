@@ -23,9 +23,9 @@ static uint16_t checksum(const void *data, size_t length)
 FN_TEST(raw_icmp_echo_roundtrip_and_protocol_demux)
 {
  int fd = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP));
- if (fd < 0) return;
+ if (fd < 0) { __TEST_SUMMARY(); return; }
  int other = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_UDP));
- if (other < 0) { close(fd); return; }
+ if (other < 0) { close(fd); __TEST_SUMMARY(); return; }
  int tos = 16; TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)));
  struct sockaddr_in peer = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
  struct { struct icmphdr header; char data[8]; } request = {
@@ -52,7 +52,7 @@ END_TEST()
 
 FN_TEST(invalid_echo_checksum_is_not_answered)
 {
- int fd = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP)); if (fd < 0) return;
+ int fd = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP)); if (fd < 0) { __TEST_SUMMARY(); return; }
  struct sockaddr_in peer = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
  struct { struct icmphdr header; char data[8]; } request = {
   .header = { .type = ICMP_ECHO, .un.echo = { .id = htons(9123), .sequence = htons(8) } }, .data = "invalid" };
@@ -67,7 +67,7 @@ END_TEST()
 
 FN_TEST(raw_icmp_receives_udp_error_without_consuming_it)
 {
- int raw = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP)); if (raw < 0) return;
+ int raw = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP)); if (raw < 0) { __TEST_SUMMARY(); return; }
  int fd = TEST_SUCC(socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0));
  struct sockaddr_in peer = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
  int receiver = TEST_SUCC(socket(AF_INET, SOCK_DGRAM, 0)); TEST_SUCC(bind(receiver, (struct sockaddr *)&peer, sizeof(peer)));
@@ -94,7 +94,7 @@ END_TEST()
 
 FN_TEST(raw_udp_receives_the_ip_datagram_without_consuming_udp)
 {
- int raw = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_UDP)); if (raw < 0) return;
+ int raw = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_UDP)); if (raw < 0) { __TEST_SUMMARY(); return; }
  int receiver = TEST_SUCC(socket(AF_INET, SOCK_DGRAM, 0)); int sender = TEST_SUCC(socket(AF_INET, SOCK_DGRAM, 0));
  struct sockaddr_in destination = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
  TEST_SUCC(bind(receiver, (struct sockaddr *)&destination, sizeof(destination)));
@@ -119,7 +119,7 @@ END_TEST()
 
 FN_TEST(raw_broadcast_requires_broadcast_option)
 {
- int fd = TEST_SUCC(socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)); if (fd < 0) return;
+ int fd = TEST_SUCC(socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)); if (fd < 0) { __TEST_SUMMARY(); return; }
  struct sockaddr_in peer = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(0x7fffffff) };
  struct icmphdr request = { .type = ICMP_ECHO }; request.checksum = checksum(&request, sizeof(request));
  TEST_ERRNO(sendto(fd, &request, sizeof(request), 0, (struct sockaddr *)&peer, sizeof(peer)), EACCES);
