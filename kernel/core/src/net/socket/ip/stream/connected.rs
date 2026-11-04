@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
-    errors::tcp::{IoError, RecvError, SendError},
+    errors::tcp::{IoError, RecvError, ResetError, SendError},
     socket::{NeedIfacePoll, RawTcpSetOption},
     wire::IpEndpoint,
 };
@@ -188,7 +188,7 @@ impl ConnectedStream {
             }
 
             // If the connection is reset, add an ERR event.
-            if socket.is_rst_closed() {
+            if socket.has_reset_error() {
                 events |= IoEvents::ERR;
             }
 
@@ -197,14 +197,10 @@ impl ConnectedStream {
     }
 
     pub(super) fn test_and_clear_error(&self) -> Option<Error> {
-        if self.tcp_conn.clear_rst_closed() {
-            Some(Error::with_message(
-                Errno::ECONNRESET,
-                "the connection is reset",
-            ))
-        } else {
-            None
-        }
+        self.tcp_conn.take_reset_error().map(|error| match error {
+            ResetError::BrokenPipe => Error::with_message(Errno::EPIPE, "the connection is closed"),
+            ResetError::ConnReset => Error::with_message(Errno::ECONNRESET, "the connection is reset"),
+        })
     }
 
     pub(super) fn set_raw_option<R>(

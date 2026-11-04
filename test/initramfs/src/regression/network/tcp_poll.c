@@ -243,16 +243,16 @@ FN_TEST(poll_shutdown_readwrite)
 
 	int err = 0;
 	socklen_t errlen = sizeof(err);
-	// FIXME: This socket error should be `EPIPE`, but in Asterinas it is
-	// `ECONNRESET`. See the Linux implementation for details:
-	// <https://github.com/torvalds/linux/blob/848e076317446f9c663771ddec142d7c2eb4cb43/net/ipv4/tcp_input.c#L4553-L4555>.
-#ifdef __asterinas__
-	TEST_RES(getsockopt(sk_accept, SOL_SOCKET, SO_ERROR, &err, &errlen),
-		 errlen == sizeof(err) && err == ECONNRESET);
-#else
 	TEST_RES(getsockopt(sk_connect, SOL_SOCKET, SO_ERROR, &err, &errlen),
 		 errlen == sizeof(err) && err == EPIPE);
-#endif
+	err = 0;
+	errlen = sizeof(err);
+	TEST_RES(getsockopt(sk_connect, SOL_SOCKET, SO_ERROR, &err, &errlen),
+		 errlen == sizeof(err) && err == 0);
+	err = 0;
+	errlen = sizeof(err);
+	TEST_RES(getsockopt(sk_accept, SOL_SOCKET, SO_ERROR, &err, &errlen),
+		 errlen == sizeof(err) && err == ECONNRESET);
 }
 END_TEST()
 
@@ -292,5 +292,26 @@ FN_TEST(read_shutdown_read)
 	TEST_RES(read(sk_accept, buf, 4096), _ret == 0);
 	TEST_RES(poll(&pfd, 1, 0),
 		 pfd.revents == (POLLIN | POLLRDHUP | POLLOUT));
+}
+END_TEST()
+
+FN_TEST(reset_closewait_pending_error)
+{
+	for (int operation = 0; operation < 2; operation++) {
+		renew_connect_and_accept();
+		CHECK(write(sk_connect, buf, 1));
+		CHECK(shutdown(sk_accept, SHUT_RDWR));
+		TEST_RES(read(sk_connect, buf, sizeof(buf)), _ret == 0);
+		TEST_RES(send(sk_connect, buf, sizeof(buf), MSG_NOSIGNAL), _ret > 0);
+		if (operation == 0) {
+			TEST_RES(recv(sk_connect, buf, sizeof(buf), 0), _ret == 0);
+			int pending = 0;
+			socklen_t len = sizeof(pending);
+			TEST_SUCC(getsockopt(sk_connect, SOL_SOCKET, SO_ERROR, &pending, &len));
+			TEST_RES(pending, _ret == EPIPE);
+		} else {
+			TEST_ERRNO(send(sk_connect, buf, 1, MSG_NOSIGNAL), EPIPE);
+		}
+	}
 }
 END_TEST()

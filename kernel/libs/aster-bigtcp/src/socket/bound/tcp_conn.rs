@@ -26,7 +26,7 @@ use super::{
 };
 use crate::{
     define_boolean_value,
-    errors::tcp::{ConnectError, IoError, RecvError, SendError},
+    errors::tcp::{ConnectError, IoError, RecvError, ResetError, SendError},
     ext::Ext,
     iface::{BoundTcpPort, PacketSlice, PathMtuRoute, PollKey, PollableIfaceMut},
     socket::{
@@ -54,8 +54,7 @@ pub struct RawTcpSocketExt<E: Ext> {
     has_connected: bool,
     /// Indicates if the receiving side of this socket is shut down by the user.
     is_recv_shut: bool,
-    /// Indicates if the socket is closed by a RST packet.
-    is_rst_closed: bool,
+    reset_error: Option<ResetError>,
 }
 
 impl<E: Ext> Deref for RawTcpSocketExt<E> {
@@ -107,12 +106,9 @@ impl<E: Ext> RawTcpSocketExt<E> {
         self.is_recv_shut
     }
 
-    /// Checks if the socket is closed by a RST packet.
-    ///
-    /// Note that the flag is automatically cleared when it is read by
-    /// [`TcpConnection::clear_rst_closed`], [`TcpConnection::send`], or [`TcpConnection::recv`].
-    pub fn is_rst_closed(&self) -> bool {
-        self.is_rst_closed
+    /// Returns whether the socket has a pending reset error.
+    pub fn has_reset_error(&self) -> bool {
+        self.reset_error.is_some()
     }
 }
 
@@ -143,7 +139,7 @@ impl<E: Ext> RawTcpSocketExt<E> {
                 // Strictly speaking, the socket isn't closed by an incoming RST packet in this
                 // situation. Instead, we reset the connection and _send_ an outgoing RST packet.
                 // However, Linux reports `ECONNRESET`, so we have to follow Linux.
-                self.is_rst_closed = true;
+                self.reset_error = Some(ResetError::ConnReset);
                 self.abort();
             }
             self.check_dead(this)
@@ -153,7 +149,7 @@ impl<E: Ext> RawTcpSocketExt<E> {
 
         let events = if self.state() != old_state {
             if self.state() == State::Closed && is_rst {
-                self.is_rst_closed = true;
+                self.reset_error = Some(if old_state == State::CloseWait { ResetError::BrokenPipe } else { ResetError::ConnReset });
             }
             self.on_new_state(this)
         } else {
@@ -243,7 +239,7 @@ impl<E: Ext> TcpConnectionInner<E> {
             listener,
             has_connected: false,
             is_recv_shut: false,
-            is_rst_closed: false,
+            reset_error: None,
         };
 
         TcpConnectionInner {
@@ -397,9 +393,11 @@ impl<E: Ext> TcpConnection<E> {
 
         let mut socket = self.0.inner.lock();
 
-        if socket.is_rst_closed {
-            socket.is_rst_closed = false;
-            return Err(IoError::Socket(SendError::ConnReset));
+        if let Some(error) = socket.reset_error.take() {
+            return Err(IoError::Socket(match error {
+                ResetError::BrokenPipe => SendError::InvalidState,
+                ResetError::ConnReset => SendError::ConnReset,
+            }));
         }
 
         let mut total_sent_bytes = 0;
@@ -516,8 +514,8 @@ impl<E: Ext> TcpConnection<E> {
             };
 
             let copy_result = match recv_result {
-                Err(_) if socket.is_rst_closed && total_recv_bytes == 0 => {
-                    socket.is_rst_closed = false;
+                Err(_) if socket.reset_error == Some(ResetError::ConnReset) && total_recv_bytes == 0 => {
+                    socket.reset_error = None;
                     return Err(IoError::Socket(RecvError::ConnReset));
                 }
                 Err(_) if total_recv_bytes > 0 => break total_recv_bytes,
@@ -547,16 +545,9 @@ impl<E: Ext> TcpConnection<E> {
         Ok((result, need_poll))
     }
 
-    /// Checks if the socket is closed by a RST packet and clears the flag.
-    ///
-    /// This flag is set when the socket is closed by a RST packet, and cleared when the connection
-    /// reset error is reported via one of the [`Self::send`], [`Self::recv`], or this method.
-    pub fn clear_rst_closed(&self) -> bool {
-        let mut socket = self.0.inner.lock();
-
-        let is_rst = socket.is_rst_closed;
-        socket.is_rst_closed = false;
-        is_rst
+    /// Takes the pending reset error, if any.
+    pub fn take_reset_error(&self) -> Option<ResetError> {
+        self.0.inner.lock().reset_error.take()
     }
 
     /// Shuts down the sending half of the connection.
