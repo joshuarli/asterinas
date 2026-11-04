@@ -15,7 +15,7 @@ use crate::{
     fs::file::FileCommon,
     net::{
         iface::{Iface, iter_all_ifaces},
-        route::{is_broadcast_endpoint, lookup_direct_iface, lookup_iface},
+        route::{is_broadcast_endpoint, lookup_direct_iface, lookup_iface, lookup_udp_route},
         socket::{
             Socket,
             ip::{
@@ -337,7 +337,12 @@ impl DatagramSocket {
                 if !can_broadcast && is_broadcast_endpoint(&route_endpoint) {
                     return_errno_with_message!(Errno::EACCES, "broadcast requires SO_BROADCAST");
                 }
-                let iface = self.output_iface(&route_endpoint, dont_route)?;
+                let device = self.options.read().device;
+                let (iface, next_hop) = if dont_route || device.is_bound() {
+                    (self.output_iface(&route_endpoint, dont_route)?, if dont_route { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed })
+                } else {
+                    lookup_udp_route(route_endpoint.addr)?
+                };
                 let path_mtu = iface.path_mtu(route_endpoint.addr);
                 let mtu = match mtu_discovery {
                     PathMtuDiscovery::Do | PathMtuDiscovery::Want => path_mtu.mtu,
@@ -354,7 +359,6 @@ impl DatagramSocket {
                 } else {
                     local.addr
                 };
-                let next_hop = if dont_route { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed };
                 let fragmentation = match mtu_discovery {
                     PathMtuDiscovery::Dont => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu.mtu),
                     PathMtuDiscovery::Omit => aster_bigtcp::socket::UdpFragmentation::Allow(iface.mtu()),

@@ -37,7 +37,7 @@ use crate::{
     ext::Ext,
     iface::ScheduleNextPoll,
     packet::{FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TxPacket},
-    socket::TcpListenerBg,
+    socket::{TcpListenerBg, UdpNextHop},
     socket_table::SocketTable,
 };
 
@@ -60,7 +60,7 @@ pub struct IfaceCommon<E: Ext> {
 pub(crate) struct TxPacketWithDst {
     pub(super) packet: TxPacket<NetworkLayer>,
     pub(super) dst_addr: IpAddress,
-    pub(super) direct: bool,
+    pub(super) next_hop: UdpNextHop,
     pub(super) fragment_mtu: Option<usize>,
     pub(super) failure: Option<(Arc<dyn UdpFailure>, IpEndpoint)>,
 }
@@ -276,7 +276,7 @@ impl<E: Ext> IfaceCommon<E> {
         let mut queue = self.raw_ip_tx.lock();
         self.ensure_up()?;
         if queue.len() >= 64 { return Err(LinkSendError::Busy); }
-        queue.push_back(TxPacketWithDst { packet: packet.build(), dst_addr: destination, direct: false, fragment_mtu: Some(mtu), failure: None });
+        queue.push_back(TxPacketWithDst { packet: packet.build(), dst_addr: destination, next_hop: UdpNextHop::Routed, fragment_mtu: Some(mtu), failure: None });
         Ok(())
     }
 
