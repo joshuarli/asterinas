@@ -32,6 +32,12 @@ pub enum UdpNextHop {
     Direct,
 }
 
+#[derive(Clone, Copy)]
+pub enum UdpFragmentation {
+    Allow,
+    DontFragment,
+}
+
 pub(crate) struct UdpSocketBg<E: Ext> {
     bound: UdpReservation<E>,
     inner: UdpSocketInner,
@@ -62,6 +68,7 @@ struct TxDatagram {
     ttl: u8,
     tos: u8,
     next_hop: UdpNextHop,
+    fragmentation: UdpFragmentation,
     tag: u32,
     payload: Vec<u8>,
 }
@@ -274,7 +281,7 @@ impl<E: Ext> UdpSocketBg<E> {
     /// Tries to generate an outgoing packet and dispatches the generated packet.
     pub(crate) fn dispatch<D>(&self, ifindex: u32, cx: &mut Context, dispatch: D)
     where
-        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8, UdpNextHop),
+        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8, UdpNextHop, UdpFragmentation),
     {
         let open = self.open.lock();
         if !*open { return; }
@@ -285,7 +292,7 @@ impl<E: Ext> UdpSocketBg<E> {
         let ip_repr = IpRepr::new(packet.source, packet.destination.addr, IpProtocol::Udp,
             UDP_HEADER_LEN + packet.payload.len(), packet.ttl);
         let udp_repr = UdpRepr { src_port: self.bound.endpoint().port, dst_port: packet.destination.port };
-        dispatch(cx, &ip_repr, &udp_repr, &packet.payload, packet.tos, packet.next_hop);
+        dispatch(cx, &ip_repr, &udp_repr, &packet.payload, packet.tos, packet.next_hop, packet.fragmentation);
         let open = self.open.lock();
         let notify_send = *open;
         let notify_stamp = *open && packet.tag != 0;
@@ -388,6 +395,7 @@ impl<E: Ext> UdpSocket<E> {
         source: IpAddress,
         tos: u8,
         next_hop: UdpNextHop,
+        fragmentation: UdpFragmentation,
         f: F,
     ) -> Result<Result<R, Err>, SendError>
     where
@@ -405,7 +413,7 @@ impl<E: Ext> UdpSocket<E> {
         if result.is_err() { return Ok(result); }
         let meta = meta.into();
         queue.enqueue(TxDatagram { iface, source, destination: meta.endpoint,
-            ttl: self.0.inner.ttl.load(Ordering::Relaxed), tos, next_hop, tag: meta.meta.id, payload })?;
+            ttl: self.0.inner.ttl.load(Ordering::Relaxed), tos, next_hop, fragmentation, tag: meta.meta.id, payload })?;
         Ok(result)
     }
 
@@ -469,7 +477,7 @@ mod test {
     fn packet(iface: u32, size: usize) -> TxDatagram {
         let address = IpAddress::Ipv4(Ipv4Address::LOCALHOST);
         TxDatagram { iface, source: address, destination: IpEndpoint::new(address, 1234),
-            ttl: 64, tos: 0, next_hop: UdpNextHop::Routed, tag: 0, payload: vec![0; size] }
+            ttl: 64, tos: 0, next_hop: UdpNextHop::Routed, fragmentation: UdpFragmentation::DontFragment, tag: 0, payload: vec![0; size] }
     }
 
     #[ktest]

@@ -54,7 +54,7 @@ pub struct IfaceCommon<E: Ext> {
     sched_poll: E::ScheduleNextPoll,
 }
 
-pub(super) struct TxPacketWithDst {
+pub(crate) struct TxPacketWithDst {
     pub(super) packet: TxPacket<NetworkLayer>,
     pub(super) dst_addr: IpAddress,
     pub(super) direct: bool,
@@ -73,6 +73,7 @@ pub(super) enum PhyProcessResult {
 }
 
 pub(super) trait PollPhy {
+    fn is_loopback(&self) -> bool { false }
     fn process(
         &self,
         packet: RxPacket<LinkLayer>,
