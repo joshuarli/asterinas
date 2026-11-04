@@ -8,7 +8,7 @@ use crate::{
     net::socket::options::{
         AcceptConn, BindToDevice, Broadcast, DontRoute, Error, KeepAlive, Linger, PassCred, PeerCred, PeerGroups, Priority,
         RecvBuf, RecvBufForce, RecvTimeout, RecvTimestamp, RecvTimestampNs, ReuseAddr, ReusePort,
-        SendBuf, SendBufForce, SendTimeout, SocketOption, SocketType, Timestamping,
+        SendBuf, SendBufForce, SendTimeout, SocketDebug, SocketOption, SocketType, Timestamping,
     },
     prelude::*,
     process::Gid,
@@ -59,6 +59,7 @@ enum CSocketOptionName {
 pub(crate) fn new_socket_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
     let name = CSocketOptionName::try_from(name).map_err(|_| Errno::ENOPROTOOPT)?;
     match name {
+        CSocketOptionName::DEBUG => Ok(Box::new(SocketDebug::new())),
         CSocketOptionName::REUSEADDR => Ok(Box::new(ReuseAddr::new())),
         CSocketOptionName::TYPE => Ok(Box::new(SocketType::new())),
         CSocketOptionName::ERROR => Ok(Box::new(Error::new())),
@@ -93,6 +94,7 @@ pub(crate) fn new_socket_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
     }
 }
 
+impl_raw_socket_option!(SocketDebug);
 impl_raw_socket_option!(ReuseAddr);
 impl_raw_sock_option_get_only!(SocketType);
 impl_raw_sock_option_get_only!(Error);

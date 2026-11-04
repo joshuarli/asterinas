@@ -18,7 +18,7 @@ use crate::{
         options::{
             AcceptConn, Broadcast, KeepAlive, Linger, PassCred, PeerCred, PeerGroups, Priority,
             RecvBuf, RecvBufForce, RecvTimeout, RecvTimestamp, RecvTimestampNs, ReuseAddr,
-            ReusePort, SendBuf, SendBufForce, SendTimeout, SocketOption, SocketType, Timestamping,
+            ReusePort, SendBuf, SendBufForce, SendTimeout, SocketDebug, SocketOption, SocketType, Timestamping,
             macros::{sock_option_mut, sock_option_ref},
         },
         unix::{CUserCred, UNIX_DATAGRAM_DEFAULT_BUF_SIZE, UNIX_STREAM_DEFAULT_BUF_SIZE},
@@ -33,6 +33,7 @@ use crate::{
 #[get_copy = "pub"]
 #[set = "pub"]
 pub(crate) struct SocketOptionSet {
+    debug: bool,
     reuse_addr: bool,
     broadcast: bool,
     send_buf: u32,
@@ -50,6 +51,7 @@ pub(crate) struct SocketOptionSet {
 impl Default for SocketOptionSet {
     fn default() -> Self {
         Self {
+            debug: false,
             reuse_addr: false,
             broadcast: false,
             send_buf: MIN_SENDBUF,
@@ -131,6 +133,9 @@ impl SocketOptionSet {
         socket: &dyn GetSocketLevelOption,
     ) -> Result<()> {
         sock_option_mut!(match option {
+            socket_debug @ SocketDebug => {
+                socket_debug.set(self.debug());
+            }
             socket_reuse_addr @ ReuseAddr => {
                 let reuse_addr = self.reuse_addr();
                 socket_reuse_addr.set(reuse_addr);
@@ -223,6 +228,13 @@ impl SocketOptionSet {
         socket: &dyn SetSocketLevelOption,
     ) -> Result<NeedIfacePoll> {
         sock_option_ref!(match option {
+            socket_debug @ SocketDebug => {
+                let debug = *socket_debug.get().unwrap();
+                if debug && check_current_privileged().is_err() {
+                    return_errno_with_message!(Errno::EACCES, "SO_DEBUG requires CAP_NET_ADMIN");
+                }
+                self.set_debug(debug);
+            }
             socket_reuse_addr @ ReuseAddr => {
                 let reuse_addr = socket_reuse_addr.get().unwrap();
                 self.set_reuse_addr(*reuse_addr);
