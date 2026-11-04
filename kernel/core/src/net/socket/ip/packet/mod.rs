@@ -102,8 +102,7 @@ impl IpTap for IpPacketTap {
                 self.pollee.notify(IoEvents::ERR);
                 return;
             }
-            if packet[header + 1] != 0 || state.peer.is_some_and(|peer| peer != source)
-                || state.ping_id != Some(u16::from_be_bytes([packet[header + 4], packet[header + 5]]))
+            if packet[header + 1] != 0 || state.ping_id != Some(u16::from_be_bytes([packet[header + 4], packet[header + 5]]))
                 || !self.is_ping_recipient(state.ping_id.unwrap(), destination)
             { return; }
         } else if state.peer.is_some_and(|peer| peer != source) { return; }
@@ -275,6 +274,9 @@ impl Pollable for IpPacketSocket {
 impl Socket for IpPacketSocket {
     fn bind(&self, address: SocketAddr) -> Result<()> {
         let SocketAddr::IPv4(address, port) = address else { return_errno_with_message!(Errno::EAFNOSUPPORT, "expected an IPv4 address"); };
+        if self.tap.kind == IpSocketKind::Ping && is_broadcast_endpoint(&IpEndpoint::new(address.into(), port)) {
+            return_errno_with_message!(Errno::EADDRNOTAVAIL, "ping socket cannot bind a broadcast address");
+        }
         if !address.is_unspecified() { lookup_local_iface(IpAddress::Ipv4(address))?; }
         if self.tap.kind == IpSocketKind::Ping {
             self.assign_ping_id(port, Some(address))?;
@@ -476,7 +478,6 @@ fn parse_ping_error(packet: &[u8], state: &IpPacketState) -> Option<PingError> {
     let id = u16::from_be_bytes([quoted[inner_header + 4], quoted[inner_header + 5]]);
     if state.ping_id != Some(id) || quoted[12..16] != packet[16..20] { return None; }
     let destination = Ipv4Address::new(quoted[16], quoted[17], quoted[18], quoted[19]);
-    if state.peer.is_some_and(|peer| peer != destination) { return None; }
     let total = usize::from(u16::from_be_bytes([quoted[2], quoted[3]]));
     if total < inner_header + 8 { return None; }
     let end = total.min(quoted.len());

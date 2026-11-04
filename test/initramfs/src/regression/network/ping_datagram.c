@@ -85,6 +85,8 @@ FN_TEST(ping_group_range_validates_updates_and_write_access)
  TEST_SUCC(write_range("0 10\n")); TEST_SUCC(write_range("4\n"));
  TEST_SUCC(read_range(value, sizeof(value))); unsigned int low = 0, high = 0;
  TEST_RES(sscanf(value, "%u %u", &low, &high), _ret == 2 && low == 4 && high == 10);
+ TEST_SUCC(write_range("010 0x10\n")); TEST_SUCC(read_range(value, sizeof(value)));
+ TEST_RES(sscanf(value, "%u %u", &low, &high), _ret == 2 && low == 8 && high == 16);
  TEST_SUCC(write_range("9 3\n")); TEST_SUCC(read_range(value, sizeof(value)));
  TEST_RES(sscanf(value, "%u %u", &low, &high), _ret == 2 && low == 1 && high == 0);
  TEST_ERRNO(write_range("4294967295 0\n"), EINVAL); TEST_SUCC(write_range(original));
@@ -221,5 +223,48 @@ FN_TEST(ping_socket_rewrites_identifier_and_checksum)
  TEST_RES(found, _ret == 1);
  request.header.type = ICMP_DEST_UNREACH; TEST_ERRNO(send(fd, &request, sizeof(request), 0), EINVAL);
  TEST_SUCC(close(fd)); TEST_SUCC(close(watcher)); TEST_SUCC(write_range(original));
+}
+END_TEST()
+
+FN_TEST(ping_connected_socket_accepts_alternate_destination)
+{
+ char original[64] = {}; int ok = TEST_SUCC(read_range(original, sizeof(original)));
+ if (ok < 0) { __TEST_SUMMARY(); return; }
+ TEST_SUCC(write_range("0 0\n"));
+ int raw = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP));
+ int fd = TEST_SUCC(socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_ICMP));
+ if (fd < 0 || raw < 0) { if (fd >= 0) close(fd); if (raw >= 0) close(raw); write_range(original); __TEST_SUMMARY(); return; }
+ int enabled = 1; TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_RECVERR, &enabled, sizeof(enabled)));
+ struct sockaddr_in dst = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+ TEST_SUCC(connect(fd, (struct sockaddr *)&dst, sizeof(dst)));
+ struct { struct icmphdr header; char data[8]; } request = { .header = { .type = ICMP_ECHO, .un.echo.sequence = htons(55) }, .data = "errping" };
+ struct sockaddr_in alternate = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(0x7f000002) };
+ TEST_RES(sendto(fd, &request, sizeof(request), 0, (struct sockaddr *)&alternate, sizeof(alternate)), _ret == sizeof(request));
+ struct pollfd ready = { .fd = fd, .events = POLLIN }; TEST_RES(poll(&ready, 1, 2000), _ret == 1 && (ready.revents & POLLIN));
+ unsigned char received[256]; TEST_RES(recv(fd, received, sizeof(received), 0), _ret == sizeof(request));
+ unsigned char quote[128]; ssize_t quote_len = -1;
+ for (int i = 0; i < 8 && quote_len < 0; i++) {
+  ready.fd = raw; ready.events = POLLIN; if (poll(&ready, 1, 500) != 1) break;
+  ssize_t n = recv(raw, quote, sizeof(quote), 0);
+  if (n == 36 && quote[0] == 0x45 && quote[20] == ICMP_ECHO && !memcmp(quote + 28, request.data, 8)) quote_len = n;
+ }
+ TEST_RES(quote_len, _ret == 36);
+ if (quote_len != 36) { close(raw); close(fd); write_range(original); __TEST_SUMMARY(); return; }
+ unsigned char error[44] = {}; error[0] = ICMP_TIME_EXCEEDED; error[1] = ICMP_EXC_TTL;
+ memcpy(error + 8, quote, 36); uint16_t sum = checksum(error, sizeof(error)); memcpy(error + 2, &sum, 2);
+ TEST_RES(sendto(raw, error, sizeof(error), 0, (struct sockaddr *)&dst, sizeof(dst)), _ret == sizeof(error));
+ ready.fd = fd; ready.events = POLLIN; TEST_RES(poll(&ready, 1, 2000), _ret == 1 && (ready.revents & POLLERR));
+ union { struct cmsghdr align; char bytes[128]; } control = {};
+ struct sockaddr_in quoted_dst = {}; struct iovec iov = { .iov_base = received, .iov_len = sizeof(received) };
+ struct msghdr msg = { .msg_name = &quoted_dst, .msg_namelen = sizeof(quoted_dst), .msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.bytes, .msg_controllen = sizeof(control.bytes) };
+ TEST_RES(recvmsg(fd, &msg, MSG_ERRQUEUE), _ret == sizeof(request) && !memcmp(received, quote + 20, sizeof(request)));
+ struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); TEST_RES(cmsg, _ret && _ret->cmsg_level == IPPROTO_IP && _ret->cmsg_type == IP_RECVERR);
+ if (cmsg && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct sock_extended_err))) {
+  struct sock_extended_err extended; memcpy(&extended, CMSG_DATA(cmsg), sizeof(extended));
+  TEST_RES(extended.ee_errno, _ret == EHOSTUNREACH); TEST_RES(extended.ee_origin, _ret == SO_EE_ORIGIN_ICMP);
+  TEST_RES(extended.ee_type, _ret == ICMP_TIME_EXCEEDED); TEST_RES(extended.ee_code, _ret == ICMP_EXC_TTL);
+ }
+ TEST_RES(quoted_dst.sin_addr.s_addr, _ret == alternate.sin_addr.s_addr);
+ TEST_SUCC(close(fd)); TEST_SUCC(close(raw)); TEST_SUCC(write_range(original));
 }
 END_TEST()

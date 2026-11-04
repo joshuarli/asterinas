@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/if_addr.h>
 #include <netinet/ip_icmp.h>
 #include <linux/if_ether.h>
@@ -110,5 +111,24 @@ FN_TEST(raw_loopback_source_cannot_escape_and_connected_cannot_rebind)
  TEST_ERRNO(bind(connected, (struct sockaddr *)&loop, sizeof(loop)), EINVAL);
  TEST_ERRNO(sendto(connected, &request, sizeof(request), 0, (struct sockaddr *)&peer, sizeof(peer)), EINVAL);
  TEST_SUCC(close(connected));
+}
+END_TEST()
+
+FN_TEST(ping_socket_rejects_directed_broadcast_bind)
+{
+ const char *path = "/proc/sys/net/ipv4/ping_group_range";
+ int config = TEST_SUCC(open(path, O_RDONLY));
+ if (config < 0) { __TEST_SUMMARY(); return; }
+ char original[64] = {}; ssize_t n = read(config, original, sizeof(original));
+ TEST_RES(n, _ret > 0); TEST_SUCC(close(config));
+ config = TEST_SUCC(open(path, O_WRONLY)); TEST_RES(write(config, "0 0\n", 4), _ret == 4); TEST_SUCC(close(config));
+ int fd = TEST_SUCC(socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP));
+ if (fd >= 0) {
+  struct sockaddr_in address = { .sin_family = AF_INET }; inet_pton(AF_INET, "192.0.2.255", &address.sin_addr);
+  TEST_ERRNO(bind(fd, (struct sockaddr *)&address, sizeof(address)), EADDRNOTAVAIL);
+  inet_pton(AF_INET, "192.0.2.100", &address.sin_addr); TEST_SUCC(bind(fd, (struct sockaddr *)&address, sizeof(address)));
+  TEST_SUCC(close(fd));
+ }
+ config = TEST_SUCC(open(path, O_WRONLY)); TEST_RES(write(config, original, n), _ret == n); TEST_SUCC(close(config));
 }
 END_TEST()
