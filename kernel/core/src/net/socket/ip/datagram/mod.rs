@@ -338,12 +338,12 @@ impl DatagramSocket {
                     return_errno_with_message!(Errno::EACCES, "broadcast requires SO_BROADCAST");
                 }
                 let device = self.options.read().device;
-                let (iface, next_hop) = if dont_route || device.is_bound() {
-                    (self.output_iface(&route_endpoint, dont_route)?, if dont_route { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed })
+                let (iface, next_hop, route) = if dont_route || device.is_bound() {
+                    (self.output_iface(&route_endpoint, dont_route)?, if dont_route { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed }, aster_bigtcp::iface::PathMtuRoute::Default)
                 } else {
                     lookup_udp_route(route_endpoint.addr)?
                 };
-                let path_mtu = iface.path_mtu(route_endpoint.addr);
+                let path_mtu = iface.path_mtu_for_route(route_endpoint.addr, route);
                 let mtu = match mtu_discovery {
                     PathMtuDiscovery::Do | PathMtuDiscovery::Want => path_mtu.mtu,
                     _ => iface.mtu(),
@@ -370,7 +370,7 @@ impl DatagramSocket {
                     (Some(_), _) => return_errno_with_message!(Errno::EAFNOSUPPORT, "IPv4 options require an IPv4 destination"),
                     (None, _) => None,
                 };
-                let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos, next_hop, fragmentation, ipv4_options)?;
+                let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, route, tx_tag, tos, next_hop, fragmentation, ipv4_options)?;
                 Ok((sent_bytes, iface))
             },
         )?;
@@ -627,8 +627,14 @@ impl Socket for DatagramSocket {
                     (options.dont_route, options.packet_options.as_ref().and_then(PacketOptions::first_hop))
                 };
                 let route = IpEndpoint::new(first_hop.map_or(remote.addr, IpAddress::Ipv4), remote.port);
-                let iface = self.output_iface(&route, dont_route)?;
-                ip_mtu.set(iface.path_mtu(remote.addr).mtu as i32);
+                let device = self.options.read().device;
+                let (iface, path) = if dont_route || device.is_bound() {
+                    (self.output_iface(&route, dont_route)?, aster_bigtcp::iface::PathMtuRoute::Default)
+                } else {
+                    let (iface, _, path) = lookup_udp_route(route.addr)?;
+                    (iface, path)
+                };
+                ip_mtu.set(iface.path_mtu_for_route(remote.addr, path).mtu as i32);
                 return Ok(());
             }
             ip_mtu_discover @ MtuDiscover => {

@@ -17,7 +17,7 @@ use super::ReceiveBehavior;
 use crate::{
     errors::udp::SendError,
     ext::Ext,
-    iface::{PacketSlice, UdpFailure, UdpReservation},
+    iface::{PacketSlice, PathMtuRoute, UdpFailure, UdpReservation},
     socket::{
         event::{SocketEventObserver, SocketEvents},
         unbound::{UDP_METADATA_LEN, UDP_RECV_PAYLOAD_LEN, UDP_SEND_PAYLOAD_LEN},
@@ -175,6 +175,7 @@ struct SentPath {
     source: IpEndpoint,
     destination: IpEndpoint,
     ifindex: u32,
+    route: PathMtuRoute,
 }
 
 /// The time an outgoing packet that asked for a timestamp left the interface.
@@ -226,14 +227,14 @@ impl<E: Ext> UdpSocketBg<E> {
         self.inner.errors.lock().peer.is_none_or(|peer| peer == destination)
     }
 
-    pub(crate) fn path_mtu_egress(&self, source: IpEndpoint, destination: IpEndpoint) -> Option<u32> {
+    pub(crate) fn path_mtu_egress(&self, source: IpEndpoint, destination: IpEndpoint) -> Option<(u32, PathMtuRoute)> {
         let open = self.open.lock();
         if !*open { return None; }
         let errors = self.inner.errors.lock();
         if errors.ignore_path_mtu || errors.peer.is_some_and(|peer| peer != destination) { return None; }
         errors.sent_paths.iter().rev()
             .find(|path| path.source == source && path.destination == destination)
-            .map(|path| path.ifindex)
+            .map(|path| (path.ifindex, path.route))
     }
 
     pub(crate) fn report_error(&self, mut error: UdpError) {
@@ -443,6 +444,7 @@ impl<E: Ext> UdpSocket<E> {
         size: usize,
         meta: impl Into<UdpMetadata>,
         iface: u32,
+        route: PathMtuRoute,
         source: IpAddress,
         tos: u8,
         next_hop: UdpNextHop,
@@ -471,7 +473,7 @@ impl<E: Ext> UdpSocket<E> {
                 .map_or(meta.endpoint.addr, IpAddress::Ipv4), meta.endpoint.port);
             errors.sent_paths.retain(|path| path.source != source || path.destination != destination);
             if errors.sent_paths.len() == 64 { errors.sent_paths.pop_front(); }
-            errors.sent_paths.push_back(SentPath { source, destination, ifindex: iface });
+            errors.sent_paths.push_back(SentPath { source, destination, ifindex: iface, route });
         }
         queue.enqueue(TxDatagram { iface, source, destination: meta.endpoint,
             ttl: self.0.inner.ttl.load(Ordering::Relaxed), tos, next_hop, fragmentation, ipv4_options, tag: meta.meta.id, payload })?;
@@ -575,11 +577,11 @@ mod test {
         let snapshot = registry.sockets().pop().unwrap();
         for port in 1..=65 {
             let destination = IpEndpoint::new(address, port);
-            socket.send(0, destination, 7, address, 0, UdpNextHop::Routed,
+            socket.send(0, destination, 7, PathMtuRoute::Default, address, 0, UdpNextHop::Routed,
                 UdpFragmentation::DontFragment, None, |_| Ok::<(), ()>(())).unwrap().unwrap();
         }
         assert!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 1)).is_none());
-        assert_eq!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 65)), Some(7));
+        assert_eq!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 65)), Some((7, PathMtuRoute::Default)));
         drop(socket);
         assert!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 65)).is_none());
     }

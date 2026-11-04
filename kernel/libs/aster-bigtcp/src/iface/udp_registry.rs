@@ -21,6 +21,7 @@ pub struct UdpRegistry<E: Ext> {
 struct PathMtuEntry {
     ifindex: u32,
     destination: IpAddress,
+    route: super::PathMtuRoute,
     mtu: usize,
     locked: bool,
     expires_at_ms: i64,
@@ -92,22 +93,26 @@ impl<E: Ext> UdpRegistry<E> {
     }
 
     pub(crate) fn path_mtu(&self, ifindex: u32, destination: IpAddress, interface_mtu: usize) -> super::PathMtu {
+        self.path_mtu_for_route(ifindex, destination, super::PathMtuRoute::Default, interface_mtu)
+    }
+
+    pub(crate) fn path_mtu_for_route(&self, ifindex: u32, destination: IpAddress, route: super::PathMtuRoute, interface_mtu: usize) -> super::PathMtu {
         let now = super::time::get_network_timestamp().total_millis();
         let mut entries = self.path_mtu.lock();
         entries.retain(|entry| entry.expires_at_ms > now);
-        entries.iter().find(|entry| entry.ifindex == ifindex && entry.destination == destination).map_or(
+        entries.iter().find(|entry| entry.ifindex == ifindex && entry.destination == destination && entry.route == route).map_or(
             super::PathMtu { mtu: interface_mtu, locked: false },
             |entry| super::PathMtu { mtu: entry.mtu.min(interface_mtu), locked: entry.locked },
         )
     }
 
-    pub(crate) fn update_path_mtu(&self, ifindex: u32, destination: IpAddress, advertised_mtu: usize) {
+    pub(crate) fn update_path_mtu_for_route(&self, ifindex: u32, destination: IpAddress, route: super::PathMtuRoute, advertised_mtu: usize) {
         let now = super::time::get_network_timestamp().total_millis();
         let locked = advertised_mtu < 552;
         let mtu = advertised_mtu.max(552);
         let mut entries = self.path_mtu.lock();
         entries.retain(|entry| entry.expires_at_ms > now);
-        if let Some(entry) = entries.iter_mut().find(|entry| entry.ifindex == ifindex && entry.destination == destination) {
+        if let Some(entry) = entries.iter_mut().find(|entry| entry.ifindex == ifindex && entry.destination == destination && entry.route == route) {
             if !entry.locked && mtu <= entry.mtu {
                 entry.mtu = mtu;
                 entry.locked = locked;
@@ -116,7 +121,7 @@ impl<E: Ext> UdpRegistry<E> {
             return;
         }
         if entries.len() == 256 { entries.remove(0); }
-        entries.push(PathMtuEntry { ifindex, destination, mtu, locked, expires_at_ms: now + 600_000 });
+        entries.push(PathMtuEntry { ifindex, destination, route, mtu, locked, expires_at_ms: now + 600_000 });
     }
 
     pub(crate) fn clear_path_mtu(&self, ifindex: u32) {
@@ -252,17 +257,33 @@ mod test {
     }
 
     #[ktest]
+    fn path_mtu_is_specific_to_the_selected_route() {
+        let registry = UdpRegistry::<TestExt>::new();
+        let destination = IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 9));
+        let main = super::super::PathMtuRoute::Default;
+        let alternate = super::super::PathMtuRoute::Table {
+            table: 100, gateway: Some(Ipv4Address::new(192, 0, 2, 2)),
+        };
+        registry.update_path_mtu_for_route(7, destination, main, 600);
+        assert_eq!(registry.path_mtu_for_route(7, destination, main, 1500).mtu, 600);
+        assert_eq!(registry.path_mtu_for_route(7, destination, alternate, 1500).mtu, 1500);
+        registry.update_path_mtu_for_route(7, destination, alternate, 800);
+        assert_eq!(registry.path_mtu_for_route(7, destination, main, 1500).mtu, 600);
+        assert_eq!(registry.path_mtu_for_route(7, destination, alternate, 1500).mtu, 800);
+    }
+
+    #[ktest]
     fn path_mtu_limits_are_bounded_and_cleared_per_interface() {
         let registry = UdpRegistry::<TestExt>::new();
         for index in 0..257 {
             let destination = IpAddress::Ipv4(Ipv4Address::new(10, (index >> 8) as u8, index as u8, 1));
-            registry.update_path_mtu(7, destination, 600);
+            registry.update_path_mtu_for_route(7, destination, super::super::PathMtuRoute::Default, 600);
         }
         let first = IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1));
         let last = IpAddress::Ipv4(Ipv4Address::new(10, 1, 0, 1));
         assert_eq!(registry.path_mtu(7, first, 1500).mtu, 1500);
         assert_eq!(registry.path_mtu(7, last, 1500).mtu, 600);
-        registry.update_path_mtu(8, last, 700);
+        registry.update_path_mtu_for_route(8, last, super::super::PathMtuRoute::Default, 700);
         registry.clear_path_mtu(7);
         assert_eq!(registry.path_mtu(7, last, 1500).mtu, 1500);
         assert_eq!(registry.path_mtu(8, last, 1500).mtu, 700);

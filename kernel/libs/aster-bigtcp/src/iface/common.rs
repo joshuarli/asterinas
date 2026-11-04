@@ -286,6 +286,10 @@ impl<E: Ext> IfaceCommon<E> {
         self.udp.path_mtu(self.index, destination, interface_mtu)
     }
 
+    pub(super) fn path_mtu_for_route(&self, destination: IpAddress, route: super::PathMtuRoute, interface_mtu: usize) -> super::PathMtu {
+        self.udp.path_mtu_for_route(self.index, destination, route, interface_mtu)
+    }
+
     pub(super) fn routes(&self) -> Vec<Route> {
         self.interface.lock().routes()
     }
