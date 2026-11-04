@@ -47,7 +47,7 @@ pub(super) struct PollContext<'a, E: Ext> {
     iface: PollableIfaceMut<'a, E>,
     sockets: &'a SocketTable<E>,
     udp_sockets: &'a [Arc<UdpSocketBg<E>>],
-    udp_registry: &'a super::UdpRegistry<E>,
+    network_registry: &'a super::NetworkRegistry<E>,
     ip_taps: &'a super::ip_tap::IpTaps,
     raw_ip_tx: &'a SpinLock<VecDeque<TxPacketWithDst>, BottomHalfDisabled>,
     ifindex: u32,
@@ -68,7 +68,7 @@ impl<'a, E: Ext> PollContext<'a, E> {
         iface: PollableIfaceMut<'a, E>,
         sockets: &'a SocketTable<E>,
         udp_sockets: &'a [Arc<UdpSocketBg<E>>],
-        udp_registry: &'a super::UdpRegistry<E>,
+        network_registry: &'a super::NetworkRegistry<E>,
         ip_taps: &'a super::ip_tap::IpTaps,
         raw_ip_tx: &'a SpinLock<VecDeque<TxPacketWithDst>, BottomHalfDisabled>,
         ifindex: u32,
@@ -78,7 +78,7 @@ impl<'a, E: Ext> PollContext<'a, E> {
             iface,
             sockets,
             udp_sockets,
-            udp_registry,
+            network_registry,
             ip_taps,
             raw_ip_tx,
             ifindex,
@@ -96,6 +96,13 @@ impl<E: Ext> PollContext<'_, E> {
     ) {
         let ipv4_cidrs = self.iface.ipv4_cidrs();
         loop {
+            if let Some(packet) = self.network_registry.take_forwarded_tcp(self.ifindex) {
+                if let Some(reply) = self.parse_and_process_ip(phy, packet, Some(ip::Version::V4), device.mtu(), true)
+                    && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
+                    && let Err(err) = send_frame(device, phy, taps, tx_packet)
+                { ostd::error!("failed to send a network packet: {:?}", err); }
+                continue;
+            }
             let rx_packet = match device.receive() {
                 Ok(packet) => packet,
                 Err(NetError::NotReady) => match phy.take_looped_frame() {
@@ -125,7 +132,20 @@ impl<E: Ext> PollContext<'_, E> {
                 }
             };
 
-            if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version, device.mtu())
+            let packet = if ip_version != Some(ip::Version::V6) && packet.len() >= 20 {
+                let mut header = [0u8; 20];
+                packet.reader().read(&mut VmWriter::from(&mut header[..]));
+                if header[0] >> 4 == 4 && header[9] == 6 {
+                    let destination = Ipv4Address::new(header[16], header[17], header[18], header[19]);
+                    if !self.iface.is_unicast_local(IpAddress::Ipv4(destination)) {
+                        match self.network_registry.forward_local_tcp(self.ifindex, destination, packet) {
+                            Some(packet) => packet,
+                            None => continue,
+                        }
+                    } else { packet }
+                } else { packet }
+            } else { packet };
+            if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version, device.mtu(), false)
                 && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
                 && let Err(err) = send_frame(device, phy, taps, tx_packet)
             {
@@ -140,16 +160,17 @@ impl<E: Ext> PollContext<'_, E> {
         packet: RxPacket<NetworkLayer>,
         ip_version: Option<ip::Version>,
         mtu: usize,
+        forwarded: bool,
     ) -> Option<TxPacketWithDst> {
         // Parse the IP header. Ignore the packet if the header is ill-formed.
         let checksum_caps = self.iface.context().checksum_caps();
         let now = self.iface.context().now().total_millis();
         let packet = if ip_version != Some(ip::Version::V6) {
-            self.iface.reassemble(packet, now, checksum_caps.ipv4.rx())?
+            self.iface.reassemble(packet, now, forwarded || checksum_caps.ipv4.rx())?
         } else {
             packet
         };
-        let (packet, ip_repr) = ip::parse(packet, ip_version, checksum_caps.ipv4.rx())?;
+        let (packet, ip_repr) = ip::parse(packet, ip_version, forwarded || checksum_caps.ipv4.rx())?;
 
         let can_process = {
             let dst_addr = ip_repr.inner.dst_addr();
@@ -169,7 +190,7 @@ impl<E: Ext> PollContext<'_, E> {
 
         match ip_repr.inner.next_header() {
             IpProtocol::Tcp => {
-                self.parse_and_process_tcp(phy, &ip_repr.inner, packet, checksum_caps.tcp.rx())
+                self.parse_and_process_tcp(phy, &ip_repr.inner, packet, forwarded || checksum_caps.tcp.rx())
             }
             IpProtocol::Udp => {
                 self.parse_and_process_udp(phy, &ip_repr, packet, checksum_caps.udp.rx())
@@ -205,7 +226,7 @@ impl<E: Ext> PollContext<'_, E> {
             let written = builder.append_writer().write(&mut VmReader::from(bytes.as_slice()));
             if written != bytes.len() { return None; }
             builder.commit(written);
-            let path = self.udp_registry.path_mtu(self.ifindex, reply.dst_addr(), mtu);
+            let path = self.network_registry.path_mtu(self.ifindex, reply.dst_addr(), mtu);
             let packet = ip::emit_with_tos(builder.build(), &reply, self.iface.context().checksum_caps().ipv4.tx() || phy.is_loopback(), ip_repr.tos, false);
             let mut queue = self.raw_ip_tx.lock();
             if queue.len() < 64 {
@@ -222,7 +243,7 @@ impl<E: Ext> PollContext<'_, E> {
                 if error.type_ == 3 && error.code == 4
                     && let Some((egress, route)) = socket.path_mtu_egress(error.source, error.destination)
                 {
-                    self.udp_registry.update_path_mtu_for_route(egress, error.destination.addr, route, error.info as usize);
+                    self.network_registry.update_path_mtu_for_route(egress, error.destination.addr, route, error.info as usize);
                 }
                 socket.report_error(UdpError {
                     destination: error.destination,
@@ -684,7 +705,7 @@ impl<E: Ext> PollContext<'_, E> {
 
             let (reply, became_dead) =
                 TcpConnectionBg::dispatch(&socket, &mut self.iface, |iface, ip_repr, tcp_repr| {
-                    let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.udp_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, self.actions);
+                    let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.network_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, self.actions);
 
                     if !this.iface.is_unicast_local(ip_repr.dst_addr()) {
                         tx_packet = this.emit_tcp(phy, ip_repr, tcp_repr);
@@ -771,7 +792,7 @@ impl<E: Ext> PollContext<'_, E> {
             let (cx, pending, fragments, reassembly, ipv4_cidrs) = self.iface.inner_mut();
             socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation, ipv4_options| {
                 let iface = PollableIfaceMut::new(cx, pending, fragments, reassembly, ipv4_cidrs);
-                let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.udp_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, &mut actions);
+                let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.network_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, &mut actions);
 
                 if ipv4_options.is_some() {
                     tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation, ipv4_options);

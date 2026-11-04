@@ -12,7 +12,7 @@ mod port;
 mod sched;
 mod tap;
 mod time;
-mod udp_registry;
+mod network_registry;
 mod wire;
 
 const IFNAMESIZE: usize = 16;
@@ -27,5 +27,5 @@ pub use phy::{EtherIface, IpIface};
 pub(crate) use poll_iface::{PollKey, PollableIfaceMut};
 pub use port::BindPortConfig;
 pub use sched::ScheduleNextPoll;
-pub use udp_registry::{UdpRegistry, UdpReservation};
+pub use network_registry::{NetworkRegistry, UdpReservation};
 pub use tap::{FrameDirection, FrameKind, LinkFrame, LinkTap};

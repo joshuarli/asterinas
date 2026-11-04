@@ -24,4 +24,7 @@ pub trait Ext: 'static {
     ///
     /// UDP sockets stamp each received and transmitted packet with it.
     fn wall_time_ns() -> u64;
+
+    /// Schedules processing of an IP packet forwarded to an interface.
+    fn wake_forwarded_ip(_ifindex: u32) {}
 }
