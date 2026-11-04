@@ -16,6 +16,13 @@ use crate::{
     ext::Ext,
 };
 
+/// The effective IPv4 path MTU and whether its route requires fragmentation.
+#[derive(Clone, Copy)]
+pub struct PathMtu {
+    pub mtu: usize,
+    pub locked: bool,
+}
+
 /// A network interface.
 ///
 /// A network interface (abbreviated as iface) is a hardware or software component that connects a
@@ -150,7 +157,7 @@ impl<E: Ext> dyn Iface<E> {
     }
 
     /// Returns the cached IPv4 path MTU, bounded by the interface MTU.
-    pub fn path_mtu(&self, destination: smoltcp::wire::IpAddress) -> usize {
+    pub fn path_mtu(&self, destination: smoltcp::wire::IpAddress) -> PathMtu {
         self.common().path_mtu(destination, self.mtu())
     }
 
