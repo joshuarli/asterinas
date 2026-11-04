@@ -690,6 +690,14 @@ impl<E: Ext> TcpConnectionBg<E> {
         paths.push_back((sequence, end, ifindex, route));
     }
 
+    fn retire_acknowledged_paths(&self, tcp_repr: &TcpRepr, old_send_queue: usize, new_send_queue: usize) {
+        if new_send_queue >= old_send_queue || tcp_repr.control == TcpControl::Rst { return; }
+        if let Some(ack) = tcp_repr.ack_number {
+            let ack = ack.0 as u32;
+            self.inner.sent_paths.lock().retain(|(start, _, _, _)| (ack.wrapping_sub(*start) as i32) <= 0);
+        }
+    }
+
     pub(crate) fn mtu_feedback_path(&self, sequence: u32) -> Option<(u32, PathMtuRoute)> {
         if !self.inner.lock().is_open() { return None; }
         self.inner.sent_paths.lock().iter().rev().find_map(|(sent, _, ifindex, route)|
@@ -763,14 +771,6 @@ impl<E: Ext> TcpConnectionBg<E> {
             return (TcpProcessResult::NotProcessed, TcpConnBecameDead::TRUE);
         }
 
-        if let Some(ack) = tcp_repr.ack_number {
-            let ack = ack.0 as u32;
-            let mut paths = self.inner.sent_paths.lock();
-            if paths.iter().any(|(start, end, _, _)| ack.wrapping_sub(*start) <= end.wrapping_sub(*start)) {
-                paths.retain(|(_, end, _, _)| (ack.wrapping_sub(*end) as i32) < 0);
-            }
-        }
-
         let old_state = socket.state();
         let old_recv_queue = socket.recv_queue();
         let is_rst = tcp_repr.control == TcpControl::Rst;
@@ -778,10 +778,13 @@ impl<E: Ext> TcpConnectionBg<E> {
         // to be queued.
         let mut events = SocketEvents::CAN_RECV | SocketEvents::CAN_SEND;
 
+        let old_send_queue = socket.send_queue();
         let result = match socket.process(iface.context_mut(), ip_repr, tcp_repr, payload) {
             None => TcpProcessResult::Processed,
             Some((ip_repr, tcp_repr)) => TcpProcessResult::ProcessedWithReply(ip_repr, tcp_repr),
         };
+
+        self.retire_acknowledged_paths(tcp_repr, old_send_queue, socket.send_queue());
 
         let (state_events, became_dead) =
             socket.check_state(self, old_state, old_recv_queue, is_rst);
@@ -828,12 +831,15 @@ impl<E: Ext> TcpConnectionBg<E> {
             }
             is_rst |= tcp_repr.control == TcpControl::Rst;
             events |= SocketEvents::CAN_RECV | SocketEvents::CAN_SEND;
-            reply = socket.process(
+            let old_send_queue = socket.send_queue();
+            let next_reply = socket.process(
                 iface.context_mut(),
                 ip_repr,
                 tcp_repr,
                 PacketSlice::from(tcp_repr.payload),
             );
+            self.retire_acknowledged_paths(tcp_repr, old_send_queue, socket.send_queue());
+            reply = next_reply;
         }
 
         let (state_events, became_dead) =
