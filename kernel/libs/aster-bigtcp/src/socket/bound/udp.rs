@@ -553,7 +553,7 @@ mod test {
 
     #[ktest]
     fn closed_socket_in_poll_snapshot_cannot_match_error() {
-        let registry = crate::iface::UdpRegistry::<TestExt>::new();
+        let registry = crate::iface::NetworkRegistry::<TestExt>::new();
         let local = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::LOCALHOST), 1234);
         let config = crate::iface::BindPortConfig::new(local, false);
         let owner = Arc::new(core::sync::atomic::AtomicU32::new(0));
@@ -567,7 +567,7 @@ mod test {
 
     #[ktest]
     fn path_feedback_uses_the_recent_sent_interface() {
-        let registry = crate::iface::UdpRegistry::<TestExt>::new();
+        let registry = crate::iface::NetworkRegistry::<TestExt>::new();
         let address = IpAddress::Ipv4(Ipv4Address::LOCALHOST);
         let local = IpEndpoint::new(address, 1234);
         let config = crate::iface::BindPortConfig::new(local, false);

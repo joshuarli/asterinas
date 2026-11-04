@@ -7,7 +7,7 @@ use super::{bound::BoundDatagram, observer::DatagramObserver};
 use crate::{
     events::IoEvents,
     net::{
-        iface::udp_registry,
+        iface::network_registry,
         route::lookup_local_iface,
         socket::{
             util::{BoundDevice, check_port_privilege, datagram_common},
@@ -54,7 +54,7 @@ impl datagram_common::Unbound for UnboundDatagram {
             }
         }
         let config = BindPortConfig::new(*endpoint, options.can_reuse);
-        let reservation = udp_registry().bind(config, device.map(|iface| iface.index()), options.reuse_port, self.owner.clone())?;
+        let reservation = network_registry().bind(config, device.map(|iface| iface.index()), options.reuse_port, self.owner.clone())?;
         let bound_socket = UdpSocket::new_bind(reservation, DatagramObserver::new(pollee.clone()));
 
         Ok(BoundDatagram::new(bound_socket))

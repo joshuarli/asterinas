@@ -23,7 +23,7 @@ use smoltcp::{
 };
 
 use super::{
-    Iface, InterfaceName, IpTap, UdpRegistry,
+    Iface, InterfaceName, IpTap, NetworkRegistry,
     ip_tap::IpTaps,
     poll::{PollContext, SocketTableAction},
     poll_iface::PollableIface,
@@ -50,7 +50,7 @@ pub struct IfaceCommon<E: Ext> {
     interface: SpinLock<PollableIface<E>, BottomHalfDisabled>,
     used_ports: SpinLock<PortTable, BottomHalfDisabled>,
     sockets: SpinLock<SocketTable<E>, BottomHalfDisabled>,
-    udp: Arc<UdpRegistry<E>>,
+    network: Arc<NetworkRegistry<E>>,
     taps: LinkTaps,
     ip_taps: IpTaps,
     raw_ip_tx: SpinLock<VecDeque<TxPacketWithDst>, BottomHalfDisabled>,
@@ -153,19 +153,21 @@ impl<E: Ext> IfaceCommon<E> {
         flags: InterfaceFlags,
         interface: smoltcp::iface::Interface,
         sched_poll: E::ScheduleNextPoll,
-        udp: Arc<UdpRegistry<E>>,
+        network: Arc<NetworkRegistry<E>>,
     ) -> Self {
         let index = INTERFACE_INDEX_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
+        let interface = PollableIface::new(interface);
+        network.set_local_addresses(index, &interface.ipv4_cidrs(), flags.contains(InterfaceFlags::UP));
 
         Self {
             index,
             name,
             type_,
             flags: AtomicU32::new(flags.bits()),
-            interface: SpinLock::new(PollableIface::new(interface)),
+            interface: SpinLock::new(interface),
             used_ports: SpinLock::new(PortTable::new()),
             sockets: SpinLock::new(SocketTable::new()),
-            udp,
+            network,
             taps: LinkTaps::new(index, type_),
             ip_taps: IpTaps::new(),
             raw_ip_tx: SpinLock::new(VecDeque::new()),
@@ -198,6 +200,7 @@ impl<E: Ext> IfaceCommon<E> {
         };
         let was_up = previous & InterfaceFlags::UP.bits() != 0;
         if was_up != up {
+            self.network.set_local_addresses(self.index, &self.ipv4_cidrs(), up);
             if !up { self.raw_ip_tx.lock().clear(); }
             self.taps.link_changed(up);
         }
@@ -241,7 +244,8 @@ impl<E: Ext> IfaceCommon<E> {
 
     pub(super) fn set_ipv4_cidrs(&self, cidrs: &[Ipv4Cidr]) -> Result<(), AddressTableFull> {
         self.interface.lock().set_ipv4_cidrs(cidrs)?;
-        self.udp.clear_path_mtu(self.index);
+        self.network.set_local_addresses(self.index, cidrs, self.flags().contains(InterfaceFlags::UP));
+        self.network.clear_path_mtu(self.index);
         Ok(())
     }
 
@@ -250,7 +254,7 @@ impl<E: Ext> IfaceCommon<E> {
         routes: &[(Ipv4Cidr, Ipv4Address)],
     ) -> Result<(), RouteTableFull> {
         self.interface.lock().set_ipv4_gateway_routes(routes)?;
-        self.udp.clear_path_mtu(self.index);
+        self.network.clear_path_mtu(self.index);
         Ok(())
     }
 
@@ -280,14 +284,14 @@ impl<E: Ext> IfaceCommon<E> {
         Ok(())
     }
 
-    pub(super) fn clear_path_mtu(&self) { self.udp.clear_path_mtu(self.index); }
+    pub(super) fn clear_path_mtu(&self) { self.network.clear_path_mtu(self.index); }
 
     pub(super) fn path_mtu(&self, destination: IpAddress, interface_mtu: usize) -> super::PathMtu {
-        self.udp.path_mtu(self.index, destination, interface_mtu)
+        self.network.path_mtu(self.index, destination, interface_mtu)
     }
 
     pub(super) fn path_mtu_for_route(&self, destination: IpAddress, route: super::PathMtuRoute, interface_mtu: usize) -> super::PathMtu {
-        self.udp.path_mtu_for_route(self.index, destination, route, interface_mtu)
+        self.network.path_mtu_for_route(self.index, destination, route, interface_mtu)
     }
 
     pub(super) fn routes(&self) -> Vec<Route> {
@@ -373,6 +377,9 @@ impl<E: Ext> IfaceCommon<E> {
         let next_poll = self.do_poll(device, phy);
         device.notify_poll_end();
         self.sched_poll.schedule_next_poll(next_poll);
+        if self.network.has_forwarded_tcp(self.index) {
+            self.sched_poll.schedule_next_poll(Some(get_network_timestamp().total_millis().max(1) as u64));
+        }
     }
 
     fn do_poll(&self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy) -> Option<u64> {
@@ -385,11 +392,11 @@ impl<E: Ext> IfaceCommon<E> {
             return None;
         }
 
-        let udp_sockets = self.udp.sockets();
+        let udp_sockets = self.network.sockets();
         let mut sockets = self.sockets.lock();
         let mut socket_actions = Vec::new();
 
-        let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, &self.udp, &self.ip_taps, &self.raw_ip_tx, self.index, &mut socket_actions);
+        let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, &self.network, &self.ip_taps, &self.raw_ip_tx, self.index, &mut socket_actions);
         context.poll_ingress(device, phy, &self.taps);
         context.poll_egress(device, phy, &self.taps);
 

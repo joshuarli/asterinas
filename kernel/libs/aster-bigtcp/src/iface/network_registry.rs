@@ -1,21 +1,28 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{collections::BTreeMap, sync::{Arc, Weak}, vec::Vec};
+use alloc::{collections::{BTreeMap, VecDeque}, sync::{Arc, Weak}, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use aster_softirq::BottomHalfDisabled;
 use ostd::sync::SpinLock;
-use smoltcp::wire::{IpAddress, IpEndpoint};
+use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr};
 
 use super::BindPortConfig;
-use crate::{errors::BindError, ext::Ext, socket::UdpSocketBg};
+use crate::{errors::BindError, ext::Ext, packet::{NetworkLayer, RxPacket}, socket::UdpSocketBg};
 
 const EPHEMERAL_START: u16 = 32768;
 const EPHEMERAL_END: u16 = 60999;
 
-pub struct UdpRegistry<E: Ext> {
+pub struct NetworkRegistry<E: Ext> {
     state: SpinLock<State<E>, BottomHalfDisabled>,
     path_mtu: SpinLock<Vec<PathMtuEntry>, BottomHalfDisabled>,
+    local_ingress: SpinLock<LocalIngress, BottomHalfDisabled>,
+}
+
+#[derive(Default)]
+struct LocalIngress {
+    addresses: BTreeMap<u32, (bool, Vec<Ipv4Address>)>,
+    packets: BTreeMap<u32, VecDeque<RxPacket<NetworkLayer>>>,
 }
 
 struct PathMtuEntry {
@@ -43,7 +50,7 @@ struct Binding {
     owner: Arc<AtomicU32>,
 }
 
-impl<E: Ext> UdpRegistry<E> {
+impl<E: Ext> NetworkRegistry<E> {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             state: SpinLock::new(State {
@@ -53,7 +60,35 @@ impl<E: Ext> UdpRegistry<E> {
                 next_port: EPHEMERAL_START,
             }),
             path_mtu: SpinLock::new(Vec::new()),
+            local_ingress: SpinLock::new(LocalIngress::default()),
         })
+    }
+
+    pub(crate) fn set_local_addresses(&self, ifindex: u32, cidrs: &[Ipv4Cidr], up: bool) {
+        let mut ingress = self.local_ingress.lock();
+        ingress.addresses.insert(ifindex, (up, cidrs.iter().map(|cidr| cidr.address()).collect()));
+        if !up { ingress.packets.remove(&ifindex); }
+    }
+
+    pub(crate) fn forward_local_tcp(&self, incoming: u32, destination: Ipv4Address, packet: RxPacket<NetworkLayer>) -> Option<RxPacket<NetworkLayer>> {
+        if destination.is_loopback() { return None; }
+        let mut ingress = self.local_ingress.lock();
+        let owner = ingress.addresses.iter().find_map(|(index, (up, addresses))|
+            (*up && *index != incoming && addresses.contains(&destination)).then_some(*index));
+        let Some(owner) = owner else { return Some(packet); };
+        let queue = ingress.packets.entry(owner).or_default();
+        if queue.len() < 64 { queue.push_back(packet); }
+        drop(ingress);
+        E::wake_forwarded_ip(owner);
+        None
+    }
+
+    pub(crate) fn take_forwarded_tcp(&self, ifindex: u32) -> Option<RxPacket<NetworkLayer>> {
+        self.local_ingress.lock().packets.get_mut(&ifindex)?.pop_front()
+    }
+
+    pub(crate) fn has_forwarded_tcp(&self, ifindex: u32) -> bool {
+        self.local_ingress.lock().packets.get(&ifindex).is_some_and(|packets| !packets.is_empty())
     }
 
     pub fn bind(self: &Arc<Self>, config: BindPortConfig, device: Option<u32>, reuse_port: bool, owner: Arc<AtomicU32>) -> Result<UdpReservation<E>, BindError> {
@@ -177,7 +212,7 @@ fn addresses_overlap(a: IpAddress, b: IpAddress) -> bool {
 }
 
 pub struct UdpReservation<E: Ext> {
-    registry: Arc<UdpRegistry<E>>,
+    registry: Arc<NetworkRegistry<E>>,
     id: u64,
     endpoint: IpEndpoint,
     device: Option<u32>,
@@ -209,7 +244,7 @@ impl<E: Ext> UdpReservation<E> {
             && self.receive_endpoint() == other.receive_endpoint() && self.device == other.device
     }
 
-    pub(crate) fn registry(&self) -> &Arc<UdpRegistry<E>> { &self.registry }
+    pub(crate) fn registry(&self) -> &Arc<NetworkRegistry<E>> { &self.registry }
 
     pub(crate) fn release(&self) {
         if !self.released.swap(true, Ordering::AcqRel) {
@@ -257,8 +292,27 @@ mod test {
     }
 
     #[ktest]
+    fn forwarded_tcp_is_bounded_and_tracks_interface_addresses() {
+        let registry = NetworkRegistry::<TestExt>::new();
+        let destination = Ipv4Address::new(192, 0, 2, 100);
+        let loopback = Ipv4Address::new(127, 0, 0, 1);
+        registry.set_local_addresses(7, &[Ipv4Cidr::new(destination, 24)], true);
+        registry.set_local_addresses(1, &[Ipv4Cidr::new(loopback, 8)], true);
+        let packet = || crate::packet::FreshTxPacket::<NetworkLayer>::alloc(0).unwrap().to_builder().build().to_rx_packet().unwrap();
+        assert!(registry.forward_local_tcp(8, loopback, packet()).is_none());
+        assert!(!registry.has_forwarded_tcp(1));
+        for _ in 0..65 { assert!(registry.forward_local_tcp(8, destination, packet()).is_none()); }
+        for _ in 0..64 { assert!(registry.take_forwarded_tcp(7).is_some()); }
+        assert!(!registry.has_forwarded_tcp(7));
+        assert!(registry.forward_local_tcp(8, destination, packet()).is_none());
+        registry.set_local_addresses(7, &[Ipv4Cidr::new(destination, 24)], false);
+        assert!(!registry.has_forwarded_tcp(7));
+        assert!(registry.forward_local_tcp(8, destination, packet()).is_some());
+    }
+
+    #[ktest]
     fn path_mtu_is_specific_to_the_selected_route() {
-        let registry = UdpRegistry::<TestExt>::new();
+        let registry = NetworkRegistry::<TestExt>::new();
         let destination = IpAddress::Ipv4(Ipv4Address::new(198, 51, 100, 9));
         let main = super::super::PathMtuRoute::Default;
         let alternate = super::super::PathMtuRoute::Table {
@@ -274,7 +328,7 @@ mod test {
 
     #[ktest]
     fn path_mtu_limits_are_bounded_and_cleared_per_interface() {
-        let registry = UdpRegistry::<TestExt>::new();
+        let registry = NetworkRegistry::<TestExt>::new();
         for index in 0..257 {
             let destination = IpAddress::Ipv4(Ipv4Address::new(10, (index >> 8) as u8, index as u8, 1));
             registry.update_path_mtu_for_route(7, destination, super::super::PathMtuRoute::Default, 600);
