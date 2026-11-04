@@ -3,6 +3,7 @@
 mod common;
 #[expect(clippy::module_inception)]
 mod iface;
+mod ip_tap;
 mod packet_slice;
 mod phy;
 mod poll;
@@ -20,6 +21,7 @@ pub type InterfaceName = aster_util::fixed_str::FixedCStr<IFNAMESIZE>;
 pub use common::{BoundPort, BoundTcpPort, InterfaceFlags, InterfaceType};
 pub(crate) use common::UdpFailure;
 pub use iface::{Iface, PathMtu};
+pub use ip_tap::IpTap;
 pub(crate) use packet_slice::PacketSlice;
 pub use phy::{EtherIface, IpIface};
 pub(crate) use poll_iface::{PollKey, PollableIfaceMut};

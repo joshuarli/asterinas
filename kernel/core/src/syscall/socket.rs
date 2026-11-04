@@ -4,7 +4,7 @@ use super::SyscallReturn;
 use crate::{
     fs::file::{FileLike, file_table::FdFlags},
     net::socket::{
-        ip::{DatagramSocket, IpAddressFamily, StreamSocket},
+        ip::{DatagramSocket, IpAddressFamily, RawIpSocket, StreamSocket},
         netlink::{
             NetlinkRouteSocket, NetlinkUeventSocket, StandardNetlinkProtocol, is_valid_protocol,
         },
@@ -55,6 +55,9 @@ pub(super) fn sys_socket(
                 }
                 _ => return_errno_with_message!(Errno::EAFNOSUPPORT, "unsupported protocol"),
             }
+        }
+        (CSocketAddrFamily::AF_INET, SockType::SOCK_RAW) => {
+            RawIpSocket::create(is_nonblocking, protocol)? as Arc<dyn FileLike>
         }
         (CSocketAddrFamily::AF_INET, SockType::SOCK_DGRAM) => {
             let protocol = Protocol::try_from(protocol)?;

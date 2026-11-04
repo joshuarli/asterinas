@@ -14,6 +14,17 @@ pub(in crate::iface) fn reply_tos(original: u8) -> u8 {
     (original & 0x1e) | 0xc0
 }
 
+pub(in crate::iface) fn make_echo_reply(bytes: &mut [u8]) -> bool {
+    if bytes.len() < HEADER_LEN || bytes[0] != 8 || bytes[1] != 0
+        || Checksum::new().with_bytes(bytes).finish() != u16::MAX
+    { return false; }
+    bytes[0] = 0;
+    bytes[2..4].fill(0);
+    let checksum = !Checksum::new().with_bytes(bytes).finish();
+    bytes[2..4].copy_from_slice(&checksum.to_ne_bytes());
+    true
+}
+
 pub(in crate::iface) struct QuotedUdpError<'a> {
     pub source: IpEndpoint,
     pub destination: IpEndpoint,
