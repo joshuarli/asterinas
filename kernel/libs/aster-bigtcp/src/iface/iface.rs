@@ -9,7 +9,7 @@ use smoltcp::{
 
 use super::{
     BindPortConfig, BoundTcpPort, InterfaceFlags, InterfaceName, InterfaceType,
-    LinkTap,
+    LinkTap, IpTap,
 };
 use crate::{
     errors::{AddressTableFull, BindError, LinkSendError, RouteTableFull},
@@ -90,6 +90,15 @@ impl<E: Ext> dyn Iface<E> {
     /// Unregisters an observer of the link-layer frames of the iface.
     pub fn remove_link_tap(&self, tap: &Arc<dyn LinkTap>) {
         self.common().remove_link_tap(tap)
+    }
+
+    /// Registers an observer of locally delivered IP packets.
+    pub fn add_ip_tap(&self, tap: Arc<dyn IpTap>) { self.common().add_ip_tap(tap); }
+    /// Unregisters an IP packet observer.
+    pub fn remove_ip_tap(&self, tap: &Arc<dyn IpTap>) { self.common().remove_ip_tap(tap); }
+    /// Enqueues a complete IPv4 packet for routed transmission using the given path MTU.
+    pub fn send_ipv4_packet(&self, packet: &[u8], mtu: usize) -> Result<(), LinkSendError> {
+        self.common().send_ipv4_packet(packet, mtu)
     }
 
     /// Returns the interface type.

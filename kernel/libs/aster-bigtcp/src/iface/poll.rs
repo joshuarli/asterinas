@@ -2,7 +2,9 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use ostd::mm::{Infallible, VmReader, VmWriter};
+use aster_softirq::BottomHalfDisabled;
+use ostd::{mm::{Infallible, VmReader, VmWriter}, sync::SpinLock};
+use alloc::collections::VecDeque;
 use smoltcp::{
     storage::SliceLike,
     wire::{
@@ -46,6 +48,8 @@ pub(super) struct PollContext<'a, E: Ext> {
     sockets: &'a SocketTable<E>,
     udp_sockets: &'a [Arc<UdpSocketBg<E>>],
     udp_registry: &'a super::UdpRegistry<E>,
+    ip_taps: &'a super::ip_tap::IpTaps,
+    raw_ip_tx: &'a SpinLock<VecDeque<TxPacketWithDst>, BottomHalfDisabled>,
     ifindex: u32,
     actions: &'a mut Vec<SocketTableAction<E>>,
 }
@@ -65,6 +69,8 @@ impl<'a, E: Ext> PollContext<'a, E> {
         sockets: &'a SocketTable<E>,
         udp_sockets: &'a [Arc<UdpSocketBg<E>>],
         udp_registry: &'a super::UdpRegistry<E>,
+        ip_taps: &'a super::ip_tap::IpTaps,
+        raw_ip_tx: &'a SpinLock<VecDeque<TxPacketWithDst>, BottomHalfDisabled>,
         ifindex: u32,
         actions: &'a mut Vec<SocketTableAction<E>>,
     ) -> Self {
@@ -73,6 +79,8 @@ impl<'a, E: Ext> PollContext<'a, E> {
             sockets,
             udp_sockets,
             udp_registry,
+            ip_taps,
+            raw_ip_tx,
             ifindex,
             actions,
         }
@@ -156,6 +164,8 @@ impl<E: Ext> PollContext<'_, E> {
             );
         }
 
+        self.ip_taps.deliver(self.ifindex, ip_repr.inner.next_header().into(), packet.reader_with_header(ip_repr.header_len));
+
         match ip_repr.inner.next_header() {
             IpProtocol::Tcp => {
                 self.parse_and_process_tcp(phy, &ip_repr.inner, packet, checksum_caps.tcp.rx())
@@ -164,8 +174,7 @@ impl<E: Ext> PollContext<'_, E> {
                 self.parse_and_process_udp(phy, &ip_repr, packet, checksum_caps.udp.rx())
             }
             IpProtocol::Icmp if matches!(&ip_repr.inner, IpRepr::Ipv4(_)) => {
-                self.process_icmp(&ip_repr, packet);
-                None
+                self.process_icmp(phy, &ip_repr, packet)
             }
             _ => None,
         }
@@ -173,16 +182,33 @@ impl<E: Ext> PollContext<'_, E> {
 
     fn process_icmp(
         &mut self,
+        phy: &dyn PollPhy,
         ip_repr: &IpReprWithLen,
         packet: RxPacket<TransportLayer>,
-    ) {
+    ) -> Option<TxPacketWithDst> {
         let mut bytes = alloc::vec![0; packet.len()];
         packet.reader().read(&mut VmWriter::from(bytes.as_mut_slice()));
-        let Some(error) = icmp::parse_udp_error(&bytes, true) else {
-            return;
-        };
+        if self.iface.context().is_unicast(ip_repr.inner.src_addr())
+            && self.iface.context().is_unicast(ip_repr.inner.dst_addr())
+            && icmp::make_echo_reply(&mut bytes)
+        {
+            let reply = match &ip_repr.inner {
+                IpRepr::Ipv4(ip) => IpRepr::Ipv4(Ipv4Repr {
+                    src_addr: ip.dst_addr, dst_addr: ip.src_addr, next_header: IpProtocol::Icmp,
+                    payload_len: bytes.len(), hop_limit: 64,
+                }),
+                _ => return None,
+            };
+            let mut builder = phy.alloc_tx_buffer(bytes.len()).ok()?.to_builder_at_layer::<TransportLayer>();
+            let written = builder.append_writer().write(&mut VmReader::from(bytes.as_slice()));
+            if written != bytes.len() { return None; }
+            builder.commit(written);
+            let packet = ip::emit_with_tos(builder.build(), &reply, self.iface.context().checksum_caps().ipv4.tx() || phy.is_loopback(), ip_repr.tos, true);
+            return Some(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), direct: false, fragment_mtu: None, failure: None });
+        }
+        let error = icmp::parse_udp_error(&bytes, true)?;
         if error.source.addr != ip_repr.inner.dst_addr() || !self.iface.is_unicast_local(error.source.addr) {
-            return;
+            return None;
         }
         for socket in self.udp_sockets {
             if socket.can_receive_error(error.source, self.ifindex) && socket.matches_error_destination(error.destination) {
@@ -206,6 +232,7 @@ impl<E: Ext> PollContext<'_, E> {
                 });
             }
         }
+        None
     }
 
     fn parse_and_process_tcp(
@@ -467,7 +494,7 @@ impl<E: Ext> PollContext<'_, E> {
         });
         let checksum_caps = self.iface.context().checksum_caps();
         let packet = icmp::emit_dst_unreachable(builder.build(), reason, checksum_caps.icmpv4.tx() || phy.is_loopback());
-        let packet = ip::emit_with_tos(packet, &reply_ip_repr, checksum_caps.ipv4.tx(), icmp::reply_tos(original_tos), true);
+        let packet = ip::emit_with_tos(packet, &reply_ip_repr, checksum_caps.ipv4.tx() || phy.is_loopback(), icmp::reply_tos(original_tos), true);
 
         Some(TxPacketWithDst {
             packet,
@@ -607,6 +634,9 @@ impl<E: Ext> PollContext<'_, E> {
     }
 
     fn dispatch_ip(&mut self, phy: &dyn PollPhy) -> (bool, Option<TxPacketWithDst>) {
+        if let Some(packet) = self.raw_ip_tx.lock().pop_front() {
+            return (true, Some(packet));
+        }
         let (did_something_tcp, tx_packet) = self.dispatch_tcp(phy);
 
         if tx_packet.is_some() {
@@ -635,7 +665,7 @@ impl<E: Ext> PollContext<'_, E> {
 
             let (reply, became_dead) =
                 TcpConnectionBg::dispatch(&socket, &mut self.iface, |iface, ip_repr, tcp_repr| {
-                    let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.udp_registry, self.ifindex, self.actions);
+                    let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.udp_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, self.actions);
 
                     if !this.iface.is_unicast_local(ip_repr.dst_addr()) {
                         tx_packet = this.emit_tcp(phy, ip_repr, tcp_repr);
@@ -722,7 +752,7 @@ impl<E: Ext> PollContext<'_, E> {
             let (cx, pending, fragments, reassembly, ipv4_cidrs) = self.iface.inner_mut();
             socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation| {
                 let iface = PollableIfaceMut::new(cx, pending, fragments, reassembly, ipv4_cidrs);
-                let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.udp_registry, self.ifindex, &mut actions);
+                let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.udp_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, &mut actions);
 
                 let is_broadcast = this.iface.context().is_broadcast(&ip_repr.dst_addr());
                 if phy.is_loopback() && this.iface.is_unicast_local(ip_repr.dst_addr()) && !is_broadcast {

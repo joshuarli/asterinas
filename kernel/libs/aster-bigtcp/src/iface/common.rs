@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{
-    collections::btree_map::{BTreeMap, Entry},
+    collections::{btree_map::{BTreeMap, Entry}, VecDeque},
     sync::Arc,
     vec::Vec,
 };
@@ -23,7 +23,8 @@ use smoltcp::{
 };
 
 use super::{
-    Iface, InterfaceName, UdpRegistry,
+    Iface, InterfaceName, IpTap, UdpRegistry,
+    ip_tap::IpTaps,
     poll::{PollContext, SocketTableAction},
     poll_iface::PollableIface,
     port::BindPortConfig,
@@ -51,6 +52,8 @@ pub struct IfaceCommon<E: Ext> {
     sockets: SpinLock<SocketTable<E>, BottomHalfDisabled>,
     udp: Arc<UdpRegistry<E>>,
     taps: LinkTaps,
+    ip_taps: IpTaps,
+    raw_ip_tx: SpinLock<VecDeque<TxPacketWithDst>, BottomHalfDisabled>,
     sched_poll: E::ScheduleNextPoll,
 }
 
@@ -164,6 +167,8 @@ impl<E: Ext> IfaceCommon<E> {
             sockets: SpinLock::new(SocketTable::new()),
             udp,
             taps: LinkTaps::new(index, type_),
+            ip_taps: IpTaps::new(),
+            raw_ip_tx: SpinLock::new(VecDeque::new()),
             sched_poll,
         }
     }
@@ -193,6 +198,7 @@ impl<E: Ext> IfaceCommon<E> {
         };
         let was_up = previous & InterfaceFlags::UP.bits() != 0;
         if was_up != up {
+            if !up { self.raw_ip_tx.lock().clear(); }
             self.taps.link_changed(up);
         }
     }
@@ -250,6 +256,28 @@ impl<E: Ext> IfaceCommon<E> {
 
     pub(super) fn ipv6_cidr(&self) -> Option<Ipv6Cidr> {
         self.interface.lock().ipv6_cidr()
+    }
+
+    pub(super) fn add_ip_tap(&self, tap: Arc<dyn IpTap>) { self.ip_taps.add(tap); }
+    pub(super) fn remove_ip_tap(&self, tap: &Arc<dyn IpTap>) { self.ip_taps.remove(tap); }
+
+    pub(super) fn send_ipv4_packet(&self, bytes: &[u8], mtu: usize) -> Result<(), LinkSendError> {
+        self.ensure_up()?;
+        if bytes.len() < 20 || bytes[0] >> 4 != 4 || usize::from(u16::from_be_bytes([bytes[2], bytes[3]])) != bytes.len() {
+            return Err(LinkSendError::UnsupportedProtocol);
+        }
+        let header_len = usize::from(bytes[0] & 15) * 4;
+        if header_len < 20 || header_len > bytes.len() { return Err(LinkSendError::UnsupportedProtocol); }
+        let destination = IpAddress::Ipv4(Ipv4Address::new(bytes[16], bytes[17], bytes[18], bytes[19]));
+        let mut packet = FreshTxPacket::<NetworkLayer>::alloc(bytes.len()).map_err(|_| LinkSendError::NoMemory)?.to_builder();
+        let written = packet.append_writer().write(&mut VmReader::from(bytes));
+        if written != bytes.len() { return Err(LinkSendError::NoMemory); }
+        packet.commit(written);
+        let mut queue = self.raw_ip_tx.lock();
+        self.ensure_up()?;
+        if queue.len() >= 64 { return Err(LinkSendError::Busy); }
+        queue.push_back(TxPacketWithDst { packet: packet.build(), dst_addr: destination, direct: false, fragment_mtu: Some(mtu), failure: None });
+        Ok(())
     }
 
     pub(super) fn path_mtu(&self, destination: IpAddress, interface_mtu: usize) -> super::PathMtu {
@@ -355,7 +383,7 @@ impl<E: Ext> IfaceCommon<E> {
         let mut sockets = self.sockets.lock();
         let mut socket_actions = Vec::new();
 
-        let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, &self.udp, self.index, &mut socket_actions);
+        let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, &self.udp, &self.ip_taps, &self.raw_ip_tx, self.index, &mut socket_actions);
         context.poll_ingress(device, phy, &self.taps);
         context.poll_egress(device, phy, &self.taps);
 
