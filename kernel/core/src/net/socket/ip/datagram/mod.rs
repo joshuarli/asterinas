@@ -325,6 +325,7 @@ impl DatagramSocket {
             let options = self.options.read();
             bound.set_receive_errors(options.ip.recverr());
             bound.set_ignore_fragmentation_error(options.mtu_discover == PathMtuDiscovery::Dont);
+            bound.set_ignore_path_mtu(matches!(options.mtu_discover, PathMtuDiscovery::Interface | PathMtuDiscovery::Omit));
             bound.set_hop_limit(options.ip.ttl().get());
         }
         Ok(())
@@ -420,6 +421,7 @@ impl Socket for DatagramSocket {
             let options = self.options.read();
             bound.set_receive_errors(options.ip.recverr());
             bound.set_ignore_fragmentation_error(options.mtu_discover == PathMtuDiscovery::Dont);
+            bound.set_ignore_path_mtu(matches!(options.mtu_discover, PathMtuDiscovery::Interface | PathMtuDiscovery::Omit));
             bound.set_hop_limit(options.ip.ttl().get());
         }
         Ok(())
@@ -589,6 +591,7 @@ impl Socket for DatagramSocket {
                 self.options.write().mtu_discover = mode;
                 if let Inner::Bound(bound) = &*inner {
                     bound.set_ignore_fragmentation_error(mode == PathMtuDiscovery::Dont);
+                    bound.set_ignore_path_mtu(matches!(mode, PathMtuDiscovery::Interface | PathMtuDiscovery::Omit));
                 }
                 return Ok(());
             }
@@ -627,6 +630,7 @@ impl Socket for DatagramSocket {
         if let Inner::Bound(bound) = &*inner {
             bound.set_receive_errors(options.ip.recverr());
             bound.set_ignore_fragmentation_error(options.mtu_discover == PathMtuDiscovery::Dont);
+            bound.set_ignore_path_mtu(matches!(options.mtu_discover, PathMtuDiscovery::Interface | PathMtuDiscovery::Omit));
             bound.set_hop_limit(options.ip.ttl().get());
         }
 

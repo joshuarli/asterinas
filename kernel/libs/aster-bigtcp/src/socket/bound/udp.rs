@@ -147,6 +147,7 @@ struct UdpErrors {
     peer: Option<IpEndpoint>,
     recverr: bool,
     ignore_fragmentation_error: bool,
+    ignore_path_mtu: bool,
     pending: Option<UdpErrorOrigin>,
     queue: VecDeque<UdpError>,
     queued_bytes: usize,
@@ -199,6 +200,11 @@ impl<E: Ext> UdpSocketBg<E> {
 
     pub(crate) fn matches_error_destination(&self, destination: IpEndpoint) -> bool {
         self.inner.errors.lock().peer.is_none_or(|peer| peer == destination)
+    }
+
+    pub(crate) fn accepts_path_mtu(&self) -> bool {
+        let open = self.open.lock();
+        *open && !self.inner.errors.lock().ignore_path_mtu
     }
 
     pub(crate) fn report_error(&self, mut error: UdpError) {
@@ -340,6 +346,10 @@ impl<E: Ext> UdpSocket<E> {
 
     pub fn set_ignore_fragmentation_error(&self, ignore: bool) {
         self.0.inner.errors.lock().ignore_fragmentation_error = ignore;
+    }
+
+    pub fn set_ignore_path_mtu(&self, ignore: bool) {
+        self.0.inner.errors.lock().ignore_path_mtu = ignore;
     }
 
     pub fn set_receive_errors(&self, enabled: bool) {

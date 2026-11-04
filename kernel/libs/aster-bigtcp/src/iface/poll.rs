@@ -184,7 +184,7 @@ impl<E: Ext> PollContext<'_, E> {
         let mut matched = false;
         for socket in self.udp_sockets {
             if socket.can_receive_error(error.source, self.ifindex) && socket.matches_error_destination(error.destination) {
-                matched = true;
+                matched |= socket.accepts_path_mtu();
                 socket.report_error(UdpError {
                     destination: error.destination,
                     payload: error.payload.to_vec(),
