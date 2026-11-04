@@ -42,6 +42,18 @@ proc_dir!(Ipv4DirOps);
 impl PingGroupRangeFileOps {
     fn new_inode(parent: Weak<dyn Inode>) -> Arc<dyn Inode> { ProcFile::new(Self, parent, mkmod!(a+r, u+w)) }
 }
+fn parse_group_id(value: &str) -> Option<u32> {
+    if !value.as_bytes().first()?.is_ascii_digit() { return None; }
+    let (digits, radix) = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        (hex, 16)
+    } else if value.len() > 1 && value.starts_with('0') {
+        (&value[1..], 8)
+    } else {
+        (value, 10)
+    };
+    u32::from_str_radix(digits, radix).ok().filter(|value| *value != u32::MAX)
+}
+
 impl ProcFileOps for PingGroupRangeFileOps {
     fn read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
         let (low, high) = ping_group_range();
@@ -53,10 +65,10 @@ impl ProcFileOps for PingGroupRangeFileOps {
         let (value, read) = reader.read_cstring_until_end(31)?;
         let value = value.to_str().map_err(|_| Errno::EINVAL)?;
         let mut numbers = value.split_whitespace();
-        let low = numbers.next().and_then(|value| value.parse::<u32>().ok()).filter(|value| *value != u32::MAX)
+        let low = numbers.next().and_then(parse_group_id)
             .ok_or_else(|| Error::from(Errno::EINVAL))?;
         let high = match numbers.next() {
-            Some(value) => value.parse::<u32>().ok().filter(|value| *value != u32::MAX).ok_or_else(|| Error::from(Errno::EINVAL))?,
+            Some(value) => parse_group_id(value).ok_or_else(|| Error::from(Errno::EINVAL))?,
             None => ping_group_range().1,
         };
         set_ping_group_range(low, high);
