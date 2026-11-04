@@ -7,7 +7,7 @@ mod unbound;
 
 pub use bound::{
     ConnectState, NeedIfacePoll, RawTcpSocketExt, ReceiveBehavior, TcpConnection, TcpListener,
-    TxTimestamp, UdpError, UdpErrorOrigin, UdpFragmentation, UdpIpv4Options, UdpNextHop, UdpSocket,
+    TxTimestamp, UdpError, UdpErrorOrigin, UdpFragmentation, UdpIpv4Options, IpNextHop, UdpSocket,
 };
 pub(crate) use bound::{TcpConnectionBg, TcpListenerBg, TcpProcessResult, UdpSocketBg};
 pub use event::{SocketEventObserver, SocketEvents};

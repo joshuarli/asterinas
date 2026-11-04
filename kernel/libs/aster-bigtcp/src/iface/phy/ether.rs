@@ -32,7 +32,7 @@ use crate::{
         wire::{arp, ether, icmp},
     },
     packet::{FreshTxPacket, LinkLayer, RxPacket, TransportLayer, TxPacket},
-    socket::UdpNextHop,
+    socket::IpNextHop,
 };
 
 pub struct EtherIface<D, E: Ext> {
@@ -162,9 +162,9 @@ impl<D: WithDevice + 'static, E: Ext> PollPhy for EtherIface<D, E> {
         ipv4_cidrs: &[Ipv4Cidr],
     ) -> Option<TxPacket<LinkLayer>> {
         let route = match packet.next_hop {
-            UdpNextHop::Routed => iface_cx.route(&packet.dst_addr, iface_cx.now()),
-            UdpNextHop::Direct => Some(packet.dst_addr),
-            UdpNextHop::Gateway(gateway) => Some(IpAddress::Ipv4(gateway)),
+            IpNextHop::Routed => iface_cx.route(&packet.dst_addr, iface_cx.now()),
+            IpNextHop::Direct => Some(packet.dst_addr),
+            IpNextHop::Gateway(gateway) => Some(IpAddress::Ipv4(gateway)),
         };
         let next_hop_ip = match route {
             Some(IpAddress::Ipv4(next_hop_ip)) => next_hop_ip,

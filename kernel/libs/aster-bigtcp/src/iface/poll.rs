@@ -29,7 +29,7 @@ use crate::{
     ext::Ext,
     iface::poll_iface::IsUnicast,
     packet::{ApplicationLayer, FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
-    socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin, UdpFragmentation, UdpIpv4Options, UdpNextHop, UdpSocketBg},
+    socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin, UdpFragmentation, UdpIpv4Options, IpNextHop, UdpSocketBg},
     socket_table::{ConnectionKey, ListenerKey, SocketTable, hash_local_remote},
 };
 
@@ -209,7 +209,7 @@ impl<E: Ext> PollContext<'_, E> {
             let packet = ip::emit_with_tos(builder.build(), &reply, self.iface.context().checksum_caps().ipv4.tx() || phy.is_loopback(), ip_repr.tos, false);
             let mut queue = self.raw_ip_tx.lock();
             if queue.len() < 64 {
-                queue.push_back(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), next_hop: UdpNextHop::Routed, fragment_mtu: Some(path.mtu), failure: None });
+                queue.push_back(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), next_hop: IpNextHop::Routed, fragment_mtu: Some(path.mtu), failure: None });
             }
             return None;
         }
@@ -506,7 +506,7 @@ impl<E: Ext> PollContext<'_, E> {
         Some(TxPacketWithDst {
             packet,
             dst_addr: reply_ip_repr.dst_addr(),
-            next_hop: UdpNextHop::Routed,
+            next_hop: IpNextHop::Routed,
             fragment_mtu: None,
             failure: None,
         })
@@ -527,7 +527,7 @@ impl<E: Ext> PollContext<'_, E> {
         Some(TxPacketWithDst {
             packet,
             dst_addr: ip_repr.dst_addr(),
-            next_hop: UdpNextHop::Routed,
+            next_hop: IpNextHop::Routed,
             fragment_mtu: None,
             failure: None,
         })
@@ -540,7 +540,7 @@ impl<E: Ext> PollContext<'_, E> {
         udp_repr: &UdpRepr,
         payload: &[u8],
         tos: u8,
-        next_hop: UdpNextHop,
+        next_hop: IpNextHop,
         fragmentation: UdpFragmentation,
         ipv4_options: Option<&UdpIpv4Options>,
     ) -> Option<TxPacketWithDst> {

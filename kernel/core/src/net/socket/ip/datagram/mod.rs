@@ -15,7 +15,7 @@ use crate::{
     fs::file::FileCommon,
     net::{
         iface::iter_all_ifaces,
-        route::{is_broadcast_endpoint, lookup_udp_route},
+        route::{is_broadcast_endpoint, lookup_output_route},
         socket::{
             Socket,
             ip::{
@@ -342,7 +342,7 @@ impl DatagramSocket {
                     return_errno_with_message!(Errno::EACCES, "broadcast requires SO_BROADCAST");
                 }
                 let device = device.iface()?.map(|iface| iface.index());
-                let (iface, next_hop, route) = lookup_udp_route(route_endpoint.addr, mark, dont_route, device)?;
+                let (iface, next_hop, route) = lookup_output_route(route_endpoint.addr, mark, dont_route, device)?;
                 if remote.is_none() {
                     let mut options = self.options.write();
                     if options.mark == mark { options.route_valid = true; }
@@ -505,7 +505,7 @@ impl Socket for DatagramSocket {
         let first_hop = options.packet_options.as_ref().and_then(PacketOptions::first_hop);
         let route_endpoint = IpEndpoint::new(first_hop.map_or(endpoint.addr, IpAddress::Ipv4), endpoint.port);
         let device = options.device.iface()?.map(|iface| iface.index());
-        let (iface, _, _) = lookup_udp_route(route_endpoint.addr, options.mark, options.dont_route, device)?;
+        let (iface, _, _) = lookup_output_route(route_endpoint.addr, options.mark, options.dont_route, device)?;
         if let Inner::Bound(bound) = &mut *inner {
             let local = bound.local_endpoint().addr;
             if matches!(local, IpAddress::Ipv4(address) if address.is_loopback())
@@ -625,7 +625,7 @@ impl Socket for DatagramSocket {
                 };
                 let route = IpEndpoint::new(first_hop.map_or(remote.addr, IpAddress::Ipv4), remote.port);
                 let device = self.options.read().device.iface()?.map(|iface| iface.index());
-                let (iface, _, path) = lookup_udp_route(route.addr, mark, dont_route, device)?;
+                let (iface, _, path) = lookup_output_route(route.addr, mark, dont_route, device)?;
                 ip_mtu.set(iface.path_mtu_for_route(remote.addr, path).mtu as i32);
                 return Ok(());
             }

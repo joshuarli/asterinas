@@ -7,13 +7,13 @@ use super::{common::{get_ephemeral_endpoint_on, icmp_error_errno, map_unspecifie
 use crate::{
     events::IoEvents,
     fs::file::FileCommon,
-    net::{iface::{Iface, iter_all_ifaces}, route::{is_broadcast_endpoint, lookup_iface, lookup_local_iface}, socket::{
+    net::{iface::{Iface, iter_all_ifaces}, route::{is_broadcast_endpoint, lookup_output_route, lookup_local_iface}, socket::{
         Socket, new_socket_common,
         ip::IpControlMessage,
-        options::{Error as SocketError, SocketOption, Timestamping, macros::{sock_option_mut, sock_option_ref}},
+        options::{Error as SocketError, SocketMark, SocketOption, Timestamping, macros::{sock_option_mut, sock_option_ref}},
         private::SocketPrivate,
         util::{ControlMessage, MessageHeader, RecvFlags, RecvOutput, SendFlags, SocketAddr,
-            options::{GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts, check_current_net_raw}},
+            options::{GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts, check_current_net_raw, check_current_privileged}},
     }},
     prelude::*,
     process::signal::{PollHandle, Pollable, Pollee},
@@ -124,7 +124,7 @@ impl IpPacketTap {
     }
 }
 
-struct Options { socket: SocketOptionSet, ip: IpOptionSet }
+struct Options { socket: SocketOptionSet, ip: IpOptionSet, mark: u32 }
 
 pub(crate) struct IpPacketSocket {
     tap: Arc<IpPacketTap>,
@@ -162,7 +162,7 @@ impl IpPacketSocket {
         let observer: Arc<dyn IpTap> = tap.clone();
         for iface in &registered { iface.add_ip_tap(observer.clone()); }
         Arc::new(Self { tap, registered, options: RwLock::new(Options {
-            socket: socket_options, ip: IpOptionSet::new_udp(),
+            socket: socket_options, ip: IpOptionSet::new_udp(), mark: 0,
         }), timeouts: SocketTimeouts::new(), pollee, common: new_socket_common(is_nonblocking) })
     }
 
@@ -291,7 +291,8 @@ impl Socket for IpPacketSocket {
     fn connect(&self, address: SocketAddr) -> Result<()> {
         let endpoint: IpEndpoint = map_unspecified_to_localhost(address.try_into()?);
         let IpAddress::Ipv4(peer) = endpoint.addr else { return_errno_with_message!(Errno::EAFNOSUPPORT, "expected an IPv4 address"); };
-        let iface = lookup_iface(endpoint.addr)?;
+        let mark = self.options.read().mark;
+        let (iface, _, _) = lookup_output_route(endpoint.addr, mark, false, None)?;
         if is_broadcast_endpoint(&endpoint) && !self.options.read().socket.broadcast() {
             return_errno_with_message!(Errno::EACCES, "broadcast requires SO_BROADCAST");
         }
@@ -337,7 +338,8 @@ impl Socket for IpPacketSocket {
             None => self.tap.state.lock().peer.ok_or_else(|| Error::from(Errno::EDESTADDRREQ))?,
         };
         let endpoint = map_unspecified_to_localhost(IpEndpoint::new(destination.into(), 0));
-        let iface = lookup_iface(endpoint.addr)?;
+        let mark = self.options.read().mark;
+        let (iface, next_hop, route) = lookup_output_route(endpoint.addr, mark, false, None)?;
         if is_broadcast_endpoint(&endpoint) && !self.options.read().socket.broadcast() {
             return_errno_with_message!(Errno::EACCES, "broadcast requires SO_BROADCAST");
         }
@@ -365,7 +367,7 @@ impl Socket for IpPacketSocket {
         }
         let options = self.options.read();
         packet[0] = 0x45; packet[1] = options.ip.tos(); packet[2..4].copy_from_slice(&((copied + 20) as u16).to_be_bytes());
-        let path = iface.path_mtu(endpoint.addr);
+        let path = iface.path_mtu_for_route(endpoint.addr, route);
         let dont_fragment = !path.locked && copied + 20 <= path.mtu;
         let id = if dont_fragment { 0 } else { NEXT_IP_ID.fetch_add(1, Ordering::Relaxed) };
         packet[4..6].copy_from_slice(&id.to_be_bytes());
@@ -374,7 +376,7 @@ impl Socket for IpPacketSocket {
         packet[12..16].copy_from_slice(&source.octets()); packet[16..20].copy_from_slice(&destination.octets());
         let checksum = internet_checksum(&packet[..20]); packet[10..12].copy_from_slice(&checksum.to_be_bytes());
         drop(options);
-        iface.send_ipv4_packet(&packet, path.mtu).map_err(|error| Error::with_message(match error {
+        iface.send_ipv4_packet(&packet, path.mtu, next_hop).map_err(|error| Error::with_message(match error {
             aster_bigtcp::errors::LinkSendError::Down => Errno::ENETDOWN,
             aster_bigtcp::errors::LinkSendError::TooLong => Errno::EMSGSIZE,
             aster_bigtcp::errors::LinkSendError::Busy | aster_bigtcp::errors::LinkSendError::NoMemory => Errno::ENOBUFS,
@@ -394,7 +396,11 @@ impl Socket for IpPacketSocket {
     }
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
-        sock_option_mut!(match option { error @ SocketError => { error.set(self.take_pending_error().map(Error::from)); return Ok(()); } _ => (), });
+        sock_option_mut!(match option {
+            error @ SocketError => { error.set(self.take_pending_error().map(Error::from)); return Ok(()); }
+            mark @ SocketMark => { mark.set(self.options.read().mark); return Ok(()); }
+            _ => (),
+        });
         let options = self.options.read();
         let level = IpSocketLevel(&self.timeouts, self.tap.kind.socket_type());
         match options.socket.get_option(option, &level) {
@@ -405,6 +411,11 @@ impl Socket for IpPacketSocket {
 
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
         sock_option_ref!(match option {
+            mark @ SocketMark => {
+                check_current_net_raw().or_else(|_| check_current_privileged())?;
+                self.options.write().mark = *mark.get().unwrap();
+                return Ok(());
+            }
             pktinfo @ Pktinfo => {
                 if *pktinfo.get().unwrap() { return_errno_with_message!(Errno::ENOPROTOOPT, "raw IPv4 packet information is not supported"); }
             }
