@@ -200,8 +200,8 @@ impl<E: Ext> PollContext<'_, E> {
                 });
             }
         }
-        if matched && error.type_ == 3 && error.code == 4 && error.info != 0 {
-            self.iface.update_path_mtu(error.destination.addr, (error.info as usize).max(552));
+        if matched && error.type_ == 3 && error.code == 4 {
+            self.iface.update_path_mtu(error.destination.addr, error.info as usize);
         }
     }
 

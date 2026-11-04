@@ -27,6 +27,7 @@ fn is_unicast_local_v4(addresses: &[smoltcp::wire::Ipv4Cidr], destination: smolt
 pub(crate) struct PathMtuEntry {
     destination: smoltcp::wire::IpAddress,
     mtu: usize,
+    locked: bool,
     expires_at_ms: i64,
 }
 
@@ -145,10 +146,13 @@ impl<E: Ext> PollableIface<E> {
         result
     }
 
-    pub(super) fn path_mtu(&mut self, destination: smoltcp::wire::IpAddress, interface_mtu: usize) -> usize {
+    pub(super) fn path_mtu(&mut self, destination: smoltcp::wire::IpAddress, interface_mtu: usize) -> super::PathMtu {
         let now = super::time::get_network_timestamp().total_millis();
         self.path_mtu.retain(|entry| entry.expires_at_ms > now);
-        self.path_mtu.iter().find(|entry| entry.destination == destination).map_or(interface_mtu, |entry| entry.mtu.min(interface_mtu))
+        self.path_mtu.iter().find(|entry| entry.destination == destination).map_or(
+            super::PathMtu { mtu: interface_mtu, locked: false },
+            |entry| super::PathMtu { mtu: entry.mtu.min(interface_mtu), locked: entry.locked },
+        )
     }
 
     pub(super) fn ipv6_cidr(&self) -> Option<smoltcp::wire::Ipv6Cidr> {
@@ -274,15 +278,21 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
         self.ipv4_cidrs
     }
 
-    pub(super) fn update_path_mtu(&mut self, destination: smoltcp::wire::IpAddress, mtu: usize) {
+    pub(super) fn update_path_mtu(&mut self, destination: smoltcp::wire::IpAddress, advertised_mtu: usize) {
+        let locked = advertised_mtu < 552;
+        let mtu = advertised_mtu.max(552);
         let now = self.context.now().total_millis();
         self.path_mtu.retain(|entry| entry.expires_at_ms > now);
         if let Some(entry) = self.path_mtu.iter_mut().find(|entry| entry.destination == destination) {
-            if mtu <= entry.mtu { entry.mtu = mtu; entry.expires_at_ms = now + 600_000; }
+            if !entry.locked && mtu <= entry.mtu {
+                entry.mtu = mtu;
+                entry.locked = locked;
+                entry.expires_at_ms = now + 600_000;
+            }
             return;
         }
         if self.path_mtu.len() == 256 { self.path_mtu.remove(0); }
-        self.path_mtu.push(PathMtuEntry { destination, mtu, expires_at_ms: now + 600_000 });
+        self.path_mtu.push(PathMtuEntry { destination, mtu, locked, expires_at_ms: now + 600_000 });
     }
 
     pub(super) fn pending_fragments(&mut self) -> &mut VecDeque<TxPacketWithDst> {

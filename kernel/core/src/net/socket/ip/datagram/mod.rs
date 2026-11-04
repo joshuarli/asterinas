@@ -278,7 +278,7 @@ impl DatagramSocket {
                 let iface = self.output_iface(&remote_endpoint, dont_route)?;
                 let path_mtu = iface.path_mtu(remote_endpoint.addr);
                 let mtu = match mtu_discovery {
-                    PathMtuDiscovery::Do | PathMtuDiscovery::Want => path_mtu,
+                    PathMtuDiscovery::Do | PathMtuDiscovery::Want => path_mtu.mtu,
                     _ => iface.mtu(),
                 };
                 if matches!(mtu_discovery, PathMtuDiscovery::Do | PathMtuDiscovery::Probe | PathMtuDiscovery::Interface)
@@ -294,9 +294,9 @@ impl DatagramSocket {
                 };
                 let next_hop = if dont_route { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed };
                 let fragmentation = match mtu_discovery {
-                    PathMtuDiscovery::Dont => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu),
+                    PathMtuDiscovery::Dont => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu.mtu),
                     PathMtuDiscovery::Omit => aster_bigtcp::socket::UdpFragmentation::Allow(iface.mtu()),
-                    PathMtuDiscovery::Want if reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > path_mtu => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu),
+                    PathMtuDiscovery::Want if path_mtu.locked || reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > path_mtu.mtu => aster_bigtcp::socket::UdpFragmentation::Allow(path_mtu.mtu),
                     _ => aster_bigtcp::socket::UdpFragmentation::DontFragment,
                 };
                 let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos, next_hop, fragmentation)?;
@@ -543,7 +543,7 @@ impl Socket for DatagramSocket {
                 let remote = *self.inner.read().peer_addr().ok_or_else(|| Error::from(Errno::ENOTCONN))?;
                 let dont_route = self.options.read().dont_route;
                 let iface = self.output_iface(&remote, dont_route)?;
-                ip_mtu.set(iface.path_mtu(remote.addr) as i32);
+                ip_mtu.set(iface.path_mtu(remote.addr).mtu as i32);
                 return Ok(());
             }
             ip_mtu_discover @ MtuDiscover => {

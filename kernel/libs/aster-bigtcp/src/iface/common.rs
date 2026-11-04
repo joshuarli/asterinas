@@ -248,7 +248,7 @@ impl<E: Ext> IfaceCommon<E> {
         self.interface.lock().ipv6_cidr()
     }
 
-    pub(super) fn path_mtu(&self, destination: IpAddress, interface_mtu: usize) -> usize {
+    pub(super) fn path_mtu(&self, destination: IpAddress, interface_mtu: usize) -> super::PathMtu {
         self.interface.lock().path_mtu(destination, interface_mtu)
     }
 
