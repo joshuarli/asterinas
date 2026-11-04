@@ -2,11 +2,13 @@
 
 use alloc::{
     boxed::Box,
+    collections::VecDeque,
     sync::{Arc, Weak},
 };
 use core::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use aster_softirq::BottomHalfDisabled;
@@ -26,7 +28,7 @@ use crate::{
     define_boolean_value,
     errors::tcp::{ConnectError, IoError, RecvError, SendError},
     ext::Ext,
-    iface::{BoundTcpPort, PacketSlice, PollKey, PollableIfaceMut},
+    iface::{BoundTcpPort, PacketSlice, PathMtuRoute, PollKey, PollableIfaceMut},
     socket::{
         event::SocketEvents,
         option::{RawTcpOption, RawTcpSetOption},
@@ -42,6 +44,8 @@ pub struct TcpConnectionInner<E: Ext> {
     socket: SpinLock<RawTcpSocketExt<E>, BottomHalfDisabled>,
     poll_key: PollKey,
     connection_key: ConnectionKey,
+    mark_route: AtomicU64,
+    sent_paths: SpinLock<VecDeque<(u32, u32, u32, PathMtuRoute)>, BottomHalfDisabled>,
 }
 
 pub struct RawTcpSocketExt<E: Ext> {
@@ -223,6 +227,7 @@ impl<E: Ext> TcpConnectionInner<E> {
         socket: Box<RawTcpSocket>,
         listener: Option<Arc<TcpListenerBg<E>>>,
         weak_self: &Weak<TcpConnectionBg<E>>,
+        mark: u32,
     ) -> Self {
         let connection_key = {
             // Since the socket is connected, the following unwrap can never fail
@@ -245,6 +250,8 @@ impl<E: Ext> TcpConnectionInner<E> {
             socket: SpinLock::new(socket_ext),
             poll_key,
             connection_key,
+            mark_route: AtomicU64::new(u64::from(mark)),
+            sent_paths: SpinLock::new(VecDeque::new()),
         }
     }
 
@@ -332,7 +339,7 @@ impl<E: Ext> TcpConnection<E> {
         };
 
         let connection =
-            Self::new_cyclic(bound, |weak| TcpConnectionInner::new(socket, None, weak));
+            Self::new_cyclic(bound, |weak| TcpConnectionInner::new(socket, None, weak, option.mark));
         interface.update_next_poll_at_ms(&connection.0, PollAt::Now);
         connection.init_observer(observer);
 
@@ -643,6 +650,14 @@ impl<E: Ext> TcpConnection<E> {
 }
 
 impl<E: Ext> RawTcpSetOption for TcpConnection<E> {
+    fn mark(&self) -> u32 { self.0.inner.mark_route.load(Ordering::Acquire) as u32 }
+    fn route_valid(&self) -> bool { self.0.inner.mark_route.load(Ordering::Acquire) >> 32 != 0 }
+    fn set_mark(&self, mark: u32) {
+        let _ = self.0.inner.mark_route.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            ((state as u32) != mark).then_some(u64::from(mark))
+        });
+    }
+
     fn set_keep_alive(&self, interval: Option<Duration>) -> NeedIfacePoll {
         let mut iface = self.iface().common().interface();
         let mut socket = self.0.inner.lock();
@@ -660,6 +675,27 @@ impl<E: Ext> RawTcpSetOption for TcpConnection<E> {
 }
 
 impl<E: Ext> TcpConnectionBg<E> {
+    pub(crate) fn mark(&self) -> u32 { self.inner.mark_route.load(Ordering::Acquire) as u32 }
+
+    pub(crate) fn mark_route_valid(&self, mark: u32) {
+        let _ = self.inner.mark_route.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            ((state as u32) == mark).then_some(u64::from(mark) | (1u64 << 32))
+        });
+    }
+
+    pub(crate) fn record_sent_path(&self, sequence: u32, end: u32, ifindex: u32, route: PathMtuRoute) {
+        let mut paths = self.inner.sent_paths.lock();
+        paths.retain(|(old_sequence, _, _, _)| *old_sequence != sequence);
+        if paths.len() == 64 { paths.pop_front(); }
+        paths.push_back((sequence, end, ifindex, route));
+    }
+
+    pub(crate) fn mtu_feedback_path(&self, sequence: u32) -> Option<(u32, PathMtuRoute)> {
+        if !self.inner.lock().is_open() { return None; }
+        self.inner.sent_paths.lock().iter().rev().find_map(|(sent, _, ifindex, route)|
+            (*sent == sequence).then_some((*ifindex, *route)))
+    }
+
     pub(crate) const fn poll_key(&self) -> &PollKey {
         &self.inner.poll_key
     }
@@ -725,6 +761,14 @@ impl<E: Ext> TcpConnectionBg<E> {
 
             iface.update_next_poll_at_ms(self, PollAt::Ingress);
             return (TcpProcessResult::NotProcessed, TcpConnBecameDead::TRUE);
+        }
+
+        if let Some(ack) = tcp_repr.ack_number {
+            let ack = ack.0 as u32;
+            let mut paths = self.inner.sent_paths.lock();
+            if paths.iter().any(|(start, end, _, _)| ack.wrapping_sub(*start) <= end.wrapping_sub(*start)) {
+                paths.retain(|(_, end, _, _)| (ack.wrapping_sub(*end) as i32) < 0);
+            }
         }
 
         let old_state = socket.state();

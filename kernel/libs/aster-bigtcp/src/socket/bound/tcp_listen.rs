@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{boxed::Box, collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use aster_softirq::BottomHalfDisabled;
 use ostd::sync::SpinLock;
@@ -38,13 +39,15 @@ pub(super) struct TcpBacklog<E: Ext> {
 pub struct TcpListenerInner<E: Ext> {
     pub(super) backlog: SpinLock<TcpBacklog<E>, BottomHalfDisabled>,
     listener_key: ListenerKey,
+    mark: AtomicU32,
 }
 
 impl<E: Ext> TcpListenerInner<E> {
-    fn new(backlog: TcpBacklog<E>, listener_key: ListenerKey) -> Self {
+    fn new(backlog: TcpBacklog<E>, listener_key: ListenerKey, mark: u32) -> Self {
         Self {
             backlog: SpinLock::new(backlog),
             listener_key,
+            mark: AtomicU32::new(mark),
         }
     }
 }
@@ -63,6 +66,11 @@ impl<E: Ext> Inner<E> for TcpListenerInner<E> {
 }
 
 pub(crate) type TcpListenerBg<E> = SocketBg<TcpListenerInner<E>, E>;
+
+impl<E: Ext> TcpListenerBg<E> {
+    pub(crate) fn mark(&self) -> u32 { self.inner.mark.load(Ordering::Acquire) }
+}
+
 
 impl<E: Ext> TcpListener<E> {
     /// Listens at a specified endpoint.
@@ -105,7 +113,7 @@ impl<E: Ext> TcpListener<E> {
                 connected: Vec::new(),
             };
 
-            TcpListenerInner::new(backlog, listener_key)
+            TcpListenerInner::new(backlog, listener_key, option.mark)
         };
 
         let listener = Self::new(bound, inner);
@@ -173,6 +181,10 @@ impl<E: Ext> TcpListener<E> {
 }
 
 impl<E: Ext> RawTcpSetOption for TcpListener<E> {
+    fn mark(&self) -> u32 { self.0.inner.mark.load(Ordering::Acquire) }
+    fn route_valid(&self) -> bool { false }
+    fn set_mark(&self, mark: u32) { self.0.inner.mark.store(mark, Ordering::Release); }
+
     fn set_keep_alive(&self, interval: Option<Duration>) -> NeedIfacePoll {
         let mut backlog = self.0.inner.backlog.lock();
         backlog.socket.set_keep_alive(interval);
@@ -246,6 +258,7 @@ impl<E: Ext> TcpListenerBg<E> {
                     core::mem::replace(&mut backlog.socket, new_socket),
                     Some(self.clone()),
                     weak,
+                    self.inner.mark.load(Ordering::Acquire),
                 )
             },
         );

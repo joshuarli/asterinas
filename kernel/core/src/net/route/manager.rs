@@ -17,6 +17,7 @@ pub(super) struct RouteChanges<A: RouteAddressFamily> {
 }
 
 /// The manager that owns the routing policy rules and tables for one IP address family.
+#[derive(Clone)]
 pub(super) struct RouteManager<A: RouteAddressFamily> {
     rules: BTreeMap<RulePriority, Vec<Rule>>,
     tables: BTreeMap<RouteTableId, RouteTable<A>>,

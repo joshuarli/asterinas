@@ -21,17 +21,18 @@ use util::{Retrans, TcpOptionSet};
 use super::{
     addr::IpAddressFamily,
     ioctl::ipv4_ioctl,
-    options::{IpOptionSet, SetIpLevelOption},
+    options::{IpOptionSet, Mtu, SetIpLevelOption},
 };
 use crate::{
     events::IoEvents,
     fs::file::{FileCommon, FileLike},
     net::{
         iface::Iface,
+        route::lookup_output_route,
         socket::{
             Socket, new_socket_common,
             options::{
-                Error as SocketError, SocketOption,
+                Error as SocketError, SocketMark, SocketOption,
                 macros::{sock_option_mut, sock_option_ref},
             },
             private::SocketPrivate,
@@ -39,6 +40,7 @@ use crate::{
                 MessageHeader, RecvFlags, RecvOutput, SendFlags, SockShutdownCmd, SocketAddr,
                 options::{
                     GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
+                    check_current_net_raw, check_current_privileged,
                 },
             },
         },
@@ -85,6 +87,7 @@ struct OptionSet {
     socket: SocketOptionSet,
     ip: IpOptionSet,
     tcp: TcpOptionSet,
+    mark: u32,
 }
 
 impl OptionSet {
@@ -92,13 +95,14 @@ impl OptionSet {
         let socket = SocketOptionSet::new_tcp();
         let ip = IpOptionSet::new_tcp();
         let tcp = TcpOptionSet::new();
-        OptionSet { socket, ip, tcp }
+        OptionSet { socket, ip, tcp, mark: 0 }
     }
 
     fn raw(&self) -> RawTcpOption {
         let keep_alive_interval = Duration::from_secs(self.tcp.keep_intvl() as u64);
 
         RawTcpOption {
+            mark: self.mark,
             keep_alive: self.socket.keep_alive().then_some(keep_alive_interval),
             is_nagle_enabled: !self.tcp.no_delay(),
         }
@@ -127,6 +131,7 @@ impl StreamSocket {
     ) -> Arc<Self> {
         let options = connected_stream.raw_with(|raw_tcp_socket| {
             let mut options = OptionSet::new();
+            options.mark = connected_stream.set_raw_option(|socket| socket.mark());
 
             // Inherit socket options from `raw_tcp_socket` first, then fall
             // back to `listener_options` for options the raw socket cannot
@@ -661,6 +666,25 @@ impl Socket for StreamSocket {
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
         sock_option_mut!(match option {
+            ip_mtu @ Mtu => {
+                let state = self.read_updated_state();
+                let remote = match state.as_ref() {
+                    State::Connecting(stream) => stream.remote_endpoint(),
+                    State::Connected(stream) => stream.remote_endpoint(),
+                    _ => return_errno_with_message!(Errno::ENOTCONN, "the socket is not connected"),
+                };
+                if !state.set_raw_option(|socket| socket.route_valid()).unwrap_or(false) {
+                    return_errno_with_message!(Errno::ENOTCONN, "the socket has no cached route");
+                }
+                let mark = self.options.read().mark;
+                let (iface, _, route) = lookup_output_route(remote.addr, mark, false, None)?;
+                ip_mtu.set(iface.path_mtu_for_route(remote.addr, route).mtu.min(u16::MAX as usize) as i32);
+                return Ok(());
+            }
+            mark @ SocketMark => {
+                mark.set(self.options.read().mark);
+                return Ok(());
+            }
             socket_errors @ SocketError => {
                 socket_errors.set(self.test_and_clear_error());
                 return Ok(());
@@ -756,6 +780,17 @@ impl Socket for StreamSocket {
     }
 
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
+        sock_option_ref!(match option {
+            mark @ SocketMark => {
+                check_current_net_raw().or_else(|_| check_current_privileged())?;
+                let mark = *mark.get().unwrap();
+                let state = self.write_updated_state();
+                self.options.write().mark = mark;
+                state.set_raw_option(|socket| socket.set_mark(mark));
+                return Ok(());
+            }
+            _ => (),
+        });
         let mut state = self.write_updated_state();
         let mut options = self.options.write();
 

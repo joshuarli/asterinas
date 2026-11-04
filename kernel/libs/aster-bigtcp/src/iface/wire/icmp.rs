@@ -34,6 +34,32 @@ pub(in crate::iface) struct QuotedUdpError<'a> {
     pub payload: &'a [u8],
 }
 
+pub(in crate::iface) struct QuotedTcpMtu {
+    pub source: IpEndpoint,
+    pub destination: IpEndpoint,
+    pub sequence: u32,
+    pub mtu: usize,
+}
+
+pub(in crate::iface) fn parse_tcp_mtu(packet: &[u8]) -> Option<QuotedTcpMtu> {
+    if packet.len() < HEADER_LEN + 28 || packet[0] != 3 || packet[1] != 4
+        || Checksum::new().with_bytes(packet).finish() != u16::MAX { return None; }
+    let quoted = &packet[HEADER_LEN..];
+    let header_len = usize::from(quoted[0] & 15) * 4;
+    if quoted[0] >> 4 != 4 || header_len < 20 || quoted.len() < header_len + 8
+        || quoted[9] != 6 || u16::from_be_bytes([quoted[6], quoted[7]]) & 0x1fff != 0
+        || usize::from(u16::from_be_bytes([quoted[2], quoted[3]])) < header_len + 8 { return None; }
+    let tcp = &quoted[header_len..];
+    let source = Ipv4Address::new(quoted[12], quoted[13], quoted[14], quoted[15]);
+    let destination = Ipv4Address::new(quoted[16], quoted[17], quoted[18], quoted[19]);
+    Some(QuotedTcpMtu {
+        source: IpEndpoint::new(source.into(), u16::from_be_bytes([tcp[0], tcp[1]])),
+        destination: IpEndpoint::new(destination.into(), u16::from_be_bytes([tcp[2], tcp[3]])),
+        sequence: u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
+        mtu: usize::from(u16::from_be_bytes([packet[6], packet[7]])),
+    })
+}
+
 pub(in crate::iface) fn parse_udp_error(
     packet: &[u8],
     verify_checksum: bool,

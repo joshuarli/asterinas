@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::{iface::ScheduleNextPoll, socket::SocketEventObserver};
+use alloc::sync::Arc;
+
+use crate::{iface::{Iface, PathMtuRoute, ScheduleNextPoll}, socket::{IpNextHop, SocketEventObserver}, wire::IpAddress};
 
 /// Extension to be implemented by users of this crate.
 ///
@@ -27,4 +29,7 @@ pub trait Ext: 'static {
 
     /// Schedules processing of an IP packet forwarded to an interface.
     fn wake_forwarded_ip(_ifindex: u32) {}
+
+    /// Resolves a TCP output route without taking an interface lock.
+    fn tcp_route(_destination: IpAddress, _mark: u32) -> Option<Result<(Arc<dyn Iface<Self>>, IpNextHop, PathMtuRoute), ()>> where Self: Sized { None }
 }

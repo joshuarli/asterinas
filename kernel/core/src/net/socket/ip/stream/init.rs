@@ -15,12 +15,12 @@ use crate::{
     events::IoEvents,
     net::{
         iface::BoundTcpPort,
-        route::is_broadcast_endpoint,
+        route::{is_broadcast_endpoint, lookup_output_route},
         socket::{
             ip::{
                 addr::IpAddressFamily,
                 common::{
-                    get_ephemeral_endpoint, map_unspecified_to_localhost,
+                    get_ephemeral_endpoint_on, map_unspecified_to_localhost,
                     resolve_bind_iface_and_config,
                 },
             },
@@ -162,10 +162,14 @@ impl InitStream {
             remote_endpoint
         };
 
+        let (route_iface, _, _) = match lookup_output_route(route_endpoint.addr, option.mark, false, None) {
+            Ok(route) => route,
+            Err(error) => return Err((error, self)),
+        };
         let bound_port = if let Some(bound_port) = self.bound_port {
             bound_port
         } else {
-            let endpoint = match get_ephemeral_endpoint(&route_endpoint) {
+            let endpoint = match get_ephemeral_endpoint_on(&route_iface, &route_endpoint) {
                 Ok(endpoint) => endpoint,
                 Err(err) => return Err((err, self)),
             };

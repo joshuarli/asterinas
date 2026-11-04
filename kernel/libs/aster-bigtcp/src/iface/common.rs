@@ -43,6 +43,7 @@ use crate::{
 
 pub struct IfaceCommon<E: Ext> {
     index: u32,
+    ip_mtu: usize,
     name: InterfaceName,
     type_: InterfaceType,
     flags: AtomicU32,
@@ -151,16 +152,18 @@ impl<E: Ext> IfaceCommon<E> {
         name: InterfaceName,
         type_: InterfaceType,
         flags: InterfaceFlags,
-        interface: smoltcp::iface::Interface,
+        mut interface: smoltcp::iface::Interface,
         sched_poll: E::ScheduleNextPoll,
         network: Arc<NetworkRegistry<E>>,
     ) -> Self {
         let index = INTERFACE_INDEX_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
+        let ip_mtu = interface.context().ip_mtu();
         let interface = PollableIface::new(interface);
         network.set_local_addresses(index, &interface.ipv4_cidrs(), flags.contains(InterfaceFlags::UP));
 
         Self {
             index,
+            ip_mtu,
             name,
             type_,
             flags: AtomicU32::new(flags.bits()),
@@ -173,6 +176,10 @@ impl<E: Ext> IfaceCommon<E> {
             raw_ip_tx: SpinLock::new(VecDeque::new()),
             sched_poll,
         }
+    }
+
+    pub(super) fn cached_ip_mtu(&self, destination: IpAddress, route: super::PathMtuRoute) -> super::PathMtu {
+        self.network.path_mtu_for_route(self.index, destination, route, self.ip_mtu)
     }
 
     pub(super) fn index(&self) -> u32 {
@@ -284,6 +291,15 @@ impl<E: Ext> IfaceCommon<E> {
         Ok(())
     }
 
+    pub(super) fn enqueue_forwarded_tcp(&self, packet: TxPacketWithDst) -> Result<(), LinkSendError> {
+        self.ensure_up()?;
+        let mut queue = self.raw_ip_tx.lock();
+        self.ensure_up()?;
+        if queue.len() >= 64 { return Err(LinkSendError::Busy); }
+        queue.push_back(packet);
+        Ok(())
+    }
+
     pub(super) fn clear_path_mtu(&self) { self.network.clear_path_mtu(self.index); }
 
     pub(super) fn path_mtu(&self, destination: IpAddress, interface_mtu: usize) -> super::PathMtu {
@@ -377,7 +393,7 @@ impl<E: Ext> IfaceCommon<E> {
         let next_poll = self.do_poll(device, phy);
         device.notify_poll_end();
         self.sched_poll.schedule_next_poll(next_poll);
-        if self.network.has_forwarded_ip(self.index) {
+        if self.network.has_forwarded_ip(self.index) || !self.raw_ip_tx.lock().is_empty() {
             self.sched_poll.schedule_next_poll(Some(get_network_timestamp().total_millis().max(1) as u64));
         }
     }
