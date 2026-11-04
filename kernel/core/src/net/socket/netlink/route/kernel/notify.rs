@@ -8,11 +8,12 @@ use super::{
     addr::ipv4_to_addr,
     link::iface_to_new_link,
     route::record_to_route,
+    rule::record_to_rule,
 };
 use crate::{
     net::{
         iface::{Iface, config::InterfaceAddress},
-        route::RouteRecord,
+        route::{RouteRecord, RuleRecord},
         socket::netlink::{
             GroupIdSet,
             message::{CMsgSegHdr, CSegmentType, NewRequestFlags},
@@ -29,6 +30,7 @@ const LINK_GROUP: u32 = 0x1;
 const IPV4_ADDRESS_GROUP: u32 = 0x10;
 /// The group of IPv4 route notifications (`RTMGRP_IPV4_ROUTE`).
 const IPV4_ROUTE_GROUP: u32 = 0x40;
+const IPV4_RULE_GROUP: u32 = 0x80;
 
 /// The request that caused a change, whose sequence number and port a notification about an
 /// address or a user route echoes. A change that no request caused has neither.
@@ -71,6 +73,8 @@ pub(in crate::net) enum NetworkEvent {
         route: RouteRecord,
         origin: RequestOrigin,
     },
+    RuleAdded { rule: RuleRecord, origin: RequestOrigin },
+    RuleRemoved { rule: RuleRecord, origin: RequestOrigin },
 }
 
 /// Delivers the events in order to the sockets that joined the groups they belong to.
@@ -120,6 +124,14 @@ pub(in crate::net) fn publish_network_events(events: Vec<NetworkEvent>) {
                     route,
                 )),
                 IPV4_ROUTE_GROUP,
+            ),
+            NetworkEvent::RuleAdded { rule, origin } => (
+                RtnlSegment::NewRule(record_to_rule(&notification_header(*origin), CSegmentType::NEWRULE, rule)),
+                IPV4_RULE_GROUP,
+            ),
+            NetworkEvent::RuleRemoved { rule, origin } => (
+                RtnlSegment::DelRule(record_to_rule(&notification_header(*origin), CSegmentType::DELRULE, rule)),
+                IPV4_RULE_GROUP,
             ),
         };
 

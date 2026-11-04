@@ -16,6 +16,7 @@ pub(super) use self::{
     user::{Ipv4RouteSelector, NewIpv4Route},
     dump::{RouteRecord, RuleOutcome, RuleRecord, dump_routes, dump_rules},
     entry::{RouteProtocol, RouteScope, RouteType},
+    rule::MarkSelector,
 };
 use self::{dump::entry_record, manager::RouteManager, rule::Rule};
 use super::iface::{
@@ -42,18 +43,19 @@ struct RouteLookupKey<A: RouteAddressFamily> {
     dst: A,
     direct: bool,
     device: Option<u32>,
+    mark: u32,
     // TODO: Add selectors required by route netlink queries,
-    // such as a source address, TOS, packet mark, and input/output interface.
+    // such as a source address, TOS, and input/output interface.
 }
 
 impl<A: RouteAddressFamily> RouteLookupKey<A> {
     /// Creates a new route lookup key.
     const fn new(dst: A) -> Self {
-        Self { dst, direct: false, device: None }
+        Self { dst, direct: false, device: None, mark: 0 }
     }
 
     const fn direct(dst: A, device: Option<u32>) -> Self {
-        Self { dst, direct: true, device }
+        Self { dst, direct: true, device, mark: 0 }
     }
 
     const fn dst(&self) -> &A {
@@ -312,6 +314,50 @@ pub(super) fn sync_iface_routes(
 /// Whether the route delivers to one address of the host itself.
 fn is_address_route(route: &RouteEntry<Ipv4Address>) -> bool {
     route.type_() == RouteType::Local && route.dst().prefix_len() == 32
+}
+
+pub(in crate::net) struct Ipv4RuleRequest {
+    pub priority: Option<u32>,
+    pub outcome: Option<RuleOutcome>,
+    pub table: Option<u32>,
+    pub mark: Option<MarkSelector>,
+    pub protocol: Option<u8>,
+}
+
+fn rule_action(outcome: RuleOutcome) -> rule::RuleAction {
+    match outcome {
+        RuleOutcome::Lookup { table } => rule::RuleAction::Lookup(RouteTableId::new(table)),
+        RuleOutcome::Unreachable => rule::RuleAction::Unreachable,
+        RuleOutcome::Prohibit => rule::RuleAction::Prohibit,
+        RuleOutcome::Blackhole => rule::RuleAction::Blackhole,
+    }
+}
+
+pub(in crate::net) fn add_ipv4_rule(request: Ipv4RuleRequest, exclusive: bool) -> Result<RuleRecord> {
+    let mut manager = IPV4_ROUTE_MANAGER.get().unwrap().write();
+    let priority = request.priority.unwrap_or_else(|| manager.default_rule_priority());
+    let outcome = request.outcome.ok_or_else(|| Error::from(Errno::EINVAL))?;
+    let rule = Rule::new(priority, rule_action(outcome), request.mark, request.protocol.unwrap_or(0));
+    let record = dump::rule_record(&rule, true);
+    manager.insert_rule(rule, exclusive)?;
+    for iface in iface::iter_all_ifaces() { iface.clear_path_mtu(); }
+    drop(manager);
+    Ok(record)
+}
+
+pub(in crate::net) fn remove_ipv4_rule(request: Ipv4RuleRequest) -> Result<RuleRecord> {
+    let mut manager = IPV4_ROUTE_MANAGER.get().unwrap().write();
+    let rule = manager.remove_rule(|candidate| {
+        request.priority.is_none_or(|priority| candidate.priority().get() == priority)
+            && request.outcome.is_none_or(|outcome| *candidate.action() == rule_action(outcome))
+            && request.table.is_none_or(|table| *candidate.action() == rule::RuleAction::Lookup(RouteTableId::new(table)))
+            && request.mark.is_none_or(|mark| candidate.mark() == Some(mark))
+            && request.protocol.is_none_or(|protocol| candidate.protocol() == protocol)
+    })?;
+    for iface in iface::iter_all_ifaces() { iface.clear_path_mtu(); }
+    let record = dump::rule_record(&rule, true);
+    drop(manager);
+    Ok(record)
 }
 
 /// Installs a unicast IPv4 route. The caller holds the interface configuration lock.

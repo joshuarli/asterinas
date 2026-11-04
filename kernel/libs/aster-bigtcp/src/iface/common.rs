@@ -280,6 +280,8 @@ impl<E: Ext> IfaceCommon<E> {
         Ok(())
     }
 
+    pub(super) fn clear_path_mtu(&self) { self.udp.clear_path_mtu(self.index); }
+
     pub(super) fn path_mtu(&self, destination: IpAddress, interface_mtu: usize) -> super::PathMtu {
         self.udp.path_mtu(self.index, destination, interface_mtu)
     }

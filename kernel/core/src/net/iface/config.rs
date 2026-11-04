@@ -14,7 +14,7 @@ use spin::Once;
 use super::{Iface, iter_all_ifaces};
 use crate::{
     net::{
-        route::{self, IfaceRouteChanges, Ipv4RouteSelector, NewIpv4Route},
+        route::{self, IfaceRouteChanges, Ipv4RouteSelector, Ipv4RuleRequest, NewIpv4Route},
         socket::netlink::{NetworkEvent, RequestOrigin, publish_network_events},
     },
     prelude::*,
@@ -165,6 +165,20 @@ pub(in crate::net) fn set_administratively_up(iface: &Arc<Iface>, up: bool) {
         events.extend(route_added_events(changes.added));
     }
     publish_network_events(events);
+}
+
+pub(in crate::net) fn add_ipv4_rule(request: Ipv4RuleRequest, exclusive: bool, origin: RequestOrigin) -> Result<()> {
+    let _addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    let rule = route::add_ipv4_rule(request, exclusive)?;
+    publish_network_events(vec![NetworkEvent::RuleAdded { rule, origin }]);
+    Ok(())
+}
+
+pub(in crate::net) fn remove_ipv4_rule(request: Ipv4RuleRequest, origin: RequestOrigin) -> Result<()> {
+    let _addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    let rule = route::remove_ipv4_rule(request)?;
+    publish_network_events(vec![NetworkEvent::RuleRemoved { rule, origin }]);
+    Ok(())
 }
 
 /// Installs a unicast IPv4 route through an interface.

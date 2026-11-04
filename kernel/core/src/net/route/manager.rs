@@ -141,6 +141,27 @@ impl<A: RouteAddressFamily> RouteManager<A> {
         self.tables.values().flat_map(RouteTable::entries)
     }
 
+    pub(super) fn insert_rule(&mut self, rule: Rule, exclusive: bool) -> Result<()> {
+        let rules = self.rules.entry(rule.priority()).or_default();
+        if exclusive && rules.contains(&rule) { return_errno_with_message!(Errno::EEXIST, "the rule already exists"); }
+        rules.push(rule);
+        Ok(())
+    }
+
+    pub(super) fn remove_rule(&mut self, matches: impl Fn(&Rule) -> bool) -> Result<Rule> {
+        let (priority, index) = self.rules.iter().find_map(|(priority, rules)|
+            rules.iter().position(&matches).map(|index| (*priority, index)))
+            .ok_or_else(|| Error::from(Errno::ENOENT))?;
+        let rules = self.rules.get_mut(&priority).unwrap();
+        let removed = rules.remove(index);
+        if rules.is_empty() { self.rules.remove(&priority); }
+        Ok(removed)
+    }
+
+    pub(super) fn default_rule_priority(&self) -> u32 {
+        self.rules().nth(1).map_or(0, |rule| rule.priority().get().saturating_sub(1))
+    }
+
     pub(super) fn rules(&self) -> impl Iterator<Item = &Rule> {
         self.rules.values().flatten()
     }
@@ -148,6 +169,7 @@ impl<A: RouteAddressFamily> RouteManager<A> {
     pub(super) fn lookup_entry(&self, key: &RouteLookupKey<A>) -> Result<RouteEntry<A>> {
         for rules in self.rules.values() {
             for rule in rules {
+                if !rule.matches_mark(key.mark) { continue; }
                 match rule.action() {
                     RuleAction::Lookup(table_id) => {
                         let Some(table) = self.tables.get(table_id) else {

@@ -33,11 +33,17 @@ pub(crate) struct CFibRuleHdr {
     pub flags: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RuleSegmentBody {
     pub family: u8,
+    pub dst_len: u8,
+    pub src_len: u8,
+    pub tos: u8,
     pub table: u8,
+    pub res1: u8,
+    pub res2: u8,
     pub action: u8,
+    pub flags: u32,
 }
 
 impl TryFrom<CFibRuleHdr> for RuleSegmentBody {
@@ -46,8 +52,14 @@ impl TryFrom<CFibRuleHdr> for RuleSegmentBody {
     fn try_from(value: CFibRuleHdr) -> Result<Self> {
         Ok(Self {
             family: value.family,
+            dst_len: value.dst_len,
+            src_len: value.src_len,
+            tos: value.tos,
             table: value.table,
+            res1: value.res1,
+            res2: value.res2,
             action: value.action,
+            flags: value.flags,
         })
     }
 }
@@ -56,14 +68,14 @@ impl From<RuleSegmentBody> for CFibRuleHdr {
     fn from(value: RuleSegmentBody) -> Self {
         Self {
             family: value.family,
-            dst_len: 0,
-            src_len: 0,
-            tos: 0,
+            dst_len: value.dst_len,
+            src_len: value.src_len,
+            tos: value.tos,
             table: value.table,
-            res1: 0,
-            res2: 0,
+            res1: value.res1,
+            res2: value.res2,
             action: value.action,
-            flags: 0,
+            flags: value.flags,
         }
     }
 }
