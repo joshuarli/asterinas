@@ -189,6 +189,8 @@ impl<E: Ext> UdpSocketBg<E> {
     }
 
     pub(crate) fn can_receive_error(&self, source: IpEndpoint, ifindex: u32) -> bool {
+        let open = self.open.lock();
+        if !*open { return false; }
         let bound = self.bound.receive_endpoint();
         self.bound.device().is_none_or(|device| device == ifindex)
             && bound.port == source.port
@@ -483,6 +485,34 @@ mod test {
     use ostd::prelude::ktest;
     use smoltcp::wire::Ipv4Address;
     use super::*;
+
+    struct TestExt;
+    struct TestSchedule;
+
+    impl crate::iface::ScheduleNextPoll for TestSchedule {
+        fn schedule_next_poll(&self, _ms: Option<u64>) {}
+    }
+
+    impl Ext for TestExt {
+        type ScheduleNextPoll = TestSchedule;
+        type TcpEventObserver = ();
+        type UdpEventObserver = ();
+        fn wall_time_ns() -> u64 { 0 }
+    }
+
+    #[ktest]
+    fn closed_socket_in_poll_snapshot_cannot_match_error() {
+        let registry = crate::iface::UdpRegistry::<TestExt>::new();
+        let local = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::LOCALHOST), 1234);
+        let config = crate::iface::BindPortConfig::new(local, false);
+        let owner = Arc::new(core::sync::atomic::AtomicU32::new(0));
+        let reservation = registry.bind(config, None, false, owner).unwrap();
+        let socket = UdpSocket::new_bind(reservation, ());
+        let snapshot = registry.sockets().pop().unwrap();
+        assert!(snapshot.can_receive_error(local, 1));
+        drop(socket);
+        assert!(!snapshot.can_receive_error(local, 1));
+    }
 
     fn packet(iface: u32, size: usize) -> TxDatagram {
         let address = IpAddress::Ipv4(Ipv4Address::LOCALHOST);
