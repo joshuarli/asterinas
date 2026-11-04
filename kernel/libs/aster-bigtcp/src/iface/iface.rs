@@ -166,6 +166,9 @@ impl<E: Ext> dyn Iface<E> {
     }
 
     /// Returns the cached IPv4 path MTU, bounded by the interface MTU.
+    /// Clears learned path MTUs after a routing policy change.
+    pub fn clear_path_mtu(&self) { self.common().clear_path_mtu(); }
+
     pub fn path_mtu(&self, destination: smoltcp::wire::IpAddress) -> PathMtu {
         self.common().path_mtu(destination, self.mtu())
     }

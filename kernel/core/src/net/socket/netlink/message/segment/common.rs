@@ -73,6 +73,22 @@ impl<Body: SegmentBody, Attr: Attribute> SegmentCommon<Body, Attr> {
         }))
     }
 
+    pub(crate) fn read_from_ignoring_attrs(
+        header: &CMsgSegHdr,
+        reader: &mut dyn MultiRead,
+    ) -> Result<ContinueRead<Self>>
+    where
+        Error: From<<Body::CType as TryInto<Body>>::Error>,
+    {
+        let (body, remain_len) = match Body::read_from(header, reader)? {
+            ContinueRead::Parsed(parsed) => parsed,
+            ContinueRead::Skipped => return Ok(ContinueRead::Skipped),
+            ContinueRead::SkippedErr(err) => return Ok(ContinueRead::SkippedErr(err)),
+        };
+        reader.skip_some(remain_len);
+        Ok(ContinueRead::Parsed(Self { header: *header, body, attrs: Vec::new() }))
+    }
+
     pub(crate) fn write_to(&self, writer: &mut dyn MultiWrite) -> Result<()> {
         writer.write_val_trunc(&self.header)?;
 

@@ -8,7 +8,7 @@ use super::{
     IPV4_ROUTE_MANAGER, IPV6_ROUTE_MANAGER, RouteAddressFamily, RouteEntry,
     entry::{RouteProtocol, RouteScope, RouteType},
     manager::RouteManager,
-    rule::RuleAction,
+    rule::{MarkSelector, Rule, RuleAction},
 };
 use crate::prelude::*;
 
@@ -27,8 +27,12 @@ pub(in crate::net) struct RouteRecord {
 }
 
 /// The routing decision of one policy rule as it is reported to user space.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::net) enum RuleOutcome {
     Lookup { table: u32 },
+    Unreachable,
+    Prohibit,
+    Blackhole,
 }
 
 /// One policy rule as it is reported to user space.
@@ -36,6 +40,8 @@ pub(in crate::net) struct RuleRecord {
     pub is_ipv4: bool,
     pub priority: u32,
     pub outcome: RuleOutcome,
+    pub mark: Option<MarkSelector>,
+    pub protocol: u8,
 }
 
 /// Returns the IPv4 routes, then the IPv6 routes, in table order.
@@ -108,17 +114,20 @@ pub(super) fn entry_record<A: IntoIpAddr>(entry: &RouteEntry<A>) -> RouteRecord 
 }
 
 fn manager_rules<A: RouteAddressFamily>(manager: &RouteManager<A>, is_ipv4: bool) -> Vec<RuleRecord> {
-    manager
-        .rules()
-        .filter_map(|rule| {
-            let RuleAction::Lookup(table) = rule.action() else {
-                return None;
-            };
-            Some(RuleRecord {
-                is_ipv4,
-                priority: rule.priority().get(),
-                outcome: RuleOutcome::Lookup { table: table.get() },
-            })
-        })
-        .collect()
+    manager.rules().map(|rule| rule_record(rule, is_ipv4)).collect()
+}
+
+pub(super) fn rule_record(rule: &Rule, is_ipv4: bool) -> RuleRecord {
+    RuleRecord {
+        is_ipv4,
+        priority: rule.priority().get(),
+        outcome: match rule.action() {
+            RuleAction::Lookup(table) => RuleOutcome::Lookup { table: table.get() },
+            RuleAction::Unreachable => RuleOutcome::Unreachable,
+            RuleAction::Prohibit => RuleOutcome::Prohibit,
+            RuleAction::Blackhole => RuleOutcome::Blackhole,
+        },
+        mark: rule.mark(),
+        protocol: rule.protocol(),
+    }
 }

@@ -6,91 +6,53 @@ use crate::{
     util::MultiRead,
 };
 
-/// Policy-rule attributes.
-///
-/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/fib_rules.h>.
-#[expect(non_camel_case_types)]
-#[expect(clippy::upper_case_acronyms)]
-#[repr(u16)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromInt)]
-enum RuleAttrClass {
-    UNSPEC = 0,
-    DST = 1,
-    SRC = 2,
-    IIFNAME = 3,
-    GOTO = 4,
-    UNUSED2 = 5,
-    PRIORITY = 6,
-    UNUSED3 = 7,
-    UNUSED4 = 8,
-    UNUSED5 = 9,
-    FWMARK = 10,
-    FLOW = 11,
-    TUN_ID = 12,
-    SUPPRESS_IFGROUP = 13,
-    SUPPRESS_PREFIXLEN = 14,
-    TABLE = 15,
-    FWMASK = 16,
-    OIFNAME = 17,
-    PAD = 18,
-    L3MDEV = 19,
-    UID_RANGE = 20,
-    PROTOCOL = 21,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) enum RuleAttr {
     Table(u32),
     SuppressPrefixLen(u32),
     Protocol(u8),
     Priority(u32),
-}
-
-impl RuleAttr {
-    fn class(&self) -> RuleAttrClass {
-        match self {
-            RuleAttr::Table(_) => RuleAttrClass::TABLE,
-            RuleAttr::SuppressPrefixLen(_) => RuleAttrClass::SUPPRESS_PREFIXLEN,
-            RuleAttr::Protocol(_) => RuleAttrClass::PROTOCOL,
-            RuleAttr::Priority(_) => RuleAttrClass::PRIORITY,
-        }
-    }
+    Mark(u32),
+    Mask(u32),
+    Unsupported(u16),
+    Invalid(u16),
 }
 
 impl Attribute for RuleAttr {
     fn type_(&self) -> u16 {
-        self.class() as u16
+        match self {
+            Self::Priority(_) => 6,
+            Self::Mark(_) => 10,
+            Self::SuppressPrefixLen(_) => 14,
+            Self::Table(_) => 15,
+            Self::Mask(_) => 16,
+            Self::Protocol(_) => 21,
+            Self::Unsupported(kind) | Self::Invalid(kind) => *kind,
+        }
     }
 
     fn payload_as_bytes(&self) -> &[u8] {
         match self {
-            RuleAttr::Table(value)
-            | RuleAttr::SuppressPrefixLen(value)
-            | RuleAttr::Priority(value) => value.as_bytes(),
-            RuleAttr::Protocol(value) => value.as_bytes(),
+            Self::Table(value) | Self::SuppressPrefixLen(value) | Self::Priority(value)
+            | Self::Mark(value) | Self::Mask(value) => value.as_bytes(),
+            Self::Protocol(value) => value.as_bytes(),
+            Self::Unsupported(_) | Self::Invalid(_) => &[],
         }
     }
 
-    fn read_from(header: &CAttrHeader, reader: &mut dyn MultiRead) -> Result<ContinueRead<Self>>
-    where
-        Self: Sized,
-    {
-        reader.skip_some(header.payload_len());
-
-        // Only dump requests are served, and Linux ignores their attributes.
-
-        Ok(ContinueRead::Skipped)
-    }
-
-    fn read_all_from(
-        reader: &mut dyn MultiRead,
-        total_len: usize,
-    ) -> Result<ContinueRead<Vec<Self>>>
-    where
-        Self: Sized,
-    {
-        reader.skip_some(total_len);
-
-        Ok(ContinueRead::Skipped)
+    fn read_from(header: &CAttrHeader, reader: &mut dyn MultiRead) -> Result<ContinueRead<Self>> {
+        let kind = header.type_();
+        let len = header.payload_len();
+        let value = match (kind, len) {
+            (6, 4) => Self::Priority(reader.read_val_opt::<u32>()?.unwrap()),
+            (10, 4) => Self::Mark(reader.read_val_opt::<u32>()?.unwrap()),
+            (14, 4) => Self::SuppressPrefixLen(reader.read_val_opt::<u32>()?.unwrap()),
+            (15, 4) => Self::Table(reader.read_val_opt::<u32>()?.unwrap()),
+            (16, 4) => Self::Mask(reader.read_val_opt::<u32>()?.unwrap()),
+            (21, 1) => Self::Protocol(reader.read_val_opt::<u8>()?.unwrap()),
+            (6 | 10 | 14 | 15 | 16 | 21, _) => { reader.skip_some(len); Self::Invalid(kind) }
+            _ => { reader.skip_some(len); Self::Unsupported(kind) }
+        };
+        Ok(ContinueRead::Parsed(value))
     }
 }

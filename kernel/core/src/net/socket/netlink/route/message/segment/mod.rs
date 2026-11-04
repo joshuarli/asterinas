@@ -41,7 +41,7 @@ use addr::AddrSegment;
 use addr::CIfaddrMsg;
 use link::LinkSegment;
 use route::{CRtMsg, RouteSegment};
-use rule::RuleSegment;
+use rule::{CFibRuleHdr, RuleSegment};
 
 use crate::{
     net::socket::netlink::message::{
@@ -64,6 +64,7 @@ pub(crate) enum RtnlSegment {
     DelRoute(RouteSegment),
     NewRule(RuleSegment),
     GetRule(RuleSegment),
+    DelRule(RuleSegment),
     Done(DoneSegment),
     Error(ErrorSegment),
 }
@@ -80,7 +81,7 @@ impl ProtocolSegment for RtnlSegment {
             RtnlSegment::NewRoute(route_segment)
             | RtnlSegment::GetRoute(route_segment)
             | RtnlSegment::DelRoute(route_segment) => route_segment.header(),
-            RtnlSegment::NewRule(rule_segment) | RtnlSegment::GetRule(rule_segment) => {
+            RtnlSegment::NewRule(rule_segment) | RtnlSegment::GetRule(rule_segment) | RtnlSegment::DelRule(rule_segment) => {
                 rule_segment.header()
             }
             RtnlSegment::Done(done_segment) => done_segment.header(),
@@ -99,7 +100,7 @@ impl ProtocolSegment for RtnlSegment {
             RtnlSegment::NewRoute(route_segment)
             | RtnlSegment::GetRoute(route_segment)
             | RtnlSegment::DelRoute(route_segment) => route_segment.header_mut(),
-            RtnlSegment::NewRule(rule_segment) | RtnlSegment::GetRule(rule_segment) => {
+            RtnlSegment::NewRule(rule_segment) | RtnlSegment::GetRule(rule_segment) | RtnlSegment::DelRule(rule_segment) => {
                 rule_segment.header_mut()
             }
             RtnlSegment::Done(done_segment) => done_segment.header_mut(),
@@ -117,6 +118,7 @@ impl ProtocolSegment for RtnlSegment {
         let required_body_len = match CSegmentType::try_from(header.type_) {
             Ok(CSegmentType::NEWADDR | CSegmentType::DELADDR) => size_of::<CIfaddrMsg>(),
             Ok(CSegmentType::NEWROUTE | CSegmentType::DELROUTE) => size_of::<CRtMsg>(),
+            Ok(CSegmentType::NEWRULE | CSegmentType::DELRULE) => size_of::<CFibRuleHdr>(),
             _ => 0,
         };
         let body_too_small =
@@ -153,7 +155,13 @@ impl ProtocolSegment for RtnlSegment {
                 RouteSegment::read_from(&header, reader)?.map(RtnlSegment::DelRoute)
             }
             Ok(CSegmentType::GETRULE) => {
-                RuleSegment::read_from(&header, reader)?.map(RtnlSegment::GetRule)
+                RuleSegment::read_from_ignoring_attrs(&header, reader)?.map(RtnlSegment::GetRule)
+            }
+            Ok(CSegmentType::NEWRULE) => {
+                RuleSegment::read_from(&header, reader)?.map(RtnlSegment::NewRule)
+            }
+            Ok(CSegmentType::DELRULE) => {
+                RuleSegment::read_from(&header, reader)?.map(RtnlSegment::DelRule)
             }
             _ => {
                 let payload_len = header.calc_payload_len_with_padding(reader)?;
@@ -177,7 +185,7 @@ impl ProtocolSegment for RtnlSegment {
             RtnlSegment::NewRoute(route_segment) | RtnlSegment::DelRoute(route_segment) => {
                 route_segment.write_to(writer)?
             }
-            RtnlSegment::NewRule(rule_segment) => rule_segment.write_to(writer)?,
+            RtnlSegment::NewRule(rule_segment) | RtnlSegment::DelRule(rule_segment) => rule_segment.write_to(writer)?,
             RtnlSegment::Done(done_segment) => done_segment.write_to(writer)?,
             RtnlSegment::Error(error_segment) => error_segment.write_to(writer)?,
             RtnlSegment::GetAddr(_)

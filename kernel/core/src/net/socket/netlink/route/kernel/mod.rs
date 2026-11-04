@@ -55,6 +55,12 @@ impl NetlinkRouteKernelSocket {
                 route::do_del_route(request_segment).map(|()| acknowledgement(request_header))
             }
             RtnlSegment::GetRule(request_segment) => rule::do_get_rule(request_segment),
+            RtnlSegment::NewRule(request_segment) => {
+                rule::do_new_rule(request_segment).map(|()| acknowledgement(request_header))
+            }
+            RtnlSegment::DelRule(request_segment) => {
+                rule::do_del_rule(request_segment).map(|()| acknowledgement(request_header))
+            }
             _ => Err(Error::with_message(
                 Errno::EOPNOTSUPP,
                 "the netlink route request is not supported",
