@@ -69,7 +69,7 @@ static uint16_t checksum(const void *data, size_t length)
 
 FN_TEST(raw_icmp_receives_quoted_tcp_syn)
 {
- int raw = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP)); if (raw < 0) return;
+ int raw = TEST_SUCC(socket(AF_INET, SOCK_RAW | SOCK_NONBLOCK, IPPROTO_ICMP)); if (raw < 0) { __TEST_SUMMARY(); return; }
  int tcp = TEST_SUCC(socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0));
  struct sockaddr_in peer = { .sin_family = AF_INET, .sin_port = htons(39145) };
  TEST_RES(inet_pton(AF_INET, "192.0.2.1", &peer.sin_addr), _ret == 1);
