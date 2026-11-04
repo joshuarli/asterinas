@@ -14,8 +14,8 @@ use crate::{
     events::IoEvents,
     fs::file::FileCommon,
     net::{
-        iface::{Iface, iter_all_ifaces},
-        route::{is_broadcast_endpoint, lookup_direct_iface, lookup_iface, lookup_udp_route},
+        iface::iter_all_ifaces,
+        route::{is_broadcast_endpoint, lookup_udp_route},
         socket::{
             Socket,
             ip::{
@@ -24,7 +24,7 @@ use crate::{
             },
             new_udp_socket_common,
             options::{
-                BindToDevice, DontRoute, Error as SocketError, ReusePort, SocketOption,
+                BindToDevice, DontRoute, Error as SocketError, ReusePort, SocketMark, SocketOption,
                 macros::{sock_option_mut, sock_option_ref},
             },
             private::SocketPrivate,
@@ -34,7 +34,7 @@ use crate::{
                 datagram_common::{Bound, Inner, select_remote_and_bind},
                 options::{
                     GetSocketLevelOption, SetSocketLevelOption, SocketOptionSet, SocketTimeouts,
-                    check_current_net_raw, timestamping,
+                    check_current_net_raw, check_current_privileged, timestamping,
                 },
             },
         },
@@ -72,6 +72,8 @@ struct OptionSet {
     dont_route: bool,
     mtu_discover: PathMtuDiscovery,
     packet_options: Option<PacketOptions>,
+    mark: u32,
+    route_valid: bool,
 }
 
 impl OptionSet {
@@ -85,6 +87,8 @@ impl OptionSet {
             dont_route: false,
             mtu_discover: PathMtuDiscovery::Want,
             packet_options: None,
+            mark: 0,
+            route_valid: false,
         }
     }
 }
@@ -311,9 +315,9 @@ impl DatagramSocket {
             return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the IPv4 length limit");
         }
         let tx_tag = self.next_tx_tag();
-        let (tos, dont_route, mtu_discovery, packet_options, can_broadcast) = {
+        let (tos, dont_route, mtu_discovery, packet_options, can_broadcast, mark, device) = {
             let options = self.options.read();
-            (options.ip.tos(), options.dont_route || flags.contains(SendFlags::MSG_DONTROUTE), options.mtu_discover, options.packet_options.clone(), options.socket.broadcast())
+            (options.ip.tos(), options.dont_route || flags.contains(SendFlags::MSG_DONTROUTE), options.mtu_discover, options.packet_options.clone(), options.socket.broadcast(), options.mark, options.device)
         };
         let option_len = packet_options.as_ref().map_or(0, |options| options.bytes.len());
         if reader.sum_lens() + option_len > IPV4_MAX_UDP_PAYLOAD {
@@ -337,12 +341,12 @@ impl DatagramSocket {
                 if !can_broadcast && is_broadcast_endpoint(&route_endpoint) {
                     return_errno_with_message!(Errno::EACCES, "broadcast requires SO_BROADCAST");
                 }
-                let device = self.options.read().device;
-                let (iface, next_hop, route) = if dont_route || device.is_bound() {
-                    (self.output_iface(&route_endpoint, dont_route)?, if dont_route { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed }, aster_bigtcp::iface::PathMtuRoute::Default)
-                } else {
-                    lookup_udp_route(route_endpoint.addr)?
-                };
+                let device = device.iface()?.map(|iface| iface.index());
+                let (iface, next_hop, route) = lookup_udp_route(route_endpoint.addr, mark, dont_route, device)?;
+                if remote.is_none() {
+                    let mut options = self.options.write();
+                    if options.mark == mark { options.route_valid = true; }
+                }
                 let path_mtu = iface.path_mtu_for_route(route_endpoint.addr, route);
                 let mtu = match mtu_discovery {
                     PathMtuDiscovery::Do | PathMtuDiscovery::Want => path_mtu.mtu,
@@ -400,19 +404,6 @@ impl DatagramSocket {
             bound.set_hop_limit(options.ip.ttl().get());
         }
         Ok(())
-    }
-
-    fn output_iface(&self, remote: &IpEndpoint, dont_route: bool) -> Result<Arc<Iface>> {
-        let device = self.options.read().device;
-        let device = device.iface()?;
-        if dont_route {
-            lookup_direct_iface(remote.addr, device.map(|iface| iface.index()))
-        } else {
-            match device {
-                Some(device) => Ok(device.clone()),
-                None => lookup_iface(remote.addr),
-            }
-        }
     }
 
     fn set_bound_device(&self, device: BoundDevice) -> Result<()> {
@@ -508,14 +499,13 @@ impl Socket for DatagramSocket {
             );
         }
 
-        let (dont_route, first_hop) = {
-            let options = self.options.read();
-            (options.dont_route, options.packet_options.as_ref().and_then(PacketOptions::first_hop))
-        };
-        let route_endpoint = IpEndpoint::new(first_hop.map_or(endpoint.addr, IpAddress::Ipv4), endpoint.port);
         self.bind_ephemeral()?;
-        let iface = self.output_iface(&route_endpoint, dont_route)?;
         let mut inner = self.inner.write();
+        let mut options = self.options.write();
+        let first_hop = options.packet_options.as_ref().and_then(PacketOptions::first_hop);
+        let route_endpoint = IpEndpoint::new(first_hop.map_or(endpoint.addr, IpAddress::Ipv4), endpoint.port);
+        let device = options.device.iface()?.map(|iface| iface.index());
+        let (iface, _, _) = lookup_udp_route(route_endpoint.addr, options.mark, options.dont_route, device)?;
         if let Inner::Bound(bound) = &mut *inner {
             let local = bound.local_endpoint().addr;
             if matches!(local, IpAddress::Ipv4(address) if address.is_loopback())
@@ -527,7 +517,9 @@ impl Socket for DatagramSocket {
                 bound.set_connected_source(get_ephemeral_endpoint_on(&iface, &route_endpoint)?.addr);
             }
         }
-        inner.connect(&endpoint, &self.pollee)
+        inner.connect(&endpoint, &self.pollee)?;
+        options.route_valid = true;
+        Ok(())
     }
 
     fn addr(&self) -> Result<SocketAddr> {
@@ -620,20 +612,20 @@ impl Socket for DatagramSocket {
                 ip_options.set(self.options.read().packet_options.as_ref().map_or_else(Vec::new, |options| options.bytes.clone()));
                 return Ok(());
             }
+            mark @ SocketMark => {
+                mark.set(self.options.read().mark);
+                return Ok(());
+            }
             ip_mtu @ Mtu => {
                 let remote = *self.inner.read().peer_addr().ok_or_else(|| Error::from(Errno::ENOTCONN))?;
-                let (dont_route, first_hop) = {
+                let (dont_route, first_hop, mark) = {
                     let options = self.options.read();
-                    (options.dont_route, options.packet_options.as_ref().and_then(PacketOptions::first_hop))
+                    if !options.route_valid { return_errno_with_message!(Errno::ENOTCONN, "the socket has no cached route"); }
+                    (options.dont_route, options.packet_options.as_ref().and_then(PacketOptions::first_hop), options.mark)
                 };
                 let route = IpEndpoint::new(first_hop.map_or(remote.addr, IpAddress::Ipv4), remote.port);
-                let device = self.options.read().device;
-                let (iface, path) = if dont_route || device.is_bound() {
-                    (self.output_iface(&route, dont_route)?, aster_bigtcp::iface::PathMtuRoute::Default)
-                } else {
-                    let (iface, _, path) = lookup_udp_route(route.addr)?;
-                    (iface, path)
-                };
+                let device = self.options.read().device.iface()?.map(|iface| iface.index());
+                let (iface, _, path) = lookup_udp_route(route.addr, mark, dont_route, device)?;
                 ip_mtu.set(iface.path_mtu_for_route(remote.addr, path).mtu as i32);
                 return Ok(());
             }
@@ -674,6 +666,16 @@ impl Socket for DatagramSocket {
 
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
         sock_option_ref!(match option {
+            mark @ SocketMark => {
+                check_current_net_raw().or_else(|_| check_current_privileged())?;
+                let mark = *mark.get().unwrap();
+                let mut options = self.options.write();
+                if options.mark != mark {
+                    options.mark = mark;
+                    options.route_valid = false;
+                }
+                return Ok(());
+            }
             ip_options @ IpOptions => {
                 let parsed = PacketOptions::parse(ip_options.get().unwrap())?;
                 self.options.write().packet_options = parsed;
