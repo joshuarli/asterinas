@@ -37,7 +37,7 @@ use crate::{
     ext::Ext,
     iface::ScheduleNextPoll,
     packet::{FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TxPacket},
-    socket::{TcpListenerBg, UdpNextHop},
+    socket::{TcpListenerBg, IpNextHop},
     socket_table::SocketTable,
 };
 
@@ -60,7 +60,7 @@ pub struct IfaceCommon<E: Ext> {
 pub(crate) struct TxPacketWithDst {
     pub(super) packet: TxPacket<NetworkLayer>,
     pub(super) dst_addr: IpAddress,
-    pub(super) next_hop: UdpNextHop,
+    pub(super) next_hop: IpNextHop,
     pub(super) fragment_mtu: Option<usize>,
     pub(super) failure: Option<(Arc<dyn UdpFailure>, IpEndpoint)>,
 }
@@ -261,7 +261,7 @@ impl<E: Ext> IfaceCommon<E> {
     pub(super) fn add_ip_tap(&self, tap: Arc<dyn IpTap>) { self.ip_taps.add(tap); }
     pub(super) fn remove_ip_tap(&self, tap: &Arc<dyn IpTap>) { self.ip_taps.remove(tap); }
 
-    pub(super) fn send_ipv4_packet(&self, bytes: &[u8], mtu: usize) -> Result<(), LinkSendError> {
+    pub(super) fn send_ipv4_packet(&self, bytes: &[u8], mtu: usize, next_hop: IpNextHop) -> Result<(), LinkSendError> {
         self.ensure_up()?;
         if bytes.len() < 20 || bytes[0] >> 4 != 4 || usize::from(u16::from_be_bytes([bytes[2], bytes[3]])) != bytes.len() {
             return Err(LinkSendError::UnsupportedProtocol);
@@ -276,7 +276,7 @@ impl<E: Ext> IfaceCommon<E> {
         let mut queue = self.raw_ip_tx.lock();
         self.ensure_up()?;
         if queue.len() >= 64 { return Err(LinkSendError::Busy); }
-        queue.push_back(TxPacketWithDst { packet: packet.build(), dst_addr: destination, next_hop: UdpNextHop::Routed, fragment_mtu: Some(mtu), failure: None });
+        queue.push_back(TxPacketWithDst { packet: packet.build(), dst_addr: destination, next_hop, fragment_mtu: Some(mtu), failure: None });
         Ok(())
     }
 

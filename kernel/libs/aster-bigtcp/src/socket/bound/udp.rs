@@ -27,7 +27,7 @@ use crate::{
 pub struct UdpSocket<E: Ext>(Arc<UdpSocketBg<E>>);
 
 #[derive(Clone, Copy)]
-pub enum UdpNextHop {
+pub enum IpNextHop {
     Routed,
     Direct,
     Gateway(Ipv4Address),
@@ -83,7 +83,7 @@ struct TxDatagram {
     destination: IpEndpoint,
     ttl: u8,
     tos: u8,
-    next_hop: UdpNextHop,
+    next_hop: IpNextHop,
     fragmentation: UdpFragmentation,
     ipv4_options: Option<UdpIpv4Options>,
     tag: u32,
@@ -325,7 +325,7 @@ impl<E: Ext> UdpSocketBg<E> {
     /// Tries to generate an outgoing packet and dispatches the generated packet.
     pub(crate) fn dispatch<D>(&self, ifindex: u32, cx: &mut Context, dispatch: D)
     where
-        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8, UdpNextHop, UdpFragmentation, Option<&UdpIpv4Options>),
+        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8, IpNextHop, UdpFragmentation, Option<&UdpIpv4Options>),
     {
         let open = self.open.lock();
         if !*open { return; }
@@ -447,7 +447,7 @@ impl<E: Ext> UdpSocket<E> {
         route: PathMtuRoute,
         source: IpAddress,
         tos: u8,
-        next_hop: UdpNextHop,
+        next_hop: IpNextHop,
         fragmentation: UdpFragmentation,
         ipv4_options: Option<UdpIpv4Options>,
         f: F,
@@ -577,7 +577,7 @@ mod test {
         let snapshot = registry.sockets().pop().unwrap();
         for port in 1..=65 {
             let destination = IpEndpoint::new(address, port);
-            socket.send(0, destination, 7, PathMtuRoute::Default, address, 0, UdpNextHop::Routed,
+            socket.send(0, destination, 7, PathMtuRoute::Default, address, 0, IpNextHop::Routed,
                 UdpFragmentation::DontFragment, None, |_| Ok::<(), ()>(())).unwrap().unwrap();
         }
         assert!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 1)).is_none());
@@ -589,7 +589,7 @@ mod test {
     fn packet(iface: u32, size: usize) -> TxDatagram {
         let address = IpAddress::Ipv4(Ipv4Address::LOCALHOST);
         TxDatagram { iface, source: address, destination: IpEndpoint::new(address, 1234),
-            ttl: 64, tos: 0, next_hop: UdpNextHop::Routed, fragmentation: UdpFragmentation::DontFragment, ipv4_options: None, tag: 0, payload: vec![0; size] }
+            ttl: 64, tos: 0, next_hop: IpNextHop::Routed, fragmentation: UdpFragmentation::DontFragment, ipv4_options: None, tag: 0, payload: vec![0; size] }
     }
 
     #[ktest]

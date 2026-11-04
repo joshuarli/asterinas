@@ -398,7 +398,7 @@ pub(super) fn lookup_iface(dst: IpAddress) -> Result<Arc<Iface>> {
     lookup_iface_with_scope(dst, false, None)
 }
 
-pub(super) fn lookup_udp_route(dst: IpAddress, mark: u32, direct: bool, device: Option<u32>) -> Result<(Arc<Iface>, aster_bigtcp::socket::UdpNextHop, aster_bigtcp::iface::PathMtuRoute)> {
+pub(super) fn lookup_output_route(dst: IpAddress, mark: u32, direct: bool, device: Option<u32>) -> Result<(Arc<Iface>, aster_bigtcp::socket::IpNextHop, aster_bigtcp::iface::PathMtuRoute)> {
     match dst {
         IpAddress::Ipv4(dst) => {
             let key = RouteLookupKey { dst, mark, direct, device };
@@ -408,12 +408,12 @@ pub(super) fn lookup_udp_route(dst: IpAddress, mark: u32, direct: bool, device: 
                     if let Some(index) = device {
                         let iface = iface::iter_all_ifaces().find(|iface| iface.index() == index)
                             .ok_or_else(|| Error::from(Errno::ENODEV))?;
-                        return Ok((iface.clone(), aster_bigtcp::socket::UdpNextHop::Direct, aster_bigtcp::iface::PathMtuRoute::Default));
+                        return Ok((iface.clone(), aster_bigtcp::socket::IpNextHop::Direct, aster_bigtcp::iface::PathMtuRoute::Default));
                     }
                     return Err(error);
                 }
             };
-            let next_hop = route.gateway().map_or(aster_bigtcp::socket::UdpNextHop::Direct, aster_bigtcp::socket::UdpNextHop::Gateway);
+            let next_hop = route.gateway().map_or(aster_bigtcp::socket::IpNextHop::Direct, aster_bigtcp::socket::IpNextHop::Gateway);
             let path = if route.table_id() == RouteTableId::MAIN { aster_bigtcp::iface::PathMtuRoute::Default } else {
                 aster_bigtcp::iface::PathMtuRoute::Table { table: route.table_id().get(), gateway: route.gateway() }
             };
@@ -422,7 +422,7 @@ pub(super) fn lookup_udp_route(dst: IpAddress, mark: u32, direct: bool, device: 
         IpAddress::Ipv6(dst) => {
             let key = RouteLookupKey { dst, mark, direct, device };
             let route = IPV6_ROUTE_MANAGER.get().unwrap().read().lookup_entry(&key)?;
-            Ok((route.output_iface().clone(), if direct { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed }, aster_bigtcp::iface::PathMtuRoute::Default))
+            Ok((route.output_iface().clone(), if direct { aster_bigtcp::socket::IpNextHop::Direct } else { aster_bigtcp::socket::IpNextHop::Routed }, aster_bigtcp::iface::PathMtuRoute::Default))
         }
     }
 }

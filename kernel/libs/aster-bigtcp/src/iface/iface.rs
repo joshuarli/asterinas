@@ -104,8 +104,8 @@ impl<E: Ext> dyn Iface<E> {
     /// Unregisters an IP packet observer.
     pub fn remove_ip_tap(&self, tap: &Arc<dyn IpTap>) { self.common().remove_ip_tap(tap); }
     /// Enqueues a complete IPv4 packet for routed transmission using the given path MTU.
-    pub fn send_ipv4_packet(&self, packet: &[u8], mtu: usize) -> Result<(), LinkSendError> {
-        self.common().send_ipv4_packet(packet, mtu)
+    pub fn send_ipv4_packet(&self, packet: &[u8], mtu: usize, next_hop: crate::socket::IpNextHop) -> Result<(), LinkSendError> {
+        self.common().send_ipv4_packet(packet, mtu, next_hop)
     }
 
     /// Returns the interface type.
