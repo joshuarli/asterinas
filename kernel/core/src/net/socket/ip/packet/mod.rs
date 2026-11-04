@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use core::{sync::atomic::{AtomicU16, Ordering}, time::Duration};
-use aster_bigtcp::{iface::IpTap, wire::{IpAddress, IpEndpoint, Ipv4Address}};
+use aster_bigtcp::{iface::{InterfaceType, IpTap}, wire::{IpAddress, IpEndpoint, Ipv4Address}};
 use aster_softirq::BottomHalfDisabled;
 use super::{common::{get_ephemeral_endpoint_on, icmp_error_errno, map_unspecified_to_localhost}, ioctl::ipv4_ioctl, options::{IpOptionSet, Pktinfo, Recverr, SetIpLevelOption}};
 use crate::{
@@ -196,15 +196,6 @@ impl IpPacketSocket {
         Ok(id)
     }
 
-    fn set_local_address(&self, address: Ipv4Address) {
-        let mut state = self.tap.state.lock();
-        state.local = address;
-        if let Some(id) = state.ping_id
-            && let Some(bindings) = PING_IDS.lock().get_mut(&id)
-            && let Some(binding) = bindings.iter_mut().find(|binding| core::ptr::eq(binding.tap.as_ptr(), Arc::as_ptr(&self.tap)))
-        { binding.local = address; }
-    }
-
     fn take_pending_error(&self) -> Option<Errno> {
         let error = self.tap.state.lock().pending_error.take();
         if error.is_some() { self.pollee.invalidate(); }
@@ -288,7 +279,9 @@ impl Socket for IpPacketSocket {
         if self.tap.kind == IpSocketKind::Ping {
             self.assign_ping_id(port, Some(address))?;
         } else {
-            self.set_local_address(address);
+            let mut state = self.tap.state.lock();
+            if state.peer.is_some() { return_errno_with_message!(Errno::EINVAL, "connected raw socket cannot bind"); }
+            state.local = address;
         }
         Ok(())
     }
@@ -300,11 +293,24 @@ impl Socket for IpPacketSocket {
         if is_broadcast_endpoint(&endpoint) && !self.options.read().socket.broadcast() {
             return_errno_with_message!(Errno::EACCES, "broadcast requires SO_BROADCAST");
         }
+        let local = self.tap.state.lock().local;
+        if local.is_loopback() && iface.type_() != InterfaceType::LOOPBACK {
+            return_errno_with_message!(Errno::EINVAL, "loopback source requires a loopback route");
+        }
         let source = get_ephemeral_endpoint_on(&iface, &endpoint)?.addr;
         if self.tap.kind == IpSocketKind::Ping { self.assign_ping_id(0, None)?; }
-        let local_unspecified = self.tap.state.lock().local.is_unspecified();
-        if local_unspecified && let IpAddress::Ipv4(source) = source { self.set_local_address(source); }
-        self.tap.state.lock().peer = Some(peer);
+        let mut state = self.tap.state.lock();
+        if state.local.is_loopback() && iface.type_() != InterfaceType::LOOPBACK {
+            return_errno_with_message!(Errno::EINVAL, "loopback source requires a loopback route");
+        }
+        if state.local.is_unspecified() && let IpAddress::Ipv4(source) = source {
+            state.local = source;
+            if let Some(id) = state.ping_id
+                && let Some(bindings) = PING_IDS.lock().get_mut(&id)
+                && let Some(binding) = bindings.iter_mut().find(|binding| core::ptr::eq(binding.tap.as_ptr(), Arc::as_ptr(&self.tap)))
+            { binding.local = source; }
+        }
+        state.peer = Some(peer);
         Ok(())
     }
 
@@ -334,6 +340,9 @@ impl Socket for IpPacketSocket {
             return_errno_with_message!(Errno::EACCES, "broadcast requires SO_BROADCAST");
         }
         let local = self.tap.state.lock().local;
+        if local.is_loopback() && iface.type_() != InterfaceType::LOOPBACK {
+            return_errno_with_message!(Errno::EINVAL, "loopback source requires a loopback route");
+        }
         let source = if local.is_unspecified() { get_ephemeral_endpoint_on(&iface, &endpoint)?.addr } else { local.into() };
         let IpAddress::Ipv4(source) = source else { return_errno_with_message!(Errno::EAFNOSUPPORT, "expected an IPv4 source"); };
         let IpAddress::Ipv4(destination) = endpoint.addr else { return_errno_with_message!(Errno::EAFNOSUPPORT, "expected an IPv4 destination"); };

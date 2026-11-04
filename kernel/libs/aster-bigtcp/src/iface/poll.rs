@@ -28,7 +28,7 @@ use crate::{
     device::{AnyNetworkDevice, NetError},
     ext::Ext,
     iface::poll_iface::IsUnicast,
-    packet::{ApplicationLayer, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
+    packet::{ApplicationLayer, FreshTxPacket, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
     socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin, UdpFragmentation, UdpNextHop, UdpSocketBg},
     socket_table::{ConnectionKey, ListenerKey, SocketTable, hash_local_remote},
 };
@@ -125,7 +125,7 @@ impl<E: Ext> PollContext<'_, E> {
                 }
             };
 
-            if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version)
+            if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version, device.mtu())
                 && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
                 && let Err(err) = send_frame(device, phy, taps, tx_packet)
             {
@@ -139,6 +139,7 @@ impl<E: Ext> PollContext<'_, E> {
         phy: &dyn PollPhy,
         packet: RxPacket<NetworkLayer>,
         ip_version: Option<ip::Version>,
+        mtu: usize,
     ) -> Option<TxPacketWithDst> {
         // Parse the IP header. Ignore the packet if the header is ill-formed.
         let checksum_caps = self.iface.context().checksum_caps();
@@ -174,7 +175,7 @@ impl<E: Ext> PollContext<'_, E> {
                 self.parse_and_process_udp(phy, &ip_repr, packet, checksum_caps.udp.rx())
             }
             IpProtocol::Icmp if matches!(&ip_repr.inner, IpRepr::Ipv4(_)) => {
-                self.process_icmp(phy, &ip_repr, packet)
+                self.process_icmp(phy, &ip_repr, packet, mtu)
             }
             _ => None,
         }
@@ -185,6 +186,7 @@ impl<E: Ext> PollContext<'_, E> {
         phy: &dyn PollPhy,
         ip_repr: &IpReprWithLen,
         packet: RxPacket<TransportLayer>,
+        mtu: usize,
     ) -> Option<TxPacketWithDst> {
         let mut bytes = alloc::vec![0; packet.len()];
         packet.reader().read(&mut VmWriter::from(bytes.as_mut_slice()));
@@ -199,12 +201,18 @@ impl<E: Ext> PollContext<'_, E> {
                 }),
                 _ => return None,
             };
-            let mut builder = phy.alloc_tx_buffer(bytes.len()).ok()?.to_builder_at_layer::<TransportLayer>();
+            let mut builder = FreshTxPacket::<TransportLayer>::alloc(bytes.len()).ok()?.to_builder();
             let written = builder.append_writer().write(&mut VmReader::from(bytes.as_slice()));
             if written != bytes.len() { return None; }
             builder.commit(written);
-            let packet = ip::emit_with_tos(builder.build(), &reply, self.iface.context().checksum_caps().ipv4.tx() || phy.is_loopback(), ip_repr.tos, true);
-            return Some(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), direct: false, fragment_mtu: None, failure: None });
+            let path = self.udp_registry.path_mtu(self.ifindex, reply.dst_addr(), mtu);
+            let dont_fragment = !path.locked && bytes.len() + IPV4_HEADER_LEN <= path.mtu;
+            let packet = ip::emit_with_tos(builder.build(), &reply, self.iface.context().checksum_caps().ipv4.tx() || phy.is_loopback(), ip_repr.tos, dont_fragment);
+            let mut queue = self.raw_ip_tx.lock();
+            if queue.len() < 64 {
+                queue.push_back(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), direct: false, fragment_mtu: Some(path.mtu), failure: None });
+            }
+            return None;
         }
         let error = icmp::parse_udp_error(&bytes, true)?;
         if error.source.addr != ip_repr.inner.dst_addr() || !self.iface.is_unicast_local(error.source.addr) {

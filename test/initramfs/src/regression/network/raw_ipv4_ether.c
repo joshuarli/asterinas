@@ -92,3 +92,23 @@ FN_TEST(raw_ipv4_echo_crosses_ethernet)
  TEST_RES(found, _ret == 1); TEST_SUCC(close(fd));
 }
 END_TEST()
+
+FN_TEST(raw_loopback_source_cannot_escape_and_connected_cannot_rebind)
+{
+ struct sockaddr_in loop = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+ struct sockaddr_in peer = { .sin_family = AF_INET }; inet_pton(AF_INET, "192.0.2.1", &peer.sin_addr);
+ struct icmphdr request = { .type = ICMP_ECHO };
+ int bound = TEST_SUCC(socket(AF_INET, SOCK_RAW, IPPROTO_ICMP));
+ if (bound < 0) { __TEST_SUMMARY(); return; }
+ TEST_SUCC(bind(bound, (struct sockaddr *)&loop, sizeof(loop)));
+ TEST_ERRNO(sendto(bound, &request, sizeof(request), 0, (struct sockaddr *)&peer, sizeof(peer)), EINVAL);
+ TEST_ERRNO(connect(bound, (struct sockaddr *)&peer, sizeof(peer)), EINVAL);
+ TEST_SUCC(close(bound));
+ int connected = TEST_SUCC(socket(AF_INET, SOCK_RAW, IPPROTO_ICMP));
+ if (connected < 0) { __TEST_SUMMARY(); return; }
+ TEST_SUCC(connect(connected, (struct sockaddr *)&loop, sizeof(loop)));
+ TEST_ERRNO(bind(connected, (struct sockaddr *)&loop, sizeof(loop)), EINVAL);
+ TEST_ERRNO(sendto(connected, &request, sizeof(request), 0, (struct sockaddr *)&peer, sizeof(peer)), EINVAL);
+ TEST_SUCC(close(connected));
+}
+END_TEST()
