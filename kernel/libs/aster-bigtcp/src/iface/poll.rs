@@ -96,8 +96,8 @@ impl<E: Ext> PollContext<'_, E> {
     ) {
         let ipv4_cidrs = self.iface.ipv4_cidrs();
         loop {
-            if let Some(packet) = self.network_registry.take_forwarded_tcp(self.ifindex) {
-                if let Some(reply) = self.parse_and_process_ip(phy, packet, Some(ip::Version::V4), device.mtu(), true)
+            if let Some(forwarded) = self.network_registry.take_forwarded_ip(self.ifindex) {
+                if let Some(reply) = self.parse_and_process_ip(phy, forwarded.packet, Some(ip::Version::V4), device.mtu(), true, forwarded.ingress_ifindex)
                     && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
                     && let Err(err) = send_frame(device, phy, taps, tx_packet)
                 { ostd::error!("failed to send a network packet: {:?}", err); }
@@ -135,17 +135,17 @@ impl<E: Ext> PollContext<'_, E> {
             let packet = if ip_version != Some(ip::Version::V6) && packet.len() >= 20 {
                 let mut header = [0u8; 20];
                 packet.reader().read(&mut VmWriter::from(&mut header[..]));
-                if header[0] >> 4 == 4 && header[9] == 6 {
+                if header[0] >> 4 == 4 {
                     let destination = Ipv4Address::new(header[16], header[17], header[18], header[19]);
                     if !self.iface.is_unicast_local(IpAddress::Ipv4(destination)) {
-                        match self.network_registry.forward_local_tcp(self.ifindex, destination, packet) {
+                        match self.network_registry.forward_local_ip(self.ifindex, destination, packet) {
                             Some(packet) => packet,
                             None => continue,
                         }
                     } else { packet }
                 } else { packet }
             } else { packet };
-            if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version, device.mtu(), false)
+            if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version, device.mtu(), false, self.ifindex)
                 && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
                 && let Err(err) = send_frame(device, phy, taps, tx_packet)
             {
@@ -161,6 +161,7 @@ impl<E: Ext> PollContext<'_, E> {
         ip_version: Option<ip::Version>,
         mtu: usize,
         forwarded: bool,
+        ingress_ifindex: u32,
     ) -> Option<TxPacketWithDst> {
         // Parse the IP header. Ignore the packet if the header is ill-formed.
         let checksum_caps = self.iface.context().checksum_caps();
@@ -186,17 +187,17 @@ impl<E: Ext> PollContext<'_, E> {
             );
         }
 
-        self.ip_taps.deliver(self.ifindex, ip_repr.inner.next_header().into(), packet.reader_with_header(ip_repr.header_len));
+        self.ip_taps.deliver(ingress_ifindex, ip_repr.inner.next_header().into(), packet.reader_with_header(ip_repr.header_len));
 
         match ip_repr.inner.next_header() {
             IpProtocol::Tcp => {
                 self.parse_and_process_tcp(phy, &ip_repr.inner, packet, forwarded || checksum_caps.tcp.rx())
             }
             IpProtocol::Udp => {
-                self.parse_and_process_udp(phy, &ip_repr, packet, checksum_caps.udp.rx())
+                self.parse_and_process_udp(phy, &ip_repr, packet, forwarded || checksum_caps.udp.rx(), ingress_ifindex)
             }
             IpProtocol::Icmp if matches!(&ip_repr.inner, IpRepr::Ipv4(_)) => {
-                self.process_icmp(phy, &ip_repr, packet, mtu)
+                self.process_icmp(phy, &ip_repr, packet, mtu, ingress_ifindex)
             }
             _ => None,
         }
@@ -208,6 +209,7 @@ impl<E: Ext> PollContext<'_, E> {
         ip_repr: &IpReprWithLen,
         packet: RxPacket<TransportLayer>,
         mtu: usize,
+        ingress_ifindex: u32,
     ) -> Option<TxPacketWithDst> {
         let mut bytes = alloc::vec![0; packet.len()];
         packet.reader().read(&mut VmWriter::from(bytes.as_mut_slice()));
@@ -239,7 +241,7 @@ impl<E: Ext> PollContext<'_, E> {
             return None;
         }
         for socket in self.udp_sockets {
-            if socket.can_receive_error(error.source, self.ifindex) && socket.matches_error_destination(error.destination) {
+            if socket.can_receive_error(error.source, ingress_ifindex) && socket.matches_error_destination(error.destination) {
                 if error.type_ == 3 && error.code == 4
                     && let Some((egress, route)) = socket.path_mtu_egress(error.source, error.destination)
                 {
@@ -408,11 +410,12 @@ impl<E: Ext> PollContext<'_, E> {
         ip_repr: &IpReprWithLen,
         packet: RxPacket<TransportLayer>,
         verify_checksum: bool,
+        ingress_ifindex: u32,
     ) -> Option<TxPacketWithDst> {
         // Parse the UDP header. Ignore the packet if the header is ill-formed.
         let (packet, udp_repr) = udp::parse(packet, &ip_repr.inner, verify_checksum)?;
 
-        if !self.process_udp(&ip_repr.inner, &udp_repr, packet.reader().into(), ip_repr.tos) {
+        if !self.process_udp(&ip_repr.inner, &udp_repr, packet.reader().into(), ip_repr.tos, ingress_ifindex) {
             return self.generate_icmp_unreachable(
                 phy,
                 &ip_repr.inner,
@@ -431,6 +434,7 @@ impl<E: Ext> PollContext<'_, E> {
         udp_repr: &UdpRepr,
         udp_payload: PacketSlice<'_>,
         tos: u8,
+        ingress_ifindex: u32,
     ) -> bool {
         let mut processed = false;
         let is_unicast = self.iface.context().is_unicast(ip_repr.dst_addr());
@@ -438,7 +442,7 @@ impl<E: Ext> PollContext<'_, E> {
         for priority in (0..=7).rev() {
             if is_unicast {
                 let candidates = || self.udp_sockets.iter().rev().filter(|socket|
-                    socket.receive_priority(ip_repr, udp_repr, self.ifindex) == Some(priority));
+                    socket.receive_priority(ip_repr, udp_repr, ingress_ifindex) == Some(priority));
                 if let Some(first) = candidates().next() {
                     let group = || candidates().filter(|socket| first.same_reuse_port_group(socket));
                     let count = group().count();
@@ -449,16 +453,16 @@ impl<E: Ext> PollContext<'_, E> {
                     } else {
                         first
                     };
-                    if selected.process(ip_repr, udp_repr, udp_payload.clone(), tos, self.ifindex) {
+                    if selected.process(ip_repr, udp_repr, udp_payload.clone(), tos, ingress_ifindex) {
                         return true;
                     }
                 }
             }
             for socket in self.udp_sockets.iter().rev() {
-                if socket.receive_priority(ip_repr, udp_repr, self.ifindex) != Some(priority) {
+                if socket.receive_priority(ip_repr, udp_repr, ingress_ifindex) != Some(priority) {
                     continue;
                 }
-                processed |= socket.process(ip_repr, udp_repr, udp_payload.clone(), tos, self.ifindex);
+                processed |= socket.process(ip_repr, udp_repr, udp_payload.clone(), tos, ingress_ifindex);
                 if processed && is_unicast {
                     return true;
                 }
@@ -820,7 +824,7 @@ impl<E: Ext> PollContext<'_, E> {
                 }
 
                 if !socket.can_process(udp_repr.dst_port) {
-                    let processed = this.process_udp(ip_repr, udp_repr, PacketSlice::from(udp_payload), tos);
+                    let processed = this.process_udp(ip_repr, udp_repr, PacketSlice::from(udp_payload), tos, this.ifindex);
                     if !processed && !is_broadcast {
                         socket.report_error(UdpError {
                             destination: smoltcp::wire::IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port),
@@ -845,7 +849,7 @@ impl<E: Ext> PollContext<'_, E> {
             });
 
             if let Some((ip_repr, udp_repr, payload, is_broadcast, tos)) = deferred {
-                if !self.process_udp(&ip_repr, &udp_repr, PacketSlice::from(payload.as_slice()), tos) && !is_broadcast {
+                if !self.process_udp(&ip_repr, &udp_repr, PacketSlice::from(payload.as_slice()), tos, self.ifindex) && !is_broadcast {
                     socket.report_error(UdpError {
                         destination: smoltcp::wire::IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port),
                         payload,

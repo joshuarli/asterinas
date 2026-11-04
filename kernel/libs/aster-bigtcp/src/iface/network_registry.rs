@@ -22,7 +22,12 @@ pub struct NetworkRegistry<E: Ext> {
 #[derive(Default)]
 struct LocalIngress {
     addresses: BTreeMap<u32, (bool, Vec<Ipv4Address>)>,
-    packets: BTreeMap<u32, VecDeque<RxPacket<NetworkLayer>>>,
+    packets: BTreeMap<u32, VecDeque<ForwardedIpPacket>>,
+}
+
+pub(crate) struct ForwardedIpPacket {
+    pub packet: RxPacket<NetworkLayer>,
+    pub ingress_ifindex: u32,
 }
 
 struct PathMtuEntry {
@@ -70,24 +75,24 @@ impl<E: Ext> NetworkRegistry<E> {
         if !up { ingress.packets.remove(&ifindex); }
     }
 
-    pub(crate) fn forward_local_tcp(&self, incoming: u32, destination: Ipv4Address, packet: RxPacket<NetworkLayer>) -> Option<RxPacket<NetworkLayer>> {
+    pub(crate) fn forward_local_ip(&self, incoming: u32, destination: Ipv4Address, packet: RxPacket<NetworkLayer>) -> Option<RxPacket<NetworkLayer>> {
         if destination.is_loopback() { return None; }
         let mut ingress = self.local_ingress.lock();
         let owner = ingress.addresses.iter().find_map(|(index, (up, addresses))|
             (*up && *index != incoming && addresses.contains(&destination)).then_some(*index));
         let Some(owner) = owner else { return Some(packet); };
         let queue = ingress.packets.entry(owner).or_default();
-        if queue.len() < 64 { queue.push_back(packet); }
+        if queue.len() < 64 { queue.push_back(ForwardedIpPacket { packet, ingress_ifindex: incoming }); }
         drop(ingress);
         E::wake_forwarded_ip(owner);
         None
     }
 
-    pub(crate) fn take_forwarded_tcp(&self, ifindex: u32) -> Option<RxPacket<NetworkLayer>> {
+    pub(crate) fn take_forwarded_ip(&self, ifindex: u32) -> Option<ForwardedIpPacket> {
         self.local_ingress.lock().packets.get_mut(&ifindex)?.pop_front()
     }
 
-    pub(crate) fn has_forwarded_tcp(&self, ifindex: u32) -> bool {
+    pub(crate) fn has_forwarded_ip(&self, ifindex: u32) -> bool {
         self.local_ingress.lock().packets.get(&ifindex).is_some_and(|packets| !packets.is_empty())
     }
 
@@ -292,22 +297,23 @@ mod test {
     }
 
     #[ktest]
-    fn forwarded_tcp_is_bounded_and_tracks_interface_addresses() {
+    fn forwarded_ip_is_bounded_and_tracks_interface_addresses() {
         let registry = NetworkRegistry::<TestExt>::new();
         let destination = Ipv4Address::new(192, 0, 2, 100);
         let loopback = Ipv4Address::new(127, 0, 0, 1);
         registry.set_local_addresses(7, &[Ipv4Cidr::new(destination, 24)], true);
         registry.set_local_addresses(1, &[Ipv4Cidr::new(loopback, 8)], true);
         let packet = || crate::packet::FreshTxPacket::<NetworkLayer>::alloc(0).unwrap().to_builder().build().to_rx_packet().unwrap();
-        assert!(registry.forward_local_tcp(8, loopback, packet()).is_none());
-        assert!(!registry.has_forwarded_tcp(1));
-        for _ in 0..65 { assert!(registry.forward_local_tcp(8, destination, packet()).is_none()); }
-        for _ in 0..64 { assert!(registry.take_forwarded_tcp(7).is_some()); }
-        assert!(!registry.has_forwarded_tcp(7));
-        assert!(registry.forward_local_tcp(8, destination, packet()).is_none());
+        assert!(registry.forward_local_ip(8, loopback, packet()).is_none());
+        assert!(!registry.has_forwarded_ip(1));
+        for _ in 0..65 { assert!(registry.forward_local_ip(8, destination, packet()).is_none()); }
+        assert_eq!(registry.take_forwarded_ip(7).unwrap().ingress_ifindex, 8);
+        for _ in 0..63 { assert!(registry.take_forwarded_ip(7).is_some()); }
+        assert!(!registry.has_forwarded_ip(7));
+        assert!(registry.forward_local_ip(8, destination, packet()).is_none());
         registry.set_local_addresses(7, &[Ipv4Cidr::new(destination, 24)], false);
-        assert!(!registry.has_forwarded_tcp(7));
-        assert!(registry.forward_local_tcp(8, destination, packet()).is_some());
+        assert!(!registry.has_forwarded_ip(7));
+        assert!(registry.forward_local_ip(8, destination, packet()).is_some());
     }
 
     #[ktest]
