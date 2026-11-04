@@ -776,7 +776,7 @@ impl<E: Ext> PollContext<'_, E> {
                 if ipv4_options.is_some() {
                     tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation, ipv4_options);
                     if let Some(packet) = tx_packet.as_mut() {
-                        packet.failure = Some((socket.failure_reporter(), smoltcp::wire::IpEndpoint::new(ip_repr.dst_addr(), udp_repr.dst_port)));
+                        packet.failure = Some((socket.failure_reporter(), smoltcp::wire::IpEndpoint::new(packet.dst_addr, udp_repr.dst_port)));
                     }
                     return;
                 }
