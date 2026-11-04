@@ -94,15 +94,9 @@ impl<E: Ext> PollContext<'_, E> {
         phy: &dyn PollPhy,
         taps: &LinkTaps,
     ) {
+        self.poll_forwarded_ingress(device, phy, taps, true);
         let ipv4_cidrs = self.iface.ipv4_cidrs();
         loop {
-            if let Some(forwarded) = self.network_registry.take_forwarded_ip(self.ifindex) {
-                if let Some(reply) = self.parse_and_process_ip(phy, forwarded.packet, Some(ip::Version::V4), device.mtu(), true, forwarded.ingress_ifindex)
-                    && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
-                    && let Err(err) = send_frame(device, phy, taps, tx_packet)
-                { ostd::error!("failed to send a network packet: {:?}", err); }
-                continue;
-            }
             let rx_packet = match device.receive() {
                 Ok(packet) => packet,
                 Err(NetError::NotReady) => match phy.take_looped_frame() {
@@ -152,6 +146,21 @@ impl<E: Ext> PollContext<'_, E> {
                 ostd::error!("failed to send a network packet: {:?}", err);
             }
         }
+    }
+
+    pub(super) fn poll_forwarded_ingress(&mut self, device: &mut dyn AnyNetworkDevice, phy: &dyn PollPhy, taps: &LinkTaps, link_up: bool) {
+        let ipv4_cidrs = self.iface.ipv4_cidrs();
+        while let Some(forwarded) = self.network_registry.take_forwarded_ip(self.ifindex) {
+            if let Some(reply) = self.parse_and_process_ip(phy, forwarded.packet, Some(ip::Version::V4), device.mtu(), true, forwarded.ingress_ifindex)
+                && link_up
+                && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
+                && let Err(err) = send_frame(device, phy, taps, tx_packet)
+            { ostd::error!("failed to send a network packet: {:?}", err); }
+        }
+    }
+
+    pub(super) fn poll_tcp_without_link(&mut self, phy: &dyn PollPhy) {
+        while self.dispatch_tcp(phy, false).0 {}
     }
 
     fn parse_and_process_ip(
@@ -712,7 +721,7 @@ impl<E: Ext> PollContext<'_, E> {
         if let Some(packet) = self.raw_ip_tx.lock().pop_front() {
             return (true, Some(packet));
         }
-        let (did_something_tcp, tx_packet) = self.dispatch_tcp(phy);
+        let (did_something_tcp, tx_packet) = self.dispatch_tcp(phy, true);
 
         if tx_packet.is_some() {
             return (did_something_tcp, tx_packet);
@@ -723,7 +732,7 @@ impl<E: Ext> PollContext<'_, E> {
         (did_something_tcp || did_something_udp, tx_packet)
     }
 
-    fn dispatch_tcp(&mut self, phy: &dyn PollPhy) -> (bool, Option<TxPacketWithDst>) {
+    fn dispatch_tcp(&mut self, phy: &dyn PollPhy, link_up: bool) -> (bool, Option<TxPacketWithDst>) {
         let mut tx_packet = None;
         let mut did_something = false;
 
@@ -742,7 +751,7 @@ impl<E: Ext> PollContext<'_, E> {
                 TcpConnectionBg::dispatch(&socket, &mut self.iface, |iface, ip_repr, tcp_repr| {
                     let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.network_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, self.actions);
 
-                    if !this.iface.is_unicast_local(ip_repr.dst_addr()) {
+                    if !link_up || !this.iface.is_unicast_local(ip_repr.dst_addr()) {
                         tx_packet = this.emit_tcp(phy, ip_repr, tcp_repr);
                         return None;
                     }

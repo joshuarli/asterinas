@@ -72,14 +72,14 @@ impl<E: Ext> NetworkRegistry<E> {
     pub(crate) fn set_local_addresses(&self, ifindex: u32, cidrs: &[Ipv4Cidr], up: bool) {
         let mut ingress = self.local_ingress.lock();
         ingress.addresses.insert(ifindex, (up, cidrs.iter().map(|cidr| cidr.address()).collect()));
-        if !up { ingress.packets.remove(&ifindex); }
     }
 
     pub(crate) fn forward_local_ip(&self, incoming: u32, destination: Ipv4Address, packet: RxPacket<NetworkLayer>) -> Option<RxPacket<NetworkLayer>> {
         if destination.is_loopback() { return None; }
         let mut ingress = self.local_ingress.lock();
-        let owner = ingress.addresses.iter().find_map(|(index, (up, addresses))|
-            (*up && *index != incoming && addresses.contains(&destination)).then_some(*index));
+        let owner = ingress.addresses.iter().filter(|(index, (_, addresses))|
+            **index != incoming && addresses.contains(&destination))
+            .max_by_key(|(_, (up, _))| *up).map(|(index, _)| *index);
         let Some(owner) = owner else { return Some(packet); };
         let queue = ingress.packets.entry(owner).or_default();
         if queue.len() < 64 { queue.push_back(ForwardedIpPacket { packet, ingress_ifindex: incoming }); }
@@ -312,7 +312,9 @@ mod test {
         assert!(!registry.has_forwarded_ip(7));
         assert!(registry.forward_local_ip(8, destination, packet()).is_none());
         registry.set_local_addresses(7, &[Ipv4Cidr::new(destination, 24)], false);
-        assert!(!registry.has_forwarded_ip(7));
+        assert!(registry.has_forwarded_ip(7));
+        assert!(registry.forward_local_ip(8, destination, packet()).is_none());
+        registry.set_local_addresses(7, &[], false);
         assert!(registry.forward_local_ip(8, destination, packet()).is_some());
     }
 

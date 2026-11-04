@@ -402,10 +402,10 @@ impl<E: Ext> IfaceCommon<E> {
         let mut interface = self.interface();
         interface.context_mut().now = get_network_timestamp();
 
-        if !self.flags().contains(InterfaceFlags::UP) {
+        let link_up = self.flags().contains(InterfaceFlags::UP);
+        if !link_up {
             while device.receive().is_ok() {}
             while phy.take_looped_frame().is_some() {}
-            return None;
         }
 
         let udp_sockets = self.network.sockets();
@@ -413,8 +413,13 @@ impl<E: Ext> IfaceCommon<E> {
         let mut socket_actions = Vec::new();
 
         let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, &self.network, &self.ip_taps, &self.raw_ip_tx, self.index, &mut socket_actions);
-        context.poll_ingress(device, phy, &self.taps);
-        context.poll_egress(device, phy, &self.taps);
+        if link_up {
+            context.poll_ingress(device, phy, &self.taps);
+            context.poll_egress(device, phy, &self.taps);
+        } else {
+            context.poll_forwarded_ingress(device, phy, &self.taps, false);
+            context.poll_tcp_without_link(phy);
+        }
 
         // Insert new connections and remove dead connections.
         for action in socket_actions.into_iter() {
