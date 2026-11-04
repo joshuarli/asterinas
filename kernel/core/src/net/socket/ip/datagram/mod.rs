@@ -20,7 +20,7 @@ use crate::{
             Socket,
             ip::{
                 common::{get_ephemeral_endpoint_on, map_unspecified_to_localhost},
-                options::{IpOptionSet, SetIpLevelOption},
+                options::{IpOptionSet, MtuDiscover, PathMtuDiscovery, SetIpLevelOption},
             },
             new_udp_socket_common,
             options::{
@@ -49,7 +49,9 @@ pub(super) mod observer;
 mod unbound;
 
 const SO_EE_ORIGIN_ICMP: u8 = 2;
-const IPV4_MAX_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
+const IPV4_HEADER_LEN: usize = 20;
+const UDP_HEADER_LEN: usize = 8;
+const IPV4_MAX_UDP_PAYLOAD: usize = u16::MAX as usize - IPV4_HEADER_LEN - UDP_HEADER_LEN;
 
 pub(crate) struct DatagramSocket {
     // Lock order: `inner` first, `options` second
@@ -68,7 +70,7 @@ struct OptionSet {
     ip: IpOptionSet,
     device: BoundDevice,
     dont_route: bool,
-    // TODO: UDP option set
+    mtu_discover: PathMtuDiscovery,
 }
 
 impl OptionSet {
@@ -80,6 +82,7 @@ impl OptionSet {
             ip,
             device: BoundDevice::NONE,
             dont_route: false,
+            mtu_discover: PathMtuDiscovery::Want,
         }
     }
 }
@@ -254,9 +257,9 @@ impl DatagramSocket {
             return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the IPv4 length limit");
         }
         let tx_tag = self.next_tx_tag();
-        let (tos, dont_route) = {
+        let (tos, dont_route, mtu_discovery) = {
             let options = self.options.read();
-            (options.ip.tos(), options.dont_route || flags.contains(SendFlags::MSG_DONTROUTE))
+            (options.ip.tos(), options.dont_route || flags.contains(SendFlags::MSG_DONTROUTE), options.mtu_discover)
         };
         let (sent_bytes, iface_to_poll) = select_remote_and_bind(
             &self.inner,
@@ -273,6 +276,11 @@ impl DatagramSocket {
             |bound_datagram, remote_endpoint| {
                 let remote_endpoint = map_unspecified_to_localhost(*remote_endpoint);
                 let iface = self.output_iface(&remote_endpoint, dont_route)?;
+                if matches!(mtu_discovery, PathMtuDiscovery::Do | PathMtuDiscovery::Probe | PathMtuDiscovery::Interface)
+                    && reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > iface.mtu()
+                {
+                    return_errno_with_message!(Errno::EMSGSIZE, "the UDP datagram exceeds the interface MTU");
+                }
                 let local = bound_datagram.local_endpoint();
                 let source = if local.addr.is_unspecified() || is_broadcast_endpoint(&local) {
                     get_ephemeral_endpoint_on(&iface, &remote_endpoint)?.addr
@@ -280,7 +288,12 @@ impl DatagramSocket {
                     local.addr
                 };
                 let next_hop = if dont_route { aster_bigtcp::socket::UdpNextHop::Direct } else { aster_bigtcp::socket::UdpNextHop::Routed };
-                let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos, next_hop)?;
+                let fragmentation = match mtu_discovery {
+                    PathMtuDiscovery::Dont | PathMtuDiscovery::Omit => aster_bigtcp::socket::UdpFragmentation::Allow,
+                    PathMtuDiscovery::Want if reader.sum_lens() + IPV4_HEADER_LEN + UDP_HEADER_LEN > iface.mtu() => aster_bigtcp::socket::UdpFragmentation::Allow,
+                    _ => aster_bigtcp::socket::UdpFragmentation::DontFragment,
+                };
+                let sent_bytes = bound_datagram.try_send_tagged(reader, &remote_endpoint, &iface, source, tx_tag, tos, next_hop, fragmentation)?;
                 Ok((sent_bytes, iface))
             },
         )?;
@@ -518,6 +531,10 @@ impl Socket for DatagramSocket {
 
     fn get_option(&self, option: &mut dyn SocketOption) -> Result<()> {
         sock_option_mut!(match option {
+            ip_mtu_discover @ MtuDiscover => {
+                ip_mtu_discover.set(self.options.read().mtu_discover as i32);
+                return Ok(());
+            }
             socket_errors @ SocketError => {
                 socket_errors.set(self.take_pending_error());
                 return Ok(());
@@ -551,6 +568,10 @@ impl Socket for DatagramSocket {
 
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
         sock_option_ref!(match option {
+            ip_mtu_discover @ MtuDiscover => {
+                self.options.write().mtu_discover = PathMtuDiscovery::try_from(*ip_mtu_discover.get().unwrap())?;
+                return Ok(());
+            }
             bind_to_device @ BindToDevice => {
                 return self.set_bound_device(*bind_to_device.get().unwrap());
             }

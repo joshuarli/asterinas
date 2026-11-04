@@ -29,6 +29,33 @@ pub(super) struct IpOptionSet {
 const DEFAULT_TTL: u8 = 64;
 pub(super) const INET_ECN_MASK: u8 = 3;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub(super) enum PathMtuDiscovery {
+    Dont = 0,
+    Want = 1,
+    Do = 2,
+    Probe = 3,
+    Interface = 4,
+    Omit = 5,
+}
+
+impl TryFrom<i32> for PathMtuDiscovery {
+    type Error = Error;
+
+    fn try_from(value: i32) -> Result<Self> {
+        match value {
+            0 => Ok(Self::Dont),
+            1 => Ok(Self::Want),
+            2 => Ok(Self::Do),
+            3 => Ok(Self::Probe),
+            4 => Ok(Self::Interface),
+            5 => Ok(Self::Omit),
+            _ => return_errno_with_message!(Errno::EINVAL, "invalid path MTU discovery mode"),
+        }
+    }
+}
+
 impl IpOptionSet {
     pub(super) const fn new_tcp() -> Self {
         Self {
@@ -140,6 +167,7 @@ impl_socket_options!(
     pub(crate) struct RecvTtl(bool);
     pub(crate) struct RecvTos(bool);
     pub(crate) struct Pktinfo(bool);
+    pub(crate) struct MtuDiscover(i32);
 );
 
 #[derive(Clone, Copy, Debug)]

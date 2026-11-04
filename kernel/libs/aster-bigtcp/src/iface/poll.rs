@@ -27,7 +27,7 @@ use crate::{
     ext::Ext,
     iface::poll_iface::IsUnicast,
     packet::{ApplicationLayer, LinkLayer, NetworkLayer, RxPacket, TransportLayer, TxPacket},
-    socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin, UdpNextHop, UdpSocketBg},
+    socket::{TcpConnectionBg, TcpProcessResult, UdpError, UdpErrorOrigin, UdpFragmentation, UdpNextHop, UdpSocketBg},
     socket_table::{ConnectionKey, ListenerKey, SocketTable, hash_local_remote},
 };
 
@@ -131,6 +131,12 @@ impl<E: Ext> PollContext<'_, E> {
     ) -> Option<TxPacketWithDst> {
         // Parse the IP header. Ignore the packet if the header is ill-formed.
         let checksum_caps = self.iface.context().checksum_caps();
+        let now = self.iface.context().now().total_millis();
+        let packet = if ip_version != Some(ip::Version::V6) {
+            self.iface.reassemble(packet, now, checksum_caps.ipv4.rx())?
+        } else {
+            packet
+        };
         let (packet, ip_repr) = ip::parse(packet, ip_version, checksum_caps.ipv4.rx())?;
 
         let can_process = {
@@ -143,6 +149,7 @@ impl<E: Ext> PollContext<'_, E> {
                 &ip_repr.inner,
                 packet.reader_with_header(ip_repr.header_len),
                 Icmpv4DstUnreachable::HostUnreachable,
+                ip_repr.tos,
             );
         }
 
@@ -348,6 +355,7 @@ impl<E: Ext> PollContext<'_, E> {
                 &ip_repr.inner,
                 packet.reader_with_header(ip_repr.header_len + UDP_HEADER_LEN),
                 Icmpv4DstUnreachable::PortUnreachable,
+                ip_repr.tos,
             );
         }
 
@@ -403,6 +411,7 @@ impl<E: Ext> PollContext<'_, E> {
         ip_repr: &IpRepr,
         mut ip_buffer: VmReader<'_, Infallible>,
         reason: Icmpv4DstUnreachable,
+        original_tos: u8,
     ) -> Option<TxPacketWithDst> {
         // "An ICMP error message MUST NOT be sent as the result of receiving [..] a datagram
         // destined to an IP broadcast or IP multicast address, or [..] a datagram whose source
@@ -411,16 +420,6 @@ impl<E: Ext> PollContext<'_, E> {
         if !self.iface.context().is_unicast(ip_repr.src_addr())
             || !self.iface.context().is_unicast(ip_repr.dst_addr())
         {
-            return None;
-        }
-
-        if self.iface.is_unicast_local(ip_repr.src_addr()) {
-            // In this case, the generating ICMP message will have a local IP address as the
-            // destination. However, since we don't have the ability to handle ICMP messages, we'll
-            // just skip the generation.
-            //
-            // TODO: Generate the ICMP message here once we're able to handle incoming ICMP
-            // messages.
             return None;
         }
 
@@ -435,6 +434,7 @@ impl<E: Ext> PollContext<'_, E> {
         let quote_len = ip_buffer
             .remain()
             .min(IPV4_MIN_MTU - IPV4_HEADER_LEN - icmp::HEADER_LEN);
+        ip_buffer.limit(quote_len);
         let mut builder = match phy.alloc_tx_buffer(quote_len) {
             Ok(buffer) => buffer.to_builder(),
             Err(err) => {
@@ -458,8 +458,8 @@ impl<E: Ext> PollContext<'_, E> {
             hop_limit: 64,
         });
         let checksum_caps = self.iface.context().checksum_caps();
-        let packet = icmp::emit_dst_unreachable(builder.build(), reason, checksum_caps.icmpv4.tx());
-        let packet = ip::emit(packet, &reply_ip_repr, checksum_caps.ipv4.tx());
+        let packet = icmp::emit_dst_unreachable(builder.build(), reason, checksum_caps.icmpv4.tx() || phy.is_loopback());
+        let packet = ip::emit_with_tos(packet, &reply_ip_repr, checksum_caps.ipv4.tx(), icmp::reply_tos(original_tos), true);
 
         Some(TxPacketWithDst {
             packet,
@@ -497,12 +497,15 @@ impl<E: Ext> PollContext<'_, E> {
         payload: &[u8],
         tos: u8,
         next_hop: UdpNextHop,
+        fragmentation: UdpFragmentation,
     ) -> Option<TxPacketWithDst> {
         let checksum_caps = self.iface.context().checksum_caps();
 
         let packet = Self::copy_payload(phy, payload)?;
-        let packet = udp::emit(packet, ip_repr, udp_repr, checksum_caps.udp.tx());
-        let packet = ip::emit_with_tos(packet, ip_repr, checksum_caps.ipv4.tx(), tos);
+        let packet = udp::emit(packet, ip_repr, udp_repr,
+            checksum_caps.udp.tx() || matches!(fragmentation, UdpFragmentation::Allow));
+        let packet = ip::emit_with_tos(packet, ip_repr, checksum_caps.ipv4.tx(), tos,
+            matches!(fragmentation, UdpFragmentation::DontFragment));
 
         let mut dst_addr = ip_repr.dst_addr();
         if !self.iface.context().is_unicast(dst_addr) {
@@ -547,7 +550,31 @@ impl<E: Ext> PollContext<'_, E> {
                 continue;
             }
 
-            let (did_something, packet) = self.dispatch_ip(phy);
+            let (did_something, packet) = match self.iface.pending_fragments().pop_front() {
+                Some(packet) => (true, Some(packet)),
+                None => self.dispatch_ip(phy),
+            };
+
+            let packet = if let Some(mut packet) = packet {
+                if packet.packet.len() > device.mtu() {
+                    let csum = self.iface.context().checksum_caps().ipv4.tx();
+                    if let Some(fragments) = ip::fragment(&packet.packet, device.mtu(), csum, |len| phy.alloc_tx_buffer(len)) {
+                        let pending = self.iface.pending_fragments();
+                        for (index, fragment) in fragments.into_iter().enumerate() {
+                            pending.push_back(TxPacketWithDst {
+                                packet: fragment,
+                                dst_addr: packet.dst_addr,
+                                direct: packet.direct,
+                                failure: if index == 0 { packet.failure.take() } else { None },
+                            });
+                        }
+                    }
+                    continue;
+                }
+                Some(packet)
+            } else {
+                None
+            };
 
             if let Some(packet) = packet
                 && let Some(tx_packet) = phy.dispatch(packet, self.iface.context_mut(), ipv4_cidrs)
@@ -555,6 +582,10 @@ impl<E: Ext> PollContext<'_, E> {
             {
                 ostd::error!("failed to send a network packet: {:?}", err);
                 break;
+            }
+
+            if phy.is_loopback() {
+                self.poll_ingress(device, phy, taps);
             }
 
             if !did_something {
@@ -676,14 +707,18 @@ impl<E: Ext> PollContext<'_, E> {
 
             let mut deferred = None;
 
-            let (cx, pending, ipv4_cidrs) = self.iface.inner_mut();
-            socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop| {
-                let iface = PollableIfaceMut::new(cx, pending, ipv4_cidrs);
+            let (cx, pending, fragments, reassembly, ipv4_cidrs) = self.iface.inner_mut();
+            socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation| {
+                let iface = PollableIfaceMut::new(cx, pending, fragments, reassembly, ipv4_cidrs);
                 let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.ifindex, &mut actions);
 
                 let is_broadcast = this.iface.context().is_broadcast(&ip_repr.dst_addr());
+                if phy.is_loopback() && this.iface.is_unicast_local(ip_repr.dst_addr()) && !is_broadcast {
+                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation);
+                    return;
+                }
                 if is_broadcast || !this.iface.is_unicast_local(ip_repr.dst_addr()) {
-                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop);
+                    tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation);
                     if !is_broadcast {
                         if let Some(packet) = tx_packet.as_mut() {
                             packet.failure = Some((

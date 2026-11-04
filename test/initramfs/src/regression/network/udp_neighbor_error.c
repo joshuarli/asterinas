@@ -146,3 +146,48 @@ FN_TEST(neighbor_failure_does_not_reach_a_reused_port)
 	TEST_SUCC(close(replacement));
 }
 END_TEST()
+
+FN_TEST(fragmented_udp_reports_a_neighbor_failure)
+{
+	int fd = TEST_SUCC(socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0));
+	int enabled = 1, mode = IP_PMTUDISC_DONT;
+	TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_RECVERR, &enabled, sizeof(enabled)));
+	TEST_SUCC(setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &mode, sizeof(mode)));
+	struct sockaddr_in destination = peer("192.0.2.250");
+	unsigned char payload[2000];
+	for (size_t i = 0; i < sizeof(payload); i++) payload[i] = i % 251;
+	TEST_RES(sendto(fd, payload, sizeof(payload), 0, (struct sockaddr *)&destination,
+		       sizeof(destination)), _ret == sizeof(payload));
+	struct pollfd event = { .fd = fd, .events = POLLIN };
+	int ready = TEST_RES(poll(&event, 1, 8000), _ret == 1 && (event.revents & POLLERR));
+	if (ready == 1) {
+		unsigned char data[2000] = {};
+		union { struct cmsghdr alignment; char data[128]; } control = {};
+		struct sockaddr_in actual = {};
+		struct iovec iov = { .iov_base = data, .iov_len = sizeof(data) };
+		struct msghdr msg = { .msg_name = &actual, .msg_namelen = sizeof(actual),
+			.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.data,
+			.msg_controllen = sizeof(control.data) };
+		ssize_t count = TEST_RES(recvmsg(fd, &msg, MSG_ERRQUEUE), _ret == 520);
+		fprintf(stderr, "fragmented neighbor error payload: %zd bytes\n", count);
+		if (count > 0 && count <= sizeof(payload))
+			TEST_RES(memcmp(data, payload, count), _ret == 0);
+		TEST_RES(actual.sin_addr.s_addr, _ret == destination.sin_addr.s_addr);
+		TEST_RES(actual.sin_port, _ret == destination.sin_port);
+		struct cmsghdr *found = NULL;
+		for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg))
+			if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_RECVERR &&
+			    cmsg->cmsg_len >= CMSG_LEN(sizeof(struct sock_extended_err))) found = cmsg;
+		TEST_RES(found, _ret != NULL);
+		if (found) {
+			struct sock_extended_err error;
+			memcpy(&error, CMSG_DATA(found), sizeof(error));
+			TEST_RES(error.ee_errno, _ret == EHOSTUNREACH);
+			TEST_RES(error.ee_origin, _ret == SO_EE_ORIGIN_ICMP);
+			TEST_RES(error.ee_type, _ret == 3);
+			TEST_RES(error.ee_code, _ret == 1);
+		}
+	}
+	TEST_SUCC(close(fd));
+}
+END_TEST()

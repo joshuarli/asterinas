@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::fmt::Debug;
+use alloc::collections::VecDeque;
+use core::fmt::{Debug, Formatter};
 
 use super::{
     AnyNetworkDevice, ChecksumCapabilities, DeviceCapabilities, EthernetAddress, Medium, NetError,
@@ -8,9 +9,14 @@ use super::{
 use crate::packet::{FreshTxPacket, LinkLayer, RxPacket, TxPacket};
 
 /// A loopback network device.
-#[derive(Debug)]
 pub struct Loopback {
-    _private: (),
+    received: VecDeque<RxPacket<LinkLayer>>,
+}
+
+impl Debug for Loopback {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Loopback").field("queued", &self.received.len()).finish()
+    }
 }
 
 impl Loopback {
@@ -19,7 +25,7 @@ impl Loopback {
     /// Every transmitted packet is made available for reception in FIFO order.
     #[expect(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self { _private: () }
+        Self { received: VecDeque::new() }
     }
 }
 
@@ -42,20 +48,20 @@ impl AnyNetworkDevice for Loopback {
     }
 
     fn can_receive(&self) -> bool {
-        false
+        !self.received.is_empty()
     }
 
     fn can_send(&self) -> bool {
-        true
+        self.received.len() < 256
     }
 
     fn receive(&mut self) -> Result<RxPacket<LinkLayer>, NetError> {
-        Err(NetError::NotReady)
+        self.received.pop_front().ok_or(NetError::NotReady)
     }
 
-    fn send(&mut self, _packet: TxPacket<LinkLayer>) -> Result<(), NetError> {
-        // We process packets that should loop back before reaching the loopback device. So this is
-        // an unexpected packet and we will just discard it.
+    fn send(&mut self, packet: TxPacket<LinkLayer>) -> Result<(), NetError> {
+        if !self.can_send() { return Err(NetError::Busy); }
+        self.received.push_back(packet.to_rx_packet().ok_or(NetError::NoMemory)?);
         Ok(())
     }
 

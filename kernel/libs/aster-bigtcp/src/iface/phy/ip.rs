@@ -123,6 +123,9 @@ impl<D: WithDevice + 'static, E: Ext> Iface<E> for IpIface<D, E> {
 }
 
 impl<D: WithDevice + 'static, E: Ext> PollPhy for IpIface<D, E> {
+    fn is_loopback(&self) -> bool {
+        self.common.type_() == InterfaceType::LOOPBACK
+    }
     fn process(
         &self,
         packet: RxPacket<LinkLayer>,

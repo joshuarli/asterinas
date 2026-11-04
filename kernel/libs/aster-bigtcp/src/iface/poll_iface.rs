@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{collections::btree_set::BTreeSet, sync::Arc, vec::Vec};
+use alloc::{collections::{btree_set::BTreeSet, VecDeque}, sync::Arc, vec::Vec};
 use core::{
     borrow::Borrow,
     sync::atomic::{AtomicU64, Ordering},
@@ -14,6 +14,16 @@ use crate::{
     socket::{NeedIfacePoll, TcpConnectionBg},
 };
 
+use super::{common::TxPacketWithDst, wire::ip::Ipv4Reassembly};
+use crate::packet::{NetworkLayer, RxPacket};
+
+fn is_unicast_local_v4(addresses: &[smoltcp::wire::Ipv4Cidr], destination: smoltcp::wire::Ipv4Address) -> bool {
+    addresses.iter().any(|cidr| {
+        let address = cidr.address();
+        address == destination || address.is_loopback() && destination.is_loopback()
+    })
+}
+
 /// An interface with auxiliary data that makes it pollable.
 ///
 /// This is used, for example, when updating a socket's next poll time and finding a socket to
@@ -21,6 +31,8 @@ use crate::{
 pub(crate) struct PollableIface<E: Ext> {
     interface: smoltcp::iface::Interface,
     pending_conns: PendingConnSet<E>,
+    pending_fragments: VecDeque<TxPacketWithDst>,
+    reassembly: Ipv4Reassembly,
     /// The IPv4 addresses of the interface, primary first.
     ///
     /// `smoltcp` keeps its own copy, but exposes only the first IPv4 address while it is
@@ -41,6 +53,8 @@ impl<E: Ext> PollableIface<E> {
         Self {
             interface,
             pending_conns: PendingConnSet::new(),
+            pending_fragments: VecDeque::new(),
+            reassembly: Ipv4Reassembly::new(),
             ipv4_cidrs,
         }
     }
@@ -49,6 +63,8 @@ impl<E: Ext> PollableIface<E> {
         PollableIfaceMut {
             context: self.interface.context(),
             pending_conns: &mut self.pending_conns,
+            pending_fragments: &mut self.pending_fragments,
+            reassembly: &mut self.reassembly,
             ipv4_cidrs: &self.ipv4_cidrs,
         }
     }
@@ -195,6 +211,8 @@ impl<E: Ext> PollableIface<E> {
 pub(crate) struct PollableIfaceMut<'a, E: Ext> {
     context: &'a mut smoltcp::iface::Context,
     pending_conns: &'a mut PendingConnSet<E>,
+    pending_fragments: &'a mut VecDeque<TxPacketWithDst>,
+    reassembly: &'a mut Ipv4Reassembly,
     ipv4_cidrs: &'a [smoltcp::wire::Ipv4Cidr],
 }
 
@@ -205,11 +223,15 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
     pub(crate) fn new(
         context: &'a mut smoltcp::iface::Context,
         pending_conns: &'a mut PendingConnSet<E>,
+        pending_fragments: &'a mut VecDeque<TxPacketWithDst>,
+        reassembly: &'a mut Ipv4Reassembly,
         ipv4_cidrs: &'a [smoltcp::wire::Ipv4Cidr],
     ) -> Self {
         Self {
             context,
             pending_conns,
+            pending_fragments,
+            reassembly,
             ipv4_cidrs,
         }
     }
@@ -219,14 +241,34 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
     ) -> (
         &mut smoltcp::iface::Context,
         &mut PendingConnSet<E>,
+        &mut VecDeque<TxPacketWithDst>,
+        &mut Ipv4Reassembly,
         &'a [smoltcp::wire::Ipv4Cidr],
     ) {
-        (self.context, self.pending_conns, self.ipv4_cidrs)
+        (self.context, self.pending_conns, self.pending_fragments, self.reassembly, self.ipv4_cidrs)
     }
 
     /// Returns the IPv4 addresses of the interface, primary first.
     pub(crate) fn ipv4_cidrs(&self) -> &'a [smoltcp::wire::Ipv4Cidr] {
         self.ipv4_cidrs
+    }
+
+    pub(super) fn pending_fragments(&mut self) -> &mut VecDeque<TxPacketWithDst> {
+        self.pending_fragments
+    }
+
+    pub(super) fn reassemble(
+        &mut self,
+        packet: RxPacket<NetworkLayer>,
+        now: i64,
+        verify_checksum: bool,
+    ) -> Option<RxPacket<NetworkLayer>> {
+        let context = &self.context;
+        let addresses = self.ipv4_cidrs;
+        self.reassembly.receive(packet, now, verify_checksum, |destination| {
+            context.is_broadcast(&smoltcp::wire::IpAddress::Ipv4(destination))
+                || is_unicast_local_v4(addresses, destination)
+        })
     }
 }
 
@@ -246,13 +288,7 @@ impl<E: Ext> PollableIfaceMut<'_, E> {
         use smoltcp::wire::IpAddress;
 
         match dst_addr {
-            IpAddress::Ipv4(dst_addr) => self.ipv4_cidrs.iter().any(|cidr| {
-                let addr = cidr.address();
-                // All IPv4 loopback addresses are handled by the same loopback interface.
-                // Treating them as local allows direct socket delivery without traversing the
-                // device queues.
-                addr == dst_addr || (addr.is_loopback() && dst_addr.is_loopback())
-            }),
+            IpAddress::Ipv4(dst_addr) => is_unicast_local_v4(self.ipv4_cidrs, dst_addr),
             IpAddress::Ipv6(dst_addr) => self.context.ipv6_addr().is_some_and(|addr| addr == dst_addr),
         }
     }

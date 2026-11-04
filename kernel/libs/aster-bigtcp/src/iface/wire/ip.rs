@@ -1,13 +1,192 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use alloc::{collections::BTreeMap, vec, vec::Vec};
+use core::sync::atomic::{AtomicU16, Ordering};
+
 use int_to_c_enum::TryFromInt;
+use ostd::mm::{VmReader, VmWriter};
 use ostd_pod::IntoBytes;
 use smoltcp::wire::{IpRepr, Ipv4Repr, Ipv6Repr};
 
 use crate::{
     iface::wire::utils::{Be16, Checksum},
-    packet::{NetworkLayer, RxPacket, TransportLayer, TxPacket},
+    packet::{FreshTxPacket, NetworkLayer, RxPacket, TransportLayer, TxPacket},
 };
+
+static NEXT_FRAGMENT_ID: AtomicU16 = AtomicU16::new(0);
+
+const REASSEMBLY_LIMIT: usize = 64;
+const REASSEMBLY_TIMEOUT_MS: i64 = 30_000;
+const IPV4_MAX_PAYLOAD: usize = u16::MAX as usize - size_of::<HeaderV4>();
+
+type FragmentKey = ([u8; 4], [u8; 4], u16, u8);
+
+pub(crate) struct Ipv4Reassembly {
+    packets: BTreeMap<FragmentKey, IncompletePacket>,
+}
+
+struct IncompletePacket {
+    created_at: i64,
+    header: Option<Vec<u8>>,
+    data: Vec<u8>,
+    received: Vec<u8>,
+    received_len: usize,
+    max_end: usize,
+    ecn: u8,
+    total_len: Option<usize>,
+}
+
+impl Ipv4Reassembly {
+    pub(in crate::iface) fn new() -> Self {
+        Self { packets: BTreeMap::new() }
+    }
+
+    pub(in crate::iface) fn receive(
+        &mut self,
+        packet: RxPacket<NetworkLayer>,
+        now: i64,
+        verify_checksum: bool,
+        accepts_destination: impl FnOnce(smoltcp::wire::Ipv4Address) -> bool,
+    ) -> Option<RxPacket<NetworkLayer>> {
+        let version = packet.reader().read_val::<VersionAndIhl>().ok()?.version()?;
+        if version != Version::V4 { return Some(packet); }
+        let header = packet.reader().read_val::<HeaderV4>().ok()?;
+        let flags = header.flags_frag.flags();
+        let offset = header.flags_frag.fragment_offset() * 8;
+        if offset == 0 && !flags.contains(Flags::MF) { return Some(packet); }
+        if !accepts_destination(header.dst.into()) { return None; }
+        let header_len = header.ver_ihl.header_len();
+        let total_len = usize::from(u16::from(header.totlen));
+        if header_len < size_of::<HeaderV4>() || total_len < header_len || total_len > packet.len()
+            || flags.contains(Flags::DF) || flags.contains(Flags::R)
+        {
+            return None;
+        }
+        let fragment_len = total_len - header_len;
+        let end = offset.checked_add(fragment_len)?;
+        if fragment_len == 0 || end > IPV4_MAX_PAYLOAD || flags.contains(Flags::MF) && fragment_len % 8 != 0 {
+            return None;
+        }
+        if verify_checksum {
+            let mut reader = packet.reader();
+            reader.limit(header_len);
+            if Checksum::new().with_reader(reader).finish() != u16::MAX { return None; }
+        }
+        self.packets.retain(|_, packet| now.saturating_sub(packet.created_at) < REASSEMBLY_TIMEOUT_MS);
+        let key = (header.src, header.dst, header.ident.into(), header.proto);
+        if !self.packets.contains_key(&key) {
+            if self.packets.len() >= REASSEMBLY_LIMIT {
+                let oldest = self.packets.iter().min_by_key(|(_, packet)| packet.created_at).map(|(key, _)| *key)?;
+                self.packets.remove(&oldest);
+            }
+            self.packets.insert(key, IncompletePacket {
+                created_at: now,
+                header: None,
+                data: vec![0; IPV4_MAX_PAYLOAD],
+                received: vec![0; IPV4_MAX_PAYLOAD.div_ceil(8)],
+                received_len: 0,
+                max_end: 0,
+                ecn: 0,
+                total_len: None,
+            });
+        }
+        let incomplete = self.packets.get_mut(&key)?;
+        if incomplete.total_len.is_some_and(|total| end > total)
+            || flags.contains(Flags::MF) && incomplete.total_len.is_some_and(|total| end >= total)
+            || !flags.contains(Flags::MF) && incomplete.total_len.is_some_and(|total| total != end)
+            || !flags.contains(Flags::MF) && incomplete.max_end > end
+        {
+            self.packets.remove(&key);
+            return None;
+        }
+        let mut bytes = vec![0; fragment_len];
+        let mut reader = packet.reader();
+        reader.skip(header_len);
+        reader.read(&mut VmWriter::from(bytes.as_mut_slice()));
+        let overlap = (offset..end).filter(|i| incomplete.received[i / 8] & (1 << (i % 8)) != 0).count();
+        if overlap != 0 {
+            if overlap != fragment_len || incomplete.data[offset..end] != bytes {
+                self.packets.remove(&key);
+            }
+            return None;
+        }
+        incomplete.data[offset..end].copy_from_slice(&bytes);
+        for i in offset..end { incomplete.received[i / 8] |= 1 << (i % 8); }
+        incomplete.received_len += fragment_len;
+        incomplete.max_end = incomplete.max_end.max(end);
+        incomplete.ecn |= 1 << (header.dscp_ecn.0 & 3);
+        if !flags.contains(Flags::MF) { incomplete.total_len = Some(end); }
+        if offset == 0 {
+            let mut bytes = vec![0; header_len];
+            packet.reader().read(&mut VmWriter::from(bytes.as_mut_slice()));
+            incomplete.header = Some(bytes);
+        }
+        let total = incomplete.total_len?;
+        if incomplete.received_len != total || incomplete.header.is_none() { return None; }
+        let mut incomplete = self.packets.remove(&key)?;
+        let mut header = incomplete.header.take()?;
+        if incomplete.ecn & 1 != 0 && incomplete.ecn & !1 != 0 { return None; }
+        if incomplete.ecn & 8 != 0 && incomplete.ecn & 6 != 0 { header[1] |= 3; }
+        let packet_len = header.len() + total;
+        if packet_len > u16::MAX as usize { return None; }
+        header[2..4].copy_from_slice(&(packet_len as u16).to_be_bytes());
+        header[6..8].fill(0);
+        header[10..12].fill(0);
+        let csum = !Checksum::new().with_bytes(&header).finish();
+        header[10..12].copy_from_slice(&csum.to_ne_bytes());
+        let mut builder = FreshTxPacket::<NetworkLayer>::alloc(header.len() + total).ok()?.to_builder();
+        let header_written = builder.append_writer().write(&mut VmReader::from(header.as_slice()));
+        builder.commit(header_written);
+        let data_written = builder.append_writer().write(&mut VmReader::from(&incomplete.data[..total]));
+        builder.commit(data_written);
+        if header_written != header.len() || data_written != total { return None; }
+        builder.build().to_rx_packet()
+    }
+}
+
+pub(in crate::iface) fn fragment<F>(
+    pkt: &TxPacket<NetworkLayer>,
+    mtu: usize,
+    csum: bool,
+    mut allocate: F,
+) -> Option<Vec<TxPacket<NetworkLayer>>>
+where
+    F: FnMut(usize) -> Result<FreshTxPacket, ostd::Error>,
+{
+    let mut reader = pkt.reader();
+    let header = reader.read_val::<HeaderV4>().ok()?;
+    let header_len = header.ver_ihl.header_len();
+    if header.ver_ihl.version() != Some(Version::V4)
+        || header_len != size_of::<HeaderV4>()
+        || header.flags_frag.flags().intersects(Flags::DF | Flags::MF)
+        || header.flags_frag.fragment_offset() != 0
+        || usize::from(u16::from(header.totlen)) != pkt.len()
+    {
+        return None;
+    }
+    let fragment_len = mtu.checked_sub(header_len)? & !7;
+    if fragment_len == 0 { return None; }
+    let mut payload = vec![0; pkt.len() - header_len];
+    reader.read(&mut VmWriter::from(payload.as_mut_slice()));
+    let mut fragments = Vec::new();
+    for (index, chunk) in payload.chunks(fragment_len).enumerate() {
+        let offset = index * fragment_len;
+        let mut builder = allocate(chunk.len()).ok()?.to_builder_at_layer::<TransportLayer>();
+        let written = builder.append_writer().write(&mut VmReader::from(chunk));
+        if written != chunk.len() { return None; }
+        builder.commit(written);
+        let mut fragment_header = header;
+        fragment_header.totlen = ((header_len + chunk.len()) as u16).into();
+        let flags = if offset + chunk.len() < payload.len() { Flags::MF } else { Flags::empty() };
+        fragment_header.flags_frag = FlagsAndFragmentOffset::new(flags, offset / 8);
+        fragment_header.csum = 0;
+        if csum {
+            fragment_header.csum = !Checksum::new().with_bytes(fragment_header.as_bytes()).finish();
+        }
+        fragments.push(builder.build().prepend_and_pack(&fragment_header));
+    }
+    Some(fragments)
+}
 
 pub(in crate::iface) fn parse(
     pkt: RxPacket<NetworkLayer>,
@@ -44,7 +223,6 @@ fn do_parse_v4(
     pkt.truncate(total_len);
 
     if header.flags_frag.flags().contains(Flags::MF) || header.flags_frag.fragment_offset() != 0 {
-        // IP fragments are not currently supported.
         return None;
     }
 
@@ -104,7 +282,7 @@ pub(in crate::iface) fn emit(
     ip_repr: &IpRepr,
     csum: bool,
 ) -> TxPacket<NetworkLayer> {
-    emit_with_tos(pkt, ip_repr, csum, 0)
+    emit_with_tos(pkt, ip_repr, csum, 0, true)
 }
 
 pub(in crate::iface) fn emit_with_tos(
@@ -112,9 +290,10 @@ pub(in crate::iface) fn emit_with_tos(
     ip_repr: &IpRepr,
     csum: bool,
     tos: u8,
+    dont_fragment: bool,
 ) -> TxPacket<NetworkLayer> {
     match ip_repr {
-        IpRepr::Ipv4(ipv4_repr) => emit_v4(pkt, ipv4_repr, csum, tos),
+        IpRepr::Ipv4(ipv4_repr) => emit_v4(pkt, ipv4_repr, csum, tos, dont_fragment),
         IpRepr::Ipv6(ipv6_repr) => emit_v6(pkt, ipv6_repr),
     }
 }
@@ -124,6 +303,7 @@ fn emit_v4(
     ipv4_repr: &Ipv4Repr,
     csum: bool,
     tos: u8,
+    dont_fragment: bool,
 ) -> TxPacket<NetworkLayer> {
     debug_assert_eq!(ipv4_repr.payload_len, pkt.len());
 
@@ -131,9 +311,8 @@ fn emit_v4(
         ver_ihl: VersionAndIhl::new(Version::V4, size_of::<HeaderV4>()),
         dscp_ecn: DscpAndEcn(tos),
         totlen: ((ipv4_repr.payload_len + size_of::<HeaderV4>()) as u16).into(),
-        // If necessary, we should fill the identification field.
-        ident: 0u16.into(),
-        flags_frag: FlagsAndFragmentOffset::new(Flags::DF, 0),
+        ident: if dont_fragment { 0 } else { NEXT_FRAGMENT_ID.fetch_add(1, Ordering::Relaxed) }.into(),
+        flags_frag: FlagsAndFragmentOffset::new(if dont_fragment { Flags::DF } else { Flags::empty() }, 0),
         ttl: ipv4_repr.hop_limit,
         proto: ipv4_repr.next_header.into(),
         csum: 0,
@@ -287,5 +466,60 @@ impl VersionToFlowLabel {
 
     fn version(self) -> Option<Version> {
         Version::try_from(self.0[0] >> 4).ok()
+    }
+}
+
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::ktest;
+    use smoltcp::wire::{IpProtocol, Ipv4Address};
+
+    use super::*;
+
+    fn fragmentable_packet() -> TxPacket<NetworkLayer> {
+        let payload = [0x5a; 32];
+        let mut builder = FreshTxPacket::<TransportLayer>::alloc(payload.len()).unwrap().to_builder();
+        let written = builder.append_writer().write(&mut VmReader::from(payload.as_slice()));
+        builder.commit(written);
+        emit_v4(builder.build(), &Ipv4Repr {
+            src_addr: Ipv4Address::new(192, 0, 2, 1),
+            dst_addr: Ipv4Address::new(192, 0, 2, 2),
+            next_header: IpProtocol::Udp,
+            payload_len: payload.len(),
+            hop_limit: 64,
+        }, true, 0, false)
+    }
+
+    #[ktest]
+    fn fragmentable_datagrams_have_distinct_identifiers() {
+        let first = fragmentable_packet().reader().read_val::<HeaderV4>().unwrap();
+        let second = fragmentable_packet().reader().read_val::<HeaderV4>().unwrap();
+        assert_ne!(u16::from(first.ident), u16::from(second.ident));
+        assert!(!first.flags_frag.flags().contains(Flags::DF));
+        assert!(!second.flags_frag.flags().contains(Flags::DF));
+    }
+
+    #[ktest]
+    fn fragments_preserve_the_original_datagram_identifier() {
+        let original = fragmentable_packet();
+        let identifier = u16::from(original.reader().read_val::<HeaderV4>().unwrap().ident);
+        let fragments = fragment(&original, 36, true, FreshTxPacket::alloc).unwrap();
+        assert_eq!(fragments.len(), 2);
+        for packet in fragments {
+            let header = packet.reader().read_val::<HeaderV4>().unwrap();
+            assert_eq!(u16::from(header.ident), identifier);
+        }
+    }
+
+    #[ktest]
+    fn fragments_for_ineligible_destinations_allocate_no_reassembly_state() {
+        let original = fragmentable_packet();
+        let fragments = fragment(&original, 36, true, FreshTxPacket::alloc).unwrap();
+        let mut reassembly = Ipv4Reassembly::new();
+        for fragment in fragments {
+            let packet = fragment.to_rx_packet().unwrap();
+            assert!(reassembly.receive(packet, 0, true, |_| false).is_none());
+            assert!(reassembly.packets.is_empty());
+        }
     }
 }

@@ -11,6 +11,7 @@ use smoltcp::{
     iface::{Config, Context},
     wire::{
         self, ArpOperation, ArpRepr, EthernetAddress, EthernetProtocol, EthernetRepr, IpAddress,
+        IPV4_HEADER_LEN, IPV4_MIN_MTU,
         Ipv4Address, Ipv4AddressExt, Ipv4Cidr,
     },
 };
@@ -402,10 +403,16 @@ fn queued_udp_payload(packet: &[u8]) -> Option<(Ipv4Address, &[u8])> {
     if header_len < 20 || packet.len() < header_len + 8 {
         return None;
     }
-    let udp = &packet[header_len..];
-    let len = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
-    if len < 8 || len > udp.len() {
+    let fragment = u16::from_be_bytes([packet[6], packet[7]]);
+    if fragment & 0x1fff != 0 {
         return None;
     }
-    Some((Ipv4Address::new(packet[12], packet[13], packet[14], packet[15]), &udp[8..len]))
+    let udp = &packet[header_len..];
+    let len = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
+    if len < 8 || len > udp.len() && fragment & 0x2000 == 0 {
+        return None;
+    }
+    let quote_len = IPV4_MIN_MTU - IPV4_HEADER_LEN - icmp::HEADER_LEN - header_len;
+    let end = len.min(udp.len()).min(quote_len);
+    Some((Ipv4Address::new(packet[12], packet[13], packet[14], packet[15]), &udp[8..end]))
 }
