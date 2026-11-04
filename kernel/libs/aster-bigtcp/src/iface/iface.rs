@@ -149,6 +149,11 @@ impl<E: Ext> dyn Iface<E> {
         self.common().ipv4_cidr()?.broadcast()
     }
 
+    /// Returns the cached IPv4 path MTU, bounded by the interface MTU.
+    pub fn path_mtu(&self, destination: smoltcp::wire::IpAddress) -> usize {
+        self.common().path_mtu(destination, self.mtu())
+    }
+
     /// Returns routes currently installed in the interface.
     pub fn routes(&self) -> Vec<Route> {
         self.common().routes()

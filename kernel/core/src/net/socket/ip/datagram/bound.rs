@@ -53,6 +53,10 @@ impl BoundDatagram {
         self.connected_source = Some(source);
     }
 
+    pub(super) fn set_ignore_fragmentation_error(&self, ignore: bool) {
+        self.bound_socket.set_ignore_fragmentation_error(ignore);
+    }
+
     pub(super) fn set_receive_errors(&self, enabled: bool) {
         self.bound_socket.set_receive_errors(enabled);
     }
