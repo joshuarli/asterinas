@@ -206,8 +206,7 @@ impl<E: Ext> PollContext<'_, E> {
             if written != bytes.len() { return None; }
             builder.commit(written);
             let path = self.udp_registry.path_mtu(self.ifindex, reply.dst_addr(), mtu);
-            let dont_fragment = !path.locked && bytes.len() + IPV4_HEADER_LEN <= path.mtu;
-            let packet = ip::emit_with_tos(builder.build(), &reply, self.iface.context().checksum_caps().ipv4.tx() || phy.is_loopback(), ip_repr.tos, dont_fragment);
+            let packet = ip::emit_with_tos(builder.build(), &reply, self.iface.context().checksum_caps().ipv4.tx() || phy.is_loopback(), ip_repr.tos, false);
             let mut queue = self.raw_ip_tx.lock();
             if queue.len() < 64 {
                 queue.push_back(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), direct: false, fragment_mtu: Some(path.mtu), failure: None });
