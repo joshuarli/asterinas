@@ -10,7 +10,7 @@ use smoltcp::{
     iface::Context,
     socket::udp::UdpMetadata,
     storage::{PacketBuffer, PacketMetadata, SliceLike},
-    wire::{IpAddress, IpEndpoint, IpProtocol, IpRepr, UdpRepr, UDP_HEADER_LEN},
+    wire::{IpAddress, IpEndpoint, IpProtocol, IpRepr, Ipv4Address, UdpRepr, UDP_HEADER_LEN},
 };
 
 use super::ReceiveBehavior;
@@ -30,6 +30,21 @@ pub struct UdpSocket<E: Ext>(Arc<UdpSocketBg<E>>);
 pub enum UdpNextHop {
     Routed,
     Direct,
+}
+
+#[derive(Clone, Debug)]
+pub struct UdpIpv4Options {
+    first_hop: Option<Ipv4Address>,
+    bytes: Vec<u8>,
+}
+
+impl UdpIpv4Options {
+    pub fn new(first_hop: Option<Ipv4Address>, bytes: Vec<u8>) -> Option<Self> {
+        if bytes.len() > 40 || bytes.len() % 4 != 0 { return None; }
+        Some(Self { first_hop, bytes })
+    }
+    pub fn first_hop(&self) -> Option<Ipv4Address> { self.first_hop }
+    pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }
 }
 
 #[derive(Clone, Copy)]
@@ -69,6 +84,7 @@ struct TxDatagram {
     tos: u8,
     next_hop: UdpNextHop,
     fragmentation: UdpFragmentation,
+    ipv4_options: Option<UdpIpv4Options>,
     tag: u32,
     payload: Vec<u8>,
 }
@@ -307,7 +323,7 @@ impl<E: Ext> UdpSocketBg<E> {
     /// Tries to generate an outgoing packet and dispatches the generated packet.
     pub(crate) fn dispatch<D>(&self, ifindex: u32, cx: &mut Context, dispatch: D)
     where
-        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8, UdpNextHop, UdpFragmentation),
+        D: FnOnce(&mut Context, &IpRepr, &UdpRepr, &[u8], u8, UdpNextHop, UdpFragmentation, Option<&UdpIpv4Options>),
     {
         let open = self.open.lock();
         if !*open { return; }
@@ -318,7 +334,7 @@ impl<E: Ext> UdpSocketBg<E> {
         let ip_repr = IpRepr::new(packet.source, packet.destination.addr, IpProtocol::Udp,
             UDP_HEADER_LEN + packet.payload.len(), packet.ttl);
         let udp_repr = UdpRepr { src_port: self.bound.endpoint().port, dst_port: packet.destination.port };
-        dispatch(cx, &ip_repr, &udp_repr, &packet.payload, packet.tos, packet.next_hop, packet.fragmentation);
+        dispatch(cx, &ip_repr, &udp_repr, &packet.payload, packet.tos, packet.next_hop, packet.fragmentation, packet.ipv4_options.as_ref());
         let open = self.open.lock();
         let notify_send = *open;
         let notify_stamp = *open && packet.tag != 0;
@@ -430,6 +446,7 @@ impl<E: Ext> UdpSocket<E> {
         tos: u8,
         next_hop: UdpNextHop,
         fragmentation: UdpFragmentation,
+        ipv4_options: Option<UdpIpv4Options>,
         f: F,
     ) -> Result<Result<R, Err>, SendError>
     where
@@ -449,12 +466,14 @@ impl<E: Ext> UdpSocket<E> {
         {
             let mut errors = self.0.inner.errors.lock();
             let source = IpEndpoint::new(source, self.0.bound.endpoint().port);
-            errors.sent_paths.retain(|path| path.source != source || path.destination != meta.endpoint);
+            let destination = IpEndpoint::new(ipv4_options.as_ref().and_then(UdpIpv4Options::first_hop)
+                .map_or(meta.endpoint.addr, IpAddress::Ipv4), meta.endpoint.port);
+            errors.sent_paths.retain(|path| path.source != source || path.destination != destination);
             if errors.sent_paths.len() == 64 { errors.sent_paths.pop_front(); }
-            errors.sent_paths.push_back(SentPath { source, destination: meta.endpoint, ifindex: iface });
+            errors.sent_paths.push_back(SentPath { source, destination, ifindex: iface });
         }
         queue.enqueue(TxDatagram { iface, source, destination: meta.endpoint,
-            ttl: self.0.inner.ttl.load(Ordering::Relaxed), tos, next_hop, fragmentation, tag: meta.meta.id, payload })?;
+            ttl: self.0.inner.ttl.load(Ordering::Relaxed), tos, next_hop, fragmentation, ipv4_options, tag: meta.meta.id, payload })?;
         Ok(result)
     }
 
@@ -556,7 +575,7 @@ mod test {
         for port in 1..=65 {
             let destination = IpEndpoint::new(address, port);
             socket.send(0, destination, 7, address, 0, UdpNextHop::Routed,
-                UdpFragmentation::DontFragment, |_| Ok::<(), ()>(())).unwrap().unwrap();
+                UdpFragmentation::DontFragment, None, |_| Ok::<(), ()>(())).unwrap().unwrap();
         }
         assert!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 1)).is_none());
         assert_eq!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 65)), Some(7));
@@ -567,7 +586,7 @@ mod test {
     fn packet(iface: u32, size: usize) -> TxDatagram {
         let address = IpAddress::Ipv4(Ipv4Address::LOCALHOST);
         TxDatagram { iface, source: address, destination: IpEndpoint::new(address, 1234),
-            ttl: 64, tos: 0, next_hop: UdpNextHop::Routed, fragmentation: UdpFragmentation::DontFragment, tag: 0, payload: vec![0; size] }
+            ttl: 64, tos: 0, next_hop: UdpNextHop::Routed, fragmentation: UdpFragmentation::DontFragment, ipv4_options: None, tag: 0, payload: vec![0; size] }
     }
 
     #[ktest]

@@ -160,6 +160,7 @@ impl IpOptionSet {
 }
 
 impl_socket_options!(
+    pub(crate) struct IpOptions(Vec<u8>);
     pub(crate) struct Tos(i32);
     pub(crate) struct Ttl(IpTtl);
     pub(crate) struct Hdrincl(bool);
