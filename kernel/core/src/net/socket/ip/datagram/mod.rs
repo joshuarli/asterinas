@@ -19,7 +19,7 @@ use crate::{
         socket::{
             Socket,
             ip::{
-                common::{get_ephemeral_endpoint_on, map_unspecified_to_localhost},
+                common::{get_ephemeral_endpoint_on, icmp_error_errno, map_unspecified_to_localhost},
                 options::{IpOptionSet, Mtu, MtuDiscover, PathMtuDiscovery, SetIpLevelOption},
             },
             new_udp_socket_common,
@@ -652,21 +652,7 @@ impl Socket for DatagramSocket {
 }
 
 fn network_error_errno(origin: UdpErrorOrigin) -> Errno {
-    match origin {
-        UdpErrorOrigin::Icmp { type_: 3, code, .. } => match code {
-            0 | 6 | 9 | 11 => Errno::ENETUNREACH,
-            1 | 10 | 12 | 13 | 14 | 15 => Errno::EHOSTUNREACH,
-            2 => Errno::ENOPROTOOPT,
-            3 => Errno::ECONNREFUSED,
-            4 => Errno::EMSGSIZE,
-            5 => Errno::EOPNOTSUPP,
-            7 => Errno::EHOSTDOWN,
-            8 => Errno::ENONET,
-            _ => Errno::EHOSTUNREACH,
-        },
-        UdpErrorOrigin::Icmp { type_: 12, .. } => Errno::EPROTO,
-        UdpErrorOrigin::Icmp { .. } => Errno::EHOSTUNREACH,
-    }
+    match origin { UdpErrorOrigin::Icmp { type_, code, .. } => icmp_error_errno(type_, code) }
 }
 
 impl GetSocketLevelOption for (&Inner<UnboundDatagram, BoundDatagram>, &SocketTimeouts) {

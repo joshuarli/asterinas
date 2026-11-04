@@ -90,3 +90,21 @@ pub(super) fn map_unspecified_to_localhost(mut endpoint: IpEndpoint) -> IpEndpoi
     };
     endpoint
 }
+
+pub(super) fn icmp_error_errno(type_: u8, code: u8) -> Errno {
+    match type_ {
+        3 => match code {
+            0 | 6 | 9 | 11 => Errno::ENETUNREACH,
+            1 | 10 | 12 | 13 | 14 | 15 => Errno::EHOSTUNREACH,
+            2 => Errno::ENOPROTOOPT,
+            3 => Errno::ECONNREFUSED,
+            4 => Errno::EMSGSIZE,
+            5 => Errno::EOPNOTSUPP,
+            7 => Errno::EHOSTDOWN,
+            8 => Errno::ENONET,
+            _ => Errno::EHOSTUNREACH,
+        },
+        12 => Errno::EPROTO,
+        _ => Errno::EHOSTUNREACH,
+    }
+}
