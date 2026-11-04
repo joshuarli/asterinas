@@ -57,6 +57,10 @@ impl BoundDatagram {
         self.bound_socket.set_ignore_fragmentation_error(ignore);
     }
 
+    pub(super) fn set_ignore_path_mtu(&self, ignore: bool) {
+        self.bound_socket.set_ignore_path_mtu(ignore);
+    }
+
     pub(super) fn set_receive_errors(&self, enabled: bool) {
         self.bound_socket.set_receive_errors(enabled);
     }
