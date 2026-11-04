@@ -237,11 +237,21 @@ impl<E: Ext> PollContext<'_, E> {
             let written = builder.append_writer().write(&mut VmReader::from(bytes.as_slice()));
             if written != bytes.len() { return None; }
             builder.commit(written);
-            let path = self.network_registry.path_mtu(self.ifindex, reply.dst_addr(), mtu);
-            let packet = ip::emit_with_tos(builder.build(), &reply, self.iface.context().checksum_caps().ipv4.tx() || phy.is_loopback(), ip_repr.tos, false);
-            let mut queue = self.raw_ip_tx.lock();
-            if queue.len() < 64 {
-                queue.push_back(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), next_hop: IpNextHop::Routed, fragment_mtu: Some(path.mtu), failure: None });
+            let packet = ip::emit_with_tos(builder.build(), &reply, true, ip_repr.tos, false);
+            match E::ip_route(reply.dst_addr(), 0) {
+                Some(Ok((iface, next_hop, route))) => {
+                    let path = iface.common().cached_ip_mtu(reply.dst_addr(), route);
+                    let outgoing = TxPacketWithDst { packet, dst_addr: reply.dst_addr(), next_hop, fragment_mtu: Some(path.mtu), failure: None };
+                    if iface.common().enqueue_forwarded_ip(outgoing).is_ok() { E::wake_forwarded_ip(iface.index()); }
+                }
+                Some(Err(())) => (),
+                None => {
+                    let path = self.network_registry.path_mtu(self.ifindex, reply.dst_addr(), mtu);
+                    let mut queue = self.raw_ip_tx.lock();
+                    if queue.len() < 64 {
+                        queue.push_back(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), next_hop: IpNextHop::Routed, fragment_mtu: Some(path.mtu), failure: None });
+                    }
+                }
             }
             return None;
         }
@@ -315,14 +325,14 @@ impl<E: Ext> PollContext<'_, E> {
             .or_else(|| self.sockets.lookup_listener(&ListenerKey::new(ip_repr.src_addr(), tcp_repr.src_port)).map(|listener| listener.mark()))
             .unwrap_or(0);
         let mut packet = self.emit_tcp(phy, &ip_repr, &tcp_repr)?;
-        match E::tcp_route(packet.dst_addr, mark) {
+        match E::ip_route(packet.dst_addr, mark) {
             None => Some(packet),
             Some(Err(())) => None,
             Some(Ok((iface, next_hop, _))) => {
                 packet.next_hop = next_hop;
                 if iface.index() == self.ifindex { Some(packet) }
                 else {
-                    if iface.common().enqueue_forwarded_tcp(packet).is_ok() { E::wake_forwarded_ip(iface.index()); }
+                    if iface.common().enqueue_forwarded_ip(packet).is_ok() { E::wake_forwarded_ip(iface.index()); }
                     None
                 }
             }
@@ -756,7 +766,7 @@ impl<E: Ext> PollContext<'_, E> {
                         return None;
                     }
                     let mark = socket.mark();
-                    match E::tcp_route(ip_repr.dst_addr(), mark) {
+                    match E::ip_route(ip_repr.dst_addr(), mark) {
                         Some(Err(())) => return None,
                         _ => socket.mark_route_valid(mark),
                     }
@@ -815,7 +825,7 @@ impl<E: Ext> PollContext<'_, E> {
 
             if let Some(mut packet) = tx_packet.take() {
                 let mark = socket.mark();
-                match E::tcp_route(packet.dst_addr, mark) {
+                match E::ip_route(packet.dst_addr, mark) {
                     None => tx_packet = Some(packet),
                     Some(Err(())) => (),
                     Some(Ok((iface, next_hop, route))) => {
@@ -832,7 +842,7 @@ impl<E: Ext> PollContext<'_, E> {
                                 else { self.iface.pending_fragments().push_back(next); }
                                 queued = true;
                                 if let Some((sequence, end)) = sequence { socket.record_sent_path(sequence, end, iface.index(), route); }
-                            } else if iface.common().enqueue_forwarded_tcp(next).is_ok() {
+                            } else if iface.common().enqueue_forwarded_ip(next).is_ok() {
                                 queued = true;
                                 if let Some((sequence, end)) = sequence { socket.record_sent_path(sequence, end, iface.index(), route); }
                             }

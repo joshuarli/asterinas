@@ -291,7 +291,7 @@ impl<E: Ext> IfaceCommon<E> {
         Ok(())
     }
 
-    pub(super) fn enqueue_forwarded_tcp(&self, packet: TxPacketWithDst) -> Result<(), LinkSendError> {
+    pub(super) fn enqueue_forwarded_ip(&self, packet: TxPacketWithDst) -> Result<(), LinkSendError> {
         self.ensure_up()?;
         let mut queue = self.raw_ip_tx.lock();
         self.ensure_up()?;
@@ -393,7 +393,9 @@ impl<E: Ext> IfaceCommon<E> {
         let next_poll = self.do_poll(device, phy);
         device.notify_poll_end();
         self.sched_poll.schedule_next_poll(next_poll);
-        if self.network.has_forwarded_ip(self.index) || !self.raw_ip_tx.lock().is_empty() {
+        if self.network.has_forwarded_ip(self.index)
+            || self.flags().contains(InterfaceFlags::UP) && !self.raw_ip_tx.lock().is_empty()
+        {
             self.sched_poll.schedule_next_poll(Some(get_network_timestamp().total_millis().max(1) as u64));
         }
     }
@@ -404,6 +406,7 @@ impl<E: Ext> IfaceCommon<E> {
 
         let link_up = self.flags().contains(InterfaceFlags::UP);
         if !link_up {
+            self.raw_ip_tx.lock().clear();
             while device.receive().is_ok() {}
             while phy.take_looped_frame().is_some() {}
         }
