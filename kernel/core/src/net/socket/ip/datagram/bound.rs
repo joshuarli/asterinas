@@ -124,6 +124,7 @@ impl BoundDatagram {
         remote: &IpEndpoint,
         iface: &Arc<Iface>,
         source: IpAddress,
+        route: aster_bigtcp::iface::PathMtuRoute,
         tx_tag: u32,
         tos: u8,
         next_hop: UdpNextHop,
@@ -134,7 +135,7 @@ impl BoundDatagram {
         meta.meta.id = tx_tag;
         let result = self
             .bound_socket
-            .send(reader.sum_lens(), meta, iface.index(), source, tos, next_hop, fragmentation, ipv4_options, |socket_buffer| {
+            .send(reader.sum_lens(), meta, iface.index(), route, source, tos, next_hop, fragmentation, ipv4_options, |socket_buffer| {
                 reader
                     .read(&mut VmWriter::from(socket_buffer))
                     .map_err(Into::into)
@@ -196,7 +197,7 @@ impl datagram_common::Bound for BoundDatagram {
         let iface = lookup_iface(remote.addr)?;
         let local = self.local_endpoint();
         let source = if local.addr.is_unspecified() { get_ephemeral_endpoint_on(&iface, remote)?.addr } else { local.addr };
-        self.try_send_tagged(reader, remote, &iface, source, 0, 0, UdpNextHop::Routed, UdpFragmentation::DontFragment, None)
+        self.try_send_tagged(reader, remote, &iface, source, aster_bigtcp::iface::PathMtuRoute::Default, 0, 0, UdpNextHop::Routed, UdpFragmentation::DontFragment, None)
     }
 
     fn check_io_events(&self) -> IoEvents {

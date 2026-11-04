@@ -220,9 +220,9 @@ impl<E: Ext> PollContext<'_, E> {
         for socket in self.udp_sockets {
             if socket.can_receive_error(error.source, self.ifindex) && socket.matches_error_destination(error.destination) {
                 if error.type_ == 3 && error.code == 4
-                    && let Some(egress) = socket.path_mtu_egress(error.source, error.destination)
+                    && let Some((egress, route)) = socket.path_mtu_egress(error.source, error.destination)
                 {
-                    self.udp_registry.update_path_mtu(egress, error.destination.addr, error.info as usize);
+                    self.udp_registry.update_path_mtu_for_route(egress, error.destination.addr, route, error.info as usize);
                 }
                 socket.report_error(UdpError {
                     destination: error.destination,

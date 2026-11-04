@@ -23,6 +23,13 @@ pub struct PathMtu {
     pub locked: bool,
 }
 
+/// The route whose path MTU applies to a destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathMtuRoute {
+    Default,
+    Table { table: u32, gateway: Option<Ipv4Address> },
+}
+
 /// A network interface.
 ///
 /// A network interface (abbreviated as iface) is a hardware or software component that connects a
@@ -165,12 +172,17 @@ impl<E: Ext> dyn Iface<E> {
         self.common().ipv4_cidr()?.broadcast()
     }
 
-    /// Returns the cached IPv4 path MTU, bounded by the interface MTU.
     /// Clears learned path MTUs after a routing policy change.
     pub fn clear_path_mtu(&self) { self.common().clear_path_mtu(); }
 
+    /// Returns the cached IPv4 path MTU, bounded by the interface MTU.
     pub fn path_mtu(&self, destination: smoltcp::wire::IpAddress) -> PathMtu {
         self.common().path_mtu(destination, self.mtu())
+    }
+
+    /// Returns the cached path MTU for the selected route.
+    pub fn path_mtu_for_route(&self, destination: smoltcp::wire::IpAddress, route: PathMtuRoute) -> PathMtu {
+        self.common().path_mtu_for_route(destination, route, self.mtu())
     }
 
     /// Returns routes currently installed in the interface.
