@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
-use core::fmt::Debug;
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use core::{fmt::Debug, sync::atomic::{AtomicU32, Ordering}};
 
 use aster_bigtcp::{
     device::{AnyNetworkDevice, Checksum, DeviceCapabilities, EthernetAddress, Medium, NetError},
@@ -146,8 +146,11 @@ impl NetworkDevice {
             device.recv_queue.notify();
         }
 
+        static NEXT_DEVICE_ID: AtomicU32 = AtomicU32::new(0);
+        let id = NEXT_DEVICE_ID.fetch_add(1, Ordering::Relaxed);
+        let name = if id == 0 { String::from(super::DEVICE_NAME) } else { format!("{}-{id:08}", super::DEVICE_NAME) };
         aster_network::register_device(
-            super::DEVICE_NAME.to_string(),
+            name,
             Arc::new(SpinLock::new(device)),
         );
         Ok(())
