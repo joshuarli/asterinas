@@ -15,6 +15,15 @@ const EPHEMERAL_END: u16 = 60999;
 
 pub struct UdpRegistry<E: Ext> {
     state: SpinLock<State<E>, BottomHalfDisabled>,
+    path_mtu: SpinLock<Vec<PathMtuEntry>, BottomHalfDisabled>,
+}
+
+struct PathMtuEntry {
+    ifindex: u32,
+    destination: IpAddress,
+    mtu: usize,
+    locked: bool,
+    expires_at_ms: i64,
 }
 
 struct State<E: Ext> {
@@ -42,6 +51,7 @@ impl<E: Ext> UdpRegistry<E> {
                 next_id: 0,
                 next_port: EPHEMERAL_START,
             }),
+            path_mtu: SpinLock::new(Vec::new()),
         })
     }
 
@@ -79,6 +89,38 @@ impl<E: Ext> UdpRegistry<E> {
         state.bindings.insert(id, Binding { endpoint, device, reuse, reuse_port, owner: owner.clone() });
         Ok(UdpReservation { registry: self.clone(), id, endpoint, device, owner,
             reuse: AtomicBool::new(reuse), reuse_port: AtomicBool::new(reuse_port), released: AtomicBool::new(false) })
+    }
+
+    pub(crate) fn path_mtu(&self, ifindex: u32, destination: IpAddress, interface_mtu: usize) -> super::PathMtu {
+        let now = super::time::get_network_timestamp().total_millis();
+        let mut entries = self.path_mtu.lock();
+        entries.retain(|entry| entry.expires_at_ms > now);
+        entries.iter().find(|entry| entry.ifindex == ifindex && entry.destination == destination).map_or(
+            super::PathMtu { mtu: interface_mtu, locked: false },
+            |entry| super::PathMtu { mtu: entry.mtu.min(interface_mtu), locked: entry.locked },
+        )
+    }
+
+    pub(crate) fn update_path_mtu(&self, ifindex: u32, destination: IpAddress, advertised_mtu: usize) {
+        let now = super::time::get_network_timestamp().total_millis();
+        let locked = advertised_mtu < 552;
+        let mtu = advertised_mtu.max(552);
+        let mut entries = self.path_mtu.lock();
+        entries.retain(|entry| entry.expires_at_ms > now);
+        if let Some(entry) = entries.iter_mut().find(|entry| entry.ifindex == ifindex && entry.destination == destination) {
+            if !entry.locked && mtu <= entry.mtu {
+                entry.mtu = mtu;
+                entry.locked = locked;
+                entry.expires_at_ms = now + 600_000;
+            }
+            return;
+        }
+        if entries.len() == 256 { entries.remove(0); }
+        entries.push(PathMtuEntry { ifindex, destination, mtu, locked, expires_at_ms: now + 600_000 });
+    }
+
+    pub(crate) fn clear_path_mtu(&self, ifindex: u32) {
+        self.path_mtu.lock().retain(|entry| entry.ifindex != ifindex);
     }
 
     pub(crate) fn register(&self, socket: &Arc<UdpSocketBg<E>>) {
@@ -188,5 +230,43 @@ impl<E: Ext> UdpReservation<E> {
 impl<E: Ext> Drop for UdpReservation<E> {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::ktest;
+    use smoltcp::wire::Ipv4Address;
+    use super::*;
+
+    struct TestExt;
+    struct TestSchedule;
+    impl super::super::ScheduleNextPoll for TestSchedule {
+        fn schedule_next_poll(&self, _ms: Option<u64>) {}
+    }
+    impl Ext for TestExt {
+        type ScheduleNextPoll = TestSchedule;
+        type TcpEventObserver = ();
+        type UdpEventObserver = ();
+        fn wall_time_ns() -> u64 { 0 }
+    }
+
+    #[ktest]
+    fn path_mtu_limits_are_bounded_and_cleared_per_interface() {
+        let registry = UdpRegistry::<TestExt>::new();
+        for index in 0..257 {
+            let destination = IpAddress::Ipv4(Ipv4Address::new(10, (index >> 8) as u8, index as u8, 1));
+            registry.update_path_mtu(7, destination, 600);
+        }
+        let first = IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1));
+        let last = IpAddress::Ipv4(Ipv4Address::new(10, 1, 0, 1));
+        assert_eq!(registry.path_mtu(7, first, 1500).mtu, 1500);
+        assert_eq!(registry.path_mtu(7, last, 1500).mtu, 600);
+        registry.update_path_mtu(8, last, 700);
+        registry.clear_path_mtu(7);
+        assert_eq!(registry.path_mtu(7, last, 1500).mtu, 1500);
+        assert_eq!(registry.path_mtu(8, last, 1500).mtu, 700);
+        registry.path_mtu.lock()[0].expires_at_ms = 0;
+        assert_eq!(registry.path_mtu(8, last, 1500).mtu, 1500);
     }
 }

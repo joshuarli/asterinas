@@ -148,9 +148,16 @@ struct UdpErrors {
     recverr: bool,
     ignore_fragmentation_error: bool,
     ignore_path_mtu: bool,
+    sent_paths: VecDeque<SentPath>,
     pending: Option<UdpErrorOrigin>,
     queue: VecDeque<UdpError>,
     queued_bytes: usize,
+}
+
+struct SentPath {
+    source: IpEndpoint,
+    destination: IpEndpoint,
+    ifindex: u32,
 }
 
 /// The time an outgoing packet that asked for a timestamp left the interface.
@@ -202,9 +209,14 @@ impl<E: Ext> UdpSocketBg<E> {
         self.inner.errors.lock().peer.is_none_or(|peer| peer == destination)
     }
 
-    pub(crate) fn accepts_path_mtu(&self) -> bool {
+    pub(crate) fn path_mtu_egress(&self, source: IpEndpoint, destination: IpEndpoint) -> Option<u32> {
         let open = self.open.lock();
-        *open && !self.inner.errors.lock().ignore_path_mtu
+        if !*open { return None; }
+        let errors = self.inner.errors.lock();
+        if errors.ignore_path_mtu || errors.peer.is_some_and(|peer| peer != destination) { return None; }
+        errors.sent_paths.iter().rev()
+            .find(|path| path.source == source && path.destination == destination)
+            .map(|path| path.ifindex)
     }
 
     pub(crate) fn report_error(&self, mut error: UdpError) {
@@ -434,6 +446,13 @@ impl<E: Ext> UdpSocket<E> {
         let result = f(&mut payload);
         if result.is_err() { return Ok(result); }
         let meta = meta.into();
+        {
+            let mut errors = self.0.inner.errors.lock();
+            let source = IpEndpoint::new(source, self.0.bound.endpoint().port);
+            errors.sent_paths.retain(|path| path.source != source || path.destination != meta.endpoint);
+            if errors.sent_paths.len() == 64 { errors.sent_paths.pop_front(); }
+            errors.sent_paths.push_back(SentPath { source, destination: meta.endpoint, ifindex: iface });
+        }
         queue.enqueue(TxDatagram { iface, source, destination: meta.endpoint,
             ttl: self.0.inner.ttl.load(Ordering::Relaxed), tos, next_hop, fragmentation, tag: meta.meta.id, payload })?;
         Ok(result)
@@ -522,6 +541,27 @@ mod test {
         assert!(snapshot.can_receive_error(local, 1));
         drop(socket);
         assert!(!snapshot.can_receive_error(local, 1));
+    }
+
+    #[ktest]
+    fn path_feedback_uses_the_recent_sent_interface() {
+        let registry = crate::iface::UdpRegistry::<TestExt>::new();
+        let address = IpAddress::Ipv4(Ipv4Address::LOCALHOST);
+        let local = IpEndpoint::new(address, 1234);
+        let config = crate::iface::BindPortConfig::new(local, false);
+        let owner = Arc::new(core::sync::atomic::AtomicU32::new(0));
+        let reservation = registry.bind(config, None, false, owner).unwrap();
+        let socket = UdpSocket::new_bind(reservation, ());
+        let snapshot = registry.sockets().pop().unwrap();
+        for port in 1..=65 {
+            let destination = IpEndpoint::new(address, port);
+            socket.send(0, destination, 7, address, 0, UdpNextHop::Routed,
+                UdpFragmentation::DontFragment, |_| Ok::<(), ()>(())).unwrap().unwrap();
+        }
+        assert!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 1)).is_none());
+        assert_eq!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 65)), Some(7));
+        drop(socket);
+        assert!(snapshot.path_mtu_egress(local, IpEndpoint::new(address, 65)).is_none());
     }
 
     fn packet(iface: u32, size: usize) -> TxDatagram {

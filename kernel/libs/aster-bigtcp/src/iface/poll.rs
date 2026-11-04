@@ -45,6 +45,7 @@ pub(super) struct PollContext<'a, E: Ext> {
     iface: PollableIfaceMut<'a, E>,
     sockets: &'a SocketTable<E>,
     udp_sockets: &'a [Arc<UdpSocketBg<E>>],
+    udp_registry: &'a super::UdpRegistry<E>,
     ifindex: u32,
     actions: &'a mut Vec<SocketTableAction<E>>,
 }
@@ -63,6 +64,7 @@ impl<'a, E: Ext> PollContext<'a, E> {
         iface: PollableIfaceMut<'a, E>,
         sockets: &'a SocketTable<E>,
         udp_sockets: &'a [Arc<UdpSocketBg<E>>],
+        udp_registry: &'a super::UdpRegistry<E>,
         ifindex: u32,
         actions: &'a mut Vec<SocketTableAction<E>>,
     ) -> Self {
@@ -70,6 +72,7 @@ impl<'a, E: Ext> PollContext<'a, E> {
             iface,
             sockets,
             udp_sockets,
+            udp_registry,
             ifindex,
             actions,
         }
@@ -181,10 +184,13 @@ impl<E: Ext> PollContext<'_, E> {
         if error.source.addr != ip_repr.inner.dst_addr() || !self.iface.is_unicast_local(error.source.addr) {
             return;
         }
-        let mut matched = false;
         for socket in self.udp_sockets {
             if socket.can_receive_error(error.source, self.ifindex) && socket.matches_error_destination(error.destination) {
-                matched |= socket.accepts_path_mtu();
+                if error.type_ == 3 && error.code == 4
+                    && let Some(egress) = socket.path_mtu_egress(error.source, error.destination)
+                {
+                    self.udp_registry.update_path_mtu(egress, error.destination.addr, error.info as usize);
+                }
                 socket.report_error(UdpError {
                     destination: error.destination,
                     payload: error.payload.to_vec(),
@@ -199,9 +205,6 @@ impl<E: Ext> PollContext<'_, E> {
                     },
                 });
             }
-        }
-        if matched && error.type_ == 3 && error.code == 4 {
-            self.iface.update_path_mtu(error.destination.addr, error.info as usize);
         }
     }
 
@@ -632,7 +635,7 @@ impl<E: Ext> PollContext<'_, E> {
 
             let (reply, became_dead) =
                 TcpConnectionBg::dispatch(&socket, &mut self.iface, |iface, ip_repr, tcp_repr| {
-                    let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.ifindex, self.actions);
+                    let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.udp_registry, self.ifindex, self.actions);
 
                     if !this.iface.is_unicast_local(ip_repr.dst_addr()) {
                         tx_packet = this.emit_tcp(phy, ip_repr, tcp_repr);
@@ -716,10 +719,10 @@ impl<E: Ext> PollContext<'_, E> {
 
             let mut deferred = None;
 
-            let (cx, pending, fragments, reassembly, path_mtu, ipv4_cidrs) = self.iface.inner_mut();
+            let (cx, pending, fragments, reassembly, ipv4_cidrs) = self.iface.inner_mut();
             socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation| {
-                let iface = PollableIfaceMut::new(cx, pending, fragments, reassembly, path_mtu, ipv4_cidrs);
-                let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.ifindex, &mut actions);
+                let iface = PollableIfaceMut::new(cx, pending, fragments, reassembly, ipv4_cidrs);
+                let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.udp_registry, self.ifindex, &mut actions);
 
                 let is_broadcast = this.iface.context().is_broadcast(&ip_repr.dst_addr());
                 if phy.is_loopback() && this.iface.is_unicast_local(ip_repr.dst_addr()) && !is_broadcast {
