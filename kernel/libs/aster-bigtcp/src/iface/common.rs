@@ -377,7 +377,7 @@ impl<E: Ext> IfaceCommon<E> {
         let next_poll = self.do_poll(device, phy);
         device.notify_poll_end();
         self.sched_poll.schedule_next_poll(next_poll);
-        if self.network.has_forwarded_tcp(self.index) {
+        if self.network.has_forwarded_ip(self.index) {
             self.sched_poll.schedule_next_poll(Some(get_network_timestamp().total_millis().max(1) as u64));
         }
     }
