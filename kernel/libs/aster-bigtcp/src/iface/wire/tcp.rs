@@ -20,7 +20,8 @@ pub(in crate::iface) fn outgoing_sequence_range(packet: &TxPacket<NetworkLayer>)
     if tcp_len < 20 || bytes.len() < ip_len + tcp_len { return None; }
     let sequence = u32::from_be_bytes(bytes[ip_len + 4..ip_len + 8].try_into().ok()?);
     let flags = bytes[ip_len + 13];
-    let length = bytes.len() - ip_len - tcp_len + usize::from(flags & 0x02 != 0) + usize::from(flags & 0x01 != 0);
+    let sequence = sequence.wrapping_add(u32::from(flags & 0x02 != 0));
+    let length = bytes.len() - ip_len - tcp_len;
     (length != 0).then_some((sequence, sequence.wrapping_add(length as u32)))
 }
 
