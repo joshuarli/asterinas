@@ -51,6 +51,12 @@ fn parse_group_id(value: &str) -> Option<u32> {
     } else {
         (value, 10)
     };
+    if digits.is_empty() || !digits.bytes().all(|byte| match radix {
+        8 => (b'0'..=b'7').contains(&byte),
+        10 => byte.is_ascii_digit(),
+        16 => byte.is_ascii_hexdigit(),
+        _ => false,
+    }) { return None; }
     u32::from_str_radix(digits, radix).ok().filter(|value| *value != u32::MAX)
 }
 

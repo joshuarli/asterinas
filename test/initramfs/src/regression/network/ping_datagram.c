@@ -87,6 +87,8 @@ FN_TEST(ping_group_range_validates_updates_and_write_access)
  TEST_RES(sscanf(value, "%u %u", &low, &high), _ret == 2 && low == 4 && high == 10);
  TEST_SUCC(write_range("010 0x10\n")); TEST_SUCC(read_range(value, sizeof(value)));
  TEST_RES(sscanf(value, "%u %u", &low, &high), _ret == 2 && low == 8 && high == 16);
+ TEST_ERRNO(write_range("0x+10 0x+10\n"), EINVAL); TEST_SUCC(read_range(value, sizeof(value)));
+ TEST_RES(sscanf(value, "%u %u", &low, &high), _ret == 2 && low == 8 && high == 16);
  TEST_SUCC(write_range("9 3\n")); TEST_SUCC(read_range(value, sizeof(value)));
  TEST_RES(sscanf(value, "%u %u", &low, &high), _ret == 2 && low == 1 && high == 0);
  TEST_ERRNO(write_range("4294967295 0\n"), EINVAL); TEST_SUCC(write_range(original));
