@@ -398,6 +398,17 @@ pub(super) fn lookup_iface(dst: IpAddress) -> Result<Arc<Iface>> {
     lookup_iface_with_scope(dst, false, None)
 }
 
+pub(super) fn lookup_udp_route(dst: IpAddress) -> Result<(Arc<Iface>, aster_bigtcp::socket::UdpNextHop)> {
+    match dst {
+        IpAddress::Ipv4(dst) => {
+            let route = IPV4_ROUTE_MANAGER.get().unwrap().read().lookup_entry(&RouteLookupKey::new(dst))?;
+            let next_hop = route.gateway().map_or(aster_bigtcp::socket::UdpNextHop::Direct, aster_bigtcp::socket::UdpNextHop::Gateway);
+            Ok((route.output_iface().clone(), next_hop))
+        }
+        IpAddress::Ipv6(_) => Ok((lookup_iface(dst)?, aster_bigtcp::socket::UdpNextHop::Routed)),
+    }
+}
+
 pub(super) fn lookup_direct_iface(dst: IpAddress, device: Option<u32>) -> Result<Arc<Iface>> {
     lookup_iface_with_scope(dst, true, device)
 }

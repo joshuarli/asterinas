@@ -209,7 +209,7 @@ impl<E: Ext> PollContext<'_, E> {
             let packet = ip::emit_with_tos(builder.build(), &reply, self.iface.context().checksum_caps().ipv4.tx() || phy.is_loopback(), ip_repr.tos, false);
             let mut queue = self.raw_ip_tx.lock();
             if queue.len() < 64 {
-                queue.push_back(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), direct: false, fragment_mtu: Some(path.mtu), failure: None });
+                queue.push_back(TxPacketWithDst { packet, dst_addr: reply.dst_addr(), next_hop: UdpNextHop::Routed, fragment_mtu: Some(path.mtu), failure: None });
             }
             return None;
         }
@@ -506,7 +506,7 @@ impl<E: Ext> PollContext<'_, E> {
         Some(TxPacketWithDst {
             packet,
             dst_addr: reply_ip_repr.dst_addr(),
-            direct: false,
+            next_hop: UdpNextHop::Routed,
             fragment_mtu: None,
             failure: None,
         })
@@ -527,7 +527,7 @@ impl<E: Ext> PollContext<'_, E> {
         Some(TxPacketWithDst {
             packet,
             dst_addr: ip_repr.dst_addr(),
-            direct: false,
+            next_hop: UdpNextHop::Routed,
             fragment_mtu: None,
             failure: None,
         })
@@ -569,7 +569,7 @@ impl<E: Ext> PollContext<'_, E> {
             dst_addr = IpAddress::Ipv4(Ipv4Address::BROADCAST);
         }
 
-        Some(TxPacketWithDst { packet, dst_addr, direct: matches!(next_hop, UdpNextHop::Direct), fragment_mtu: match fragmentation { UdpFragmentation::Allow(mtu) => Some(mtu), UdpFragmentation::DontFragment => None }, failure: None })
+        Some(TxPacketWithDst { packet, dst_addr, next_hop, fragment_mtu: match fragmentation { UdpFragmentation::Allow(mtu) => Some(mtu), UdpFragmentation::DontFragment => None }, failure: None })
     }
 
     fn copy_payload(phy: &dyn PollPhy, payload: &[u8]) -> Option<TxPacket<ApplicationLayer>> {
@@ -621,7 +621,7 @@ impl<E: Ext> PollContext<'_, E> {
                             pending.push_back(TxPacketWithDst {
                                 packet: fragment,
                                 dst_addr: packet.dst_addr,
-                                direct: packet.direct,
+                                next_hop: packet.next_hop,
                                 fragment_mtu: None,
                                 failure: if index == 0 { packet.failure.take() } else { None },
                             });

@@ -30,6 +30,7 @@ pub struct UdpSocket<E: Ext>(Arc<UdpSocketBg<E>>);
 pub enum UdpNextHop {
     Routed,
     Direct,
+    Gateway(Ipv4Address),
 }
 
 #[derive(Clone, Debug)]
