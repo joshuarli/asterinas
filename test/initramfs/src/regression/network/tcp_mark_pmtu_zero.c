@@ -90,6 +90,7 @@ FN_TEST(mark_moves_connected_tcp_to_another_interface)
  ready=TEST_RES(poll(&p,1,3000),_ret==1);if(ready==1){char b[8]={};TEST_RES(recv(fd,b,sizeof(b),MSG_WAITALL),_ret==8&&!memcmp(b,"verified",8));}
  ready=TEST_RES(poll(&p,1,3000),_ret==1);if(ready==1){char b[8];TEST_RES(recv(fd,b,sizeof(b),0),_ret==8&&!memcmp(b,"stalebar",8));}
  char large[900];memset(large,'X',sizeof(large));TEST_RES(send(fd,large,sizeof(large),0),_ret==sizeof(large));ready=TEST_RES(poll(&p,1,6000),_ret==1);if(ready==1){char b[8];TEST_RES(recv(fd,b,sizeof(b),0),_ret==8&&!memcmp(b,"mtu-ok!!",8));}
+ int mtu=0;socklen_t mtu_len=sizeof(mtu);TEST_SUCC(getsockopt(fd,IPPROTO_IP,IP_MTU,&mtu,&mtu_len));TEST_RES(mtu,_ret==552);
  TEST_SUCC(close(fd));
 }
 END_TEST()
