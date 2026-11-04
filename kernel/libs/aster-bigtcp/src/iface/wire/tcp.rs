@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use alloc::{vec, vec::Vec};
 use int_to_c_enum::TryFromInt;
 use ostd::mm::{Infallible, VmReader, VmWriter};
 use ostd_pod::IntoBytes;
@@ -7,8 +8,63 @@ use smoltcp::wire::{IpProtocol, IpRepr, TcpControl, TcpRepr, TcpSeqNumber, TcpTi
 
 use crate::{
     iface::wire::utils::{Be16, Be32, Checksum},
-    packet::{ApplicationLayer, RxPacket, TransportLayer, TxPacket},
+    packet::{ApplicationLayer, FreshTxPacket, NetworkLayer, RxPacket, TransportLayer, TxPacket},
 };
+
+pub(in crate::iface) fn outgoing_sequence_range(packet: &TxPacket<NetworkLayer>) -> Option<(u32, u32)> {
+    let mut bytes = vec![0; packet.len()];
+    packet.reader().read(&mut VmWriter::from(bytes.as_mut_slice()));
+    let ip_len = usize::from(*bytes.first()? & 15) * 4;
+    if bytes.len() < ip_len + 20 || bytes[0] >> 4 != 4 || bytes[9] != 6 { return None; }
+    let tcp_len = usize::from(bytes[ip_len + 12] >> 4) * 4;
+    if tcp_len < 20 || bytes.len() < ip_len + tcp_len { return None; }
+    let sequence = u32::from_be_bytes(bytes[ip_len + 4..ip_len + 8].try_into().ok()?);
+    let flags = bytes[ip_len + 13];
+    let length = bytes.len() - ip_len - tcp_len + usize::from(flags & 0x02 != 0) + usize::from(flags & 0x01 != 0);
+    (length != 0).then_some((sequence, sequence.wrapping_add(length as u32)))
+}
+
+pub(in crate::iface) fn segment<F>(packet: &TxPacket<NetworkLayer>, mtu: usize, mut allocate: F) -> Option<Vec<TxPacket<NetworkLayer>>>
+where F: FnMut(usize) -> Result<FreshTxPacket, ostd::Error> {
+    let mut bytes = vec![0; packet.len()];
+    packet.reader().read(&mut VmWriter::from(bytes.as_mut_slice()));
+    let ip_len = usize::from(*bytes.first()? & 15) * 4;
+    if bytes.len() < ip_len + 20 || bytes[0] >> 4 != 4 || bytes[9] != 6 { return None; }
+    let tcp_len = usize::from(bytes[ip_len + 12] >> 4) * 4;
+    if tcp_len < 20 || bytes.len() < ip_len + tcp_len || bytes[ip_len + 13] & 0x06 != 0 { return None; }
+    let data_offset = ip_len + tcp_len;
+    let chunk_len = mtu.checked_sub(data_offset)?;
+    if chunk_len == 0 { return None; }
+    let payload = &bytes[data_offset..];
+    if payload.is_empty() { return None; }
+    let sequence = u32::from_be_bytes(bytes[ip_len + 4..ip_len + 8].try_into().ok()?);
+    let mut packets = Vec::new();
+    for (index, chunk) in payload.chunks(chunk_len).enumerate() {
+        let offset = index * chunk_len;
+        let mut part = bytes[..data_offset].to_vec();
+        part.extend_from_slice(chunk);
+        let total_len = part.len() as u16;
+        part[2..4].copy_from_slice(&total_len.to_be_bytes());
+        part[10..12].fill(0);
+        let ip_checksum = !Checksum::new().with_bytes(&part[..ip_len]).finish();
+        part[10..12].copy_from_slice(&ip_checksum.to_ne_bytes());
+        part[ip_len + 4..ip_len + 8].copy_from_slice(&sequence.wrapping_add(offset as u32).to_be_bytes());
+        if offset + chunk.len() != payload.len() { part[ip_len + 13] &= !(0x01 | 0x08); }
+        part[ip_len + 16..ip_len + 18].fill(0);
+        let mut pseudo = [0u8; 12];
+        pseudo[..8].copy_from_slice(&part[12..20]);
+        pseudo[9] = 6;
+        pseudo[10..12].copy_from_slice(&((part.len() - ip_len) as u16).to_be_bytes());
+        let tcp_checksum = !Checksum::new().with_bytes(&pseudo).with_bytes(&part[ip_len..]).finish();
+        part[ip_len + 16..ip_len + 18].copy_from_slice(&tcp_checksum.to_ne_bytes());
+        let mut builder = allocate(part.len()).ok()?.to_builder_at_layer::<NetworkLayer>();
+        let written = builder.append_writer().write(&mut VmReader::from(part.as_slice()));
+        if written != part.len() { return None; }
+        builder.commit(written);
+        packets.push(builder.build());
+    }
+    Some(packets)
+}
 
 pub(in crate::iface) fn parse(
     pkt: RxPacket<TransportLayer>,
@@ -293,4 +349,48 @@ enum OptionKind {
     SackPermitted = 4,
     SackRange = 5,
     Timestamp = 8,
+}
+
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::ktest;
+    use super::*;
+
+    #[ktest]
+    fn segments_preserve_tcp_stream_and_checksums() {
+        let mut bytes = vec![0u8; 20 + 20 + 901];
+        bytes[0] = 0x45;
+        bytes[2..4].copy_from_slice(&(941u16).to_be_bytes());
+        bytes[8] = 64;
+        bytes[9] = 6;
+        bytes[12..20].copy_from_slice(&[192, 0, 2, 1, 198, 51, 100, 9]);
+        bytes[20..24].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        bytes[24..28].copy_from_slice(&0xffff_ff00u32.to_be_bytes());
+        bytes[32] = 0x50;
+        bytes[33] = 0x19;
+        for (index, byte) in bytes[40..].iter_mut().enumerate() { *byte = index as u8; }
+        let mut builder = FreshTxPacket::<ApplicationLayer>::alloc(bytes.len()).unwrap().to_builder_at_layer::<NetworkLayer>();
+        let written = builder.append_writer().write(&mut VmReader::from(bytes.as_slice()));
+        builder.commit(written);
+        let packet = builder.build();
+        let segments = segment(&packet, 600, FreshTxPacket::alloc).unwrap();
+        assert_eq!(segments.len(), 2);
+        let mut rebuilt = Vec::new();
+        for (index, part) in segments.iter().enumerate() {
+            let mut data = vec![0u8; part.len()];
+            part.reader().read(&mut VmWriter::from(data.as_mut_slice()));
+            assert!(data.len() <= 600);
+            assert_eq!(Checksum::new().with_bytes(&data[..20]).finish(), u16::MAX);
+            let mut pseudo = [0u8; 12];
+            pseudo[..8].copy_from_slice(&data[12..20]);
+            pseudo[9] = 6;
+            pseudo[10..12].copy_from_slice(&((data.len() - 20) as u16).to_be_bytes());
+            assert_eq!(Checksum::new().with_bytes(&pseudo).with_bytes(&data[20..]).finish(), u16::MAX);
+            let seq = u32::from_be_bytes(data[24..28].try_into().unwrap());
+            assert_eq!(seq, 0xffff_ff00u32.wrapping_add(rebuilt.len() as u32));
+            assert_eq!(data[33] & 0x09, if index == 0 { 0 } else { 0x09 });
+            rebuilt.extend_from_slice(&data[40..]);
+        }
+        assert_eq!(rebuilt, bytes[40..]);
+    }
 }

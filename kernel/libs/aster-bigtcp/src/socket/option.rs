@@ -6,6 +6,15 @@ use super::{NeedIfacePoll, unbound::RawTcpSocket};
 
 /// A trait defines setting socket options on a raw socket.
 pub trait RawTcpSetOption {
+    /// Returns the socket mark used for route selection.
+    fn mark(&self) -> u32;
+
+    /// Reports whether a connected socket has a cached output route.
+    fn route_valid(&self) -> bool;
+
+    /// Changes the socket mark used for route selection.
+    fn set_mark(&self, mark: u32);
+
     /// Sets the keep alive interval.
     ///
     /// Polling the iface _may_ be required after this method succeeds.
@@ -19,6 +28,8 @@ pub trait RawTcpSetOption {
 
 /// Socket options on a raw socket.
 pub struct RawTcpOption {
+    /// The socket mark used for route selection.
+    pub mark: u32,
     /// The keep alive interval.
     pub keep_alive: Option<Duration>,
     /// Whether Nagle's algorithm is enabled.

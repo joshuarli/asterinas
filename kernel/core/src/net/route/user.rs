@@ -95,6 +95,7 @@ pub(super) fn add_ipv4_route(
         return Err(error);
     }
 
+    super::publish_ipv4_poll_routes(&manager);
     Ok(record)
 }
 
@@ -131,6 +132,7 @@ pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<RouteRec
     manager.remove_route(table_id, &selector.destination, entry.metric());
     super::sync_gateway_routes(&manager, &iface)
         .expect("fewer gateway routes fit in the table that held more");
+    super::publish_ipv4_poll_routes(&manager);
 
     Ok(entry_record(&entry))
 }

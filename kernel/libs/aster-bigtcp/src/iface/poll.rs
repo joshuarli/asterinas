@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 use aster_softirq::BottomHalfDisabled;
 use ostd::{mm::{Infallible, VmReader, VmWriter}, sync::SpinLock};
@@ -236,6 +236,17 @@ impl<E: Ext> PollContext<'_, E> {
             }
             return None;
         }
+        if let Some(error) = icmp::parse_tcp_mtu(&bytes) {
+            if error.source.addr == ip_repr.inner.dst_addr() && self.iface.is_unicast_local(error.source.addr) {
+                let key = ConnectionKey::new(error.source.addr, error.source.port, error.destination.addr, error.destination.port);
+                if let Some(socket) = self.sockets.lookup_connection(&key)
+                    && let Some((egress, route)) = socket.mtu_feedback_path(error.sequence)
+                {
+                    self.network_registry.update_path_mtu_for_route(egress, error.destination.addr, route, error.mtu);
+                }
+            }
+            return None;
+        }
         let error = icmp::parse_udp_error(&bytes, true)?;
         if error.source.addr != ip_repr.inner.dst_addr() || !self.iface.is_unicast_local(error.source.addr) {
             return None;
@@ -286,7 +297,27 @@ impl<E: Ext> PollContext<'_, E> {
 
         let (ip_repr, tcp_repr) =
             self.process_tcp_until_outgoing(ip_repr, &tcp_repr, packet.reader().into())?;
-        self.emit_tcp(phy, &ip_repr, &tcp_repr)
+        let key = ConnectionKey::new(ip_repr.src_addr(), tcp_repr.src_port, ip_repr.dst_addr(), tcp_repr.dst_port);
+        let mark = self.sockets.lookup_connection(&key).map(|socket| socket.mark())
+            .or_else(|| self.actions.iter().rev().find_map(|action| match action {
+                SocketTableAction::AddTcpConn(socket) if socket.connection_key() == &key => Some(socket.mark()),
+                _ => None,
+            }))
+            .or_else(|| self.sockets.lookup_listener(&ListenerKey::new(ip_repr.src_addr(), tcp_repr.src_port)).map(|listener| listener.mark()))
+            .unwrap_or(0);
+        let mut packet = self.emit_tcp(phy, &ip_repr, &tcp_repr)?;
+        match E::tcp_route(packet.dst_addr, mark) {
+            None => Some(packet),
+            Some(Err(())) => None,
+            Some(Ok((iface, next_hop, _))) => {
+                packet.next_hop = next_hop;
+                if iface.index() == self.ifindex { Some(packet) }
+                else {
+                    if iface.common().enqueue_forwarded_tcp(packet).is_ok() { E::wake_forwarded_ip(iface.index()); }
+                    None
+                }
+            }
+        }
     }
 
     fn process_tcp_until_outgoing(
@@ -715,6 +746,11 @@ impl<E: Ext> PollContext<'_, E> {
                         tx_packet = this.emit_tcp(phy, ip_repr, tcp_repr);
                         return None;
                     }
+                    let mark = socket.mark();
+                    match E::tcp_route(ip_repr.dst_addr(), mark) {
+                        Some(Err(())) => return None,
+                        _ => socket.mark_route_valid(mark),
+                    }
 
                     if !socket.can_process(tcp_repr.dst_port) {
                         return this.process_tcp(
@@ -768,7 +804,36 @@ impl<E: Ext> PollContext<'_, E> {
                 (Some(_), Some(_)) => unreachable!(),
             }
 
-            if tx_packet.is_some() {
+            if let Some(mut packet) = tx_packet.take() {
+                let mark = socket.mark();
+                match E::tcp_route(packet.dst_addr, mark) {
+                    None => tx_packet = Some(packet),
+                    Some(Err(())) => (),
+                    Some(Ok((iface, next_hop, route))) => {
+                        let mtu = iface.common().cached_ip_mtu(packet.dst_addr, route).mtu;
+                        let packets = if packet.packet.len() > mtu {
+                            tcp::segment(&packet.packet, mtu, |len| phy.alloc_tx_buffer(len)).unwrap_or_default()
+                        } else { vec![packet.packet] };
+                        let mut queued = false;
+                        for part in packets {
+                            let sequence = tcp::outgoing_sequence_range(&part);
+                            let next = TxPacketWithDst { packet: part, dst_addr: packet.dst_addr, next_hop, fragment_mtu: None, failure: None };
+                            if iface.index() == self.ifindex {
+                                if tx_packet.is_none() { tx_packet = Some(next); }
+                                else { self.iface.pending_fragments().push_back(next); }
+                                queued = true;
+                                if let Some((sequence, end)) = sequence { socket.record_sent_path(sequence, end, iface.index(), route); }
+                            } else if iface.common().enqueue_forwarded_tcp(next).is_ok() {
+                                queued = true;
+                                if let Some((sequence, end)) = sequence { socket.record_sent_path(sequence, end, iface.index(), route); }
+                            }
+                        }
+                        if queued {
+                            socket.mark_route_valid(mark);
+                            if iface.index() != self.ifindex { E::wake_forwarded_ip(iface.index()); }
+                        }
+                    }
+                }
                 break;
             }
         }

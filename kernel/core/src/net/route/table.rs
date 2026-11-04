@@ -11,6 +11,7 @@ use crate::prelude::*;
 // so entries are stored in a `BTreeMap`.
 // Its key is used only for deduplication.
 // Replace it with a trie tree when a suitable implementation becomes available.
+#[derive(Clone)]
 pub(super) struct RouteTable<A: RouteAddressFamily> {
     entries: BTreeMap<(A::Cidr, RouteMetric), RouteEntry<A>>,
 }

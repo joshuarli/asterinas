@@ -6,6 +6,7 @@
 //! Callers can look up the local interface that owns an address when binding a socket,
 //! or select an output interface when connecting an unbound socket.
 
+use aster_softirq::BottomHalfDisabled;
 use aster_bigtcp::{
     iface::{InterfaceFlags, InterfaceType},
     wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
@@ -35,6 +36,7 @@ mod user;
 use entry::{RouteAddressFamily, RouteEntry, RouteMetric, RouteOrigin, RouteTableId};
 
 static IPV4_ROUTE_MANAGER: Once<RwMutex<RouteManager<Ipv4Address>>> = Once::new();
+static IPV4_POLL_ROUTES: Once<SpinLock<RouteManager<Ipv4Address>, BottomHalfDisabled>> = Once::new();
 static IPV6_ROUTE_MANAGER: Once<RwMutex<RouteManager<Ipv6Address>>> = Once::new();
 
 /// A route lookup key for one address family.
@@ -81,6 +83,8 @@ pub(super) fn init() {
             routes,
         ))
     });
+
+    IPV4_POLL_ROUTES.call_once(|| SpinLock::new(IPV4_ROUTE_MANAGER.get().unwrap().read().clone()));
 
     IPV6_ROUTE_MANAGER.call_once(|| {
         let routes = iface::iter_all_ifaces()
@@ -291,6 +295,7 @@ pub(super) fn sync_iface_routes(
         );
         sync_gateway_routes(&manager, iface)
             .expect("fewer gateway routes fit in the table that held more");
+        publish_ipv4_poll_routes(&manager);
         changes
     };
     IPV6_ROUTE_MANAGER
@@ -341,6 +346,7 @@ pub(in crate::net) fn add_ipv4_rule(request: Ipv4RuleRequest, exclusive: bool) -
     let record = dump::rule_record(&rule, true);
     manager.insert_rule(rule, exclusive)?;
     for iface in iface::iter_all_ifaces() { iface.clear_path_mtu(); }
+    publish_ipv4_poll_routes(&manager);
     drop(manager);
     Ok(record)
 }
@@ -356,6 +362,7 @@ pub(in crate::net) fn remove_ipv4_rule(request: Ipv4RuleRequest) -> Result<RuleR
     })?;
     for iface in iface::iter_all_ifaces() { iface.clear_path_mtu(); }
     let record = dump::rule_record(&rule, true);
+    publish_ipv4_poll_routes(&manager);
     drop(manager);
     Ok(record)
 }
@@ -372,6 +379,21 @@ pub(super) fn add_ipv4_route(
 /// lock.
 pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<RouteRecord> {
     user::remove_ipv4_route(selector)
+}
+
+fn publish_ipv4_poll_routes(manager: &RouteManager<Ipv4Address>) {
+    let snapshot = manager.clone();
+    *IPV4_POLL_ROUTES.get().unwrap().lock() = snapshot;
+}
+
+pub(super) fn lookup_ipv4_poll_route(dst: Ipv4Address, mark: u32) -> Result<(Arc<Iface>, aster_bigtcp::socket::IpNextHop, aster_bigtcp::iface::PathMtuRoute)> {
+    let key = RouteLookupKey { dst, mark, direct: false, device: None };
+    let route = IPV4_POLL_ROUTES.get().unwrap().lock().lookup_entry(&key)?;
+    let next_hop = route.gateway().map_or(aster_bigtcp::socket::IpNextHop::Direct, aster_bigtcp::socket::IpNextHop::Gateway);
+    let path = if route.table_id() == RouteTableId::MAIN { aster_bigtcp::iface::PathMtuRoute::Default } else {
+        aster_bigtcp::iface::PathMtuRoute::Table { table: route.table_id().get(), gateway: route.gateway() }
+    };
+    Ok((route.output_iface().clone(), next_hop, path))
 }
 
 /// Gives an interface the main-table gateway routes through it, for next-hop selection.
