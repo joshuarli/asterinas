@@ -282,6 +282,16 @@ impl Vdso {
         }
     }
 
+    fn update_timezone(&self, timezone: crate::time::timezone_t) {
+        let mut data = self.data.lock();
+        data.tz_minuteswest = timezone.tz_minuteswest;
+        data.tz_dsttime = timezone.tz_dsttime;
+        self.begin_update_data_frame(&mut data);
+        self.data_frame.write_val(vdso_data_field_offset!(tz_minuteswest), &data.tz_minuteswest).unwrap();
+        self.data_frame.write_val(vdso_data_field_offset!(tz_dsttime), &data.tz_dsttime).unwrap();
+        self.finish_update_data_frame(&mut data);
+    }
+
     fn update_high_res_instant(&self, instant: Instant, instant_cycles: u64) {
         let mut data = self.data.lock();
 
@@ -372,7 +382,12 @@ fn wall_instant(instant: Instant) -> (u64, u64, i64) {
     )
 }
 
-/// Publishes the wall clock to user space after it was set or adjusted.
+pub(crate) fn refresh_timezone(timezone: crate::time::timezone_t) {
+    if let Some(vdso) = VDSO.get() {
+        vdso.update_timezone(timezone);
+    }
+}
+
 pub(crate) fn refresh_wall_clock() {
     let Some(vdso) = VDSO.get() else {
         return;

@@ -69,7 +69,12 @@ fn do_clock_nanosleep(
         clockid, is_abs_time, request_time, remain_timespec_addr
     );
 
-    let start_time = read_clock(clockid, ctx)?;
+    let timer_clockid = if clockid == ClockId::CLOCK_REALTIME as clockid_t && !is_abs_time {
+        ClockId::CLOCK_MONOTONIC as clockid_t
+    } else {
+        clockid
+    };
+    let start_time = read_clock(timer_clockid, ctx)?;
     let duration = if is_abs_time {
         if request_time < start_time {
             return Ok(SyscallReturn::Return(0));
@@ -85,7 +90,7 @@ fn do_clock_nanosleep(
     let waiter = Waiter::new_pair().0;
 
     let timer_manager = {
-        let clock_id = ClockId::try_from(clockid)?;
+        let clock_id = ClockId::try_from(timer_clockid)?;
         match clock_id {
             ClockId::CLOCK_BOOTTIME => BootTimeClock::timer_manager(),
             ClockId::CLOCK_MONOTONIC => MonotonicClock::timer_manager(),
@@ -108,15 +113,20 @@ fn do_clock_nanosleep(
         }
     };
 
+    let timeout = if is_abs_time {
+        Timeout::When(request_time)
+    } else {
+        Timeout::After(duration)
+    };
     let res = waiter.pause_until_or_timeout(
         || None,
-        ManagedTimeout::new_with_manager(Timeout::After(duration), timer_manager),
+        ManagedTimeout::new_with_manager(timeout, timer_manager),
     );
 
     match res {
         Err(e) if e.error() == Errno::ETIME => Ok(SyscallReturn::Return(0)),
         Err(e) if e.error() == Errno::EINTR => {
-            let end_time = read_clock(clockid, ctx)?;
+            let end_time = read_clock(timer_clockid, ctx)?;
 
             if end_time >= start_time + duration {
                 return Ok(SyscallReturn::Return(0));

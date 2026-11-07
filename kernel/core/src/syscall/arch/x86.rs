@@ -15,7 +15,7 @@ use super::{
     chmod::{sys_chmod, sys_fchmod, sys_fchmodat, sys_fchmodat2},
     chown::{sys_chown, sys_fchown, sys_fchownat, sys_lchown},
     chroot::sys_chroot,
-    clock_adjust::{sys_adjtimex, sys_clock_adjtime, sys_clock_settime},
+    clock_adjust::{sys_adjtimex, sys_clock_adjtime, sys_clock_settime, sys_settimeofday},
     clock_getres::sys_clock_getres,
     clock_gettime::sys_clock_gettime,
     clone::{sys_clone, sys_clone3},
@@ -329,6 +329,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_CHROOT = 161           => sys_chroot(args[..1]);
     SYS_ADJTIMEX = 159         => sys_adjtimex(args[..1]);
     SYS_SYNC = 162             => sys_sync(args[..0]);
+    SYS_SETTIMEOFDAY = 164     => sys_settimeofday(args[..2]);
     SYS_MOUNT = 165            => sys_mount(args[..5]);
     SYS_UMOUNT2 = 166          => sys_umount(args[..2]);
     SYS_REBOOT = 169           => sys_reboot(args[..4]);

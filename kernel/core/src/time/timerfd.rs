@@ -2,11 +2,12 @@
 
 use core::{
     fmt::Display,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
 
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
+use spin::Once;
 
 use crate::{
     events::IoEvents,
@@ -26,11 +27,62 @@ use crate::{
 /// A file-like object representing a timer that can be used with file descriptors.
 pub(crate) struct TimerfdFile {
     clockid: clockid_t,
-    timer: Arc<Timer>,
-    ticks: Arc<AtomicU64>,
-    pollee: Pollee,
+    timers: SpinLock<TimerfdTimers>,
+    state: Arc<TimerfdState>,
     settime_flags: AtomicTFDSetTimeFlags,
     common: FileCommon,
+}
+
+struct TimerfdTimers {
+    clock: Arc<Timer>,
+    monotonic: Option<Arc<Timer>>,
+    use_monotonic: bool,
+}
+
+impl TimerfdTimers {
+    fn active(&self) -> &Arc<Timer> {
+        if self.use_monotonic {
+            self.monotonic.as_ref().unwrap()
+        } else {
+            &self.clock
+        }
+    }
+}
+
+struct TimerfdState {
+    ticks: AtomicU64,
+    cancel_enabled: AtomicBool,
+    cancelled: AtomicBool,
+    pollee: Pollee,
+    clock_timer: Once<Weak<Timer>>,
+}
+
+static CLOCK_SET_WATCHES: SpinLock<Vec<Weak<TimerfdState>>> = SpinLock::new(Vec::new());
+
+pub(crate) fn with_realtime_clock_change<T>(change: impl FnOnce() -> Result<T>) -> Result<T> {
+    let mut watches = CLOCK_SET_WATCHES.disable_irq().lock();
+    let at = aster_time::read_monotonic_time();
+    let before = aster_time::wall_offset_and_frequency(at).0;
+    let result = change()?;
+    if aster_time::wall_offset_and_frequency(at).0 == before {
+        return Ok(result);
+    }
+    watches.retain(|watch| {
+        if let Some(state) = watch.upgrade() {
+            if state.cancel_enabled.load(Ordering::Acquire) {
+                if let Some(timer) = state.clock_timer.get().and_then(Weak::upgrade) {
+                    timer.lock().cancel();
+                }
+                state.ticks.store(0, Ordering::Relaxed);
+                state.cancelled.store(true, Ordering::Release);
+                state.pollee.notify(IoEvents::IN);
+            }
+            true
+        } else {
+            false
+        }
+    });
+    Ok(result)
 }
 
 bitflags! {
@@ -99,19 +151,31 @@ impl TimerfdFile {
             return_errno_with_message!(Errno::EINVAL, "invalid clock ID");
         }
 
-        let ticks = Arc::new(AtomicU64::new(0));
-        let pollee = Pollee::new();
-
-        let timer = {
-            let ticks = ticks.clone();
-            let pollee = pollee.clone();
-
+        let state = Arc::new(TimerfdState {
+            ticks: AtomicU64::new(0),
+            cancel_enabled: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            pollee: Pollee::new(),
+            clock_timer: Once::new(),
+        });
+        let make_timer = |clock_id| {
+            let state = state.clone();
             let expired_fn = move |_guard: TimerGuard| {
-                ticks.fetch_add(1, Ordering::Relaxed);
-                pollee.notify(IoEvents::IN);
+                state.ticks.fetch_add(1, Ordering::Relaxed);
+                state.pollee.notify(IoEvents::IN);
             };
             create_timer_for_clock(clock_id, expired_fn, ctx)
-        }?;
+        };
+        let clock = make_timer(clock_id)?;
+        state.clock_timer.call_once(|| Arc::downgrade(&clock));
+        let monotonic = if clock_id == ClockId::CLOCK_REALTIME {
+            Some(make_timer(ClockId::CLOCK_MONOTONIC)?)
+        } else {
+            None
+        };
+        if monotonic.is_some() {
+            CLOCK_SET_WATCHES.disable_irq().lock().push(Arc::downgrade(&state));
+        }
 
         let pseudo_path = AnonInodeFs::new_path(|_| "anon_inode:[timerfd]".to_string());
         let status_flags = if flags.contains(TFDFlags::TFD_NONBLOCK) {
@@ -122,9 +186,8 @@ impl TimerfdFile {
 
         Ok(TimerfdFile {
             clockid: clock_id as clockid_t,
-            timer,
-            ticks,
-            pollee,
+            timers: SpinLock::new(TimerfdTimers { clock, monotonic, use_monotonic: false }),
+            state,
             settime_flags: AtomicTFDSetTimeFlags::default(),
             // Reference: <https://elixir.bootlin.com/linux/v7.0/source/fs/timerfd.c#L436>.
             common: FileCommon::new(pseudo_path, AccessMode::O_RDWR, status_flags),
@@ -140,25 +203,29 @@ impl TimerfdFile {
         expire_time: Duration,
         interval: Duration,
         flags: TFDSetTimeFlags,
-    ) -> (Duration, Duration) {
-        let mut timer_guard = self.timer.lock();
-
-        let (old_interval, remain) = (timer_guard.interval(), timer_guard.remain());
-
+    ) -> Result<(Duration, Duration)> {
+        let _watches = CLOCK_SET_WATCHES.disable_irq().lock();
+        let mut timers = self.timers.disable_irq().lock();
+        let (old_interval, remain) = {
+            let timer_guard = timers.active().lock();
+            let old = (timer_guard.interval(), timer_guard.remain());
+            timer_guard.cancel();
+            old
+        };
+        timers.use_monotonic = timers.monotonic.is_some() && !flags.contains(TFDSetTimeFlags::TFD_TIMER_ABSTIME);
+        let mut timer_guard = timers.active().lock();
         timer_guard.set_interval(interval);
-
-        // Cancel the timer and clear the ticks counter.
-        timer_guard.cancel();
-        self.ticks.store(0, Ordering::Relaxed);
+        self.state.ticks.store(0, Ordering::Relaxed);
+        let was_cancelled = self.state.cancelled.swap(false, Ordering::AcqRel);
+        let cancel_enabled = self.clockid == ClockId::CLOCK_REALTIME as clockid_t
+            && flags.contains(TFDSetTimeFlags::TFD_TIMER_ABSTIME | TFDSetTimeFlags::TFD_TIMER_CANCEL_ON_SET);
+        self.state.cancel_enabled.store(
+            cancel_enabled,
+            Ordering::Release,
+        );
+        self.settime_flags.store(flags, Ordering::Relaxed);
 
         if expire_time != Duration::ZERO {
-            if flags.contains(TFDSetTimeFlags::TFD_TIMER_CANCEL_ON_SET) {
-                // TODO: Currently this flag has no effect since the system time cannot be changed.
-                // Once add the support for modifying the system time, the corresponding logics for
-                // this flag need to be implemented.
-                warn!("TFD_TIMER_CANCEL_ON_SET is not implemented yet and has no effect");
-            }
-
             let timeout = if flags.contains(TFDSetTimeFlags::TFD_TIMER_ABSTIME) {
                 Timeout::When(expire_time)
             } else {
@@ -166,15 +233,18 @@ impl TimerfdFile {
             };
 
             timer_guard.set_timeout(timeout);
-            self.settime_flags.store(flags, Ordering::Relaxed);
         }
 
-        (old_interval, remain)
+        if was_cancelled && cancel_enabled && expire_time != Duration::ZERO {
+            return_errno_with_message!(Errno::ECANCELED, "the realtime clock was changed");
+        }
+        Ok((old_interval, remain))
     }
 
     /// Gets the timer's remaining time and interval.
     pub(crate) fn get_time(&self) -> (Duration, Duration) {
-        let timer_guard = self.timer.lock();
+        let timers = self.timers.disable_irq().lock();
+        let timer_guard = timers.active().lock();
         (timer_guard.interval(), timer_guard.remain())
     }
 
@@ -183,7 +253,14 @@ impl TimerfdFile {
     }
 
     fn try_read(&self, writer: &mut VmWriter) -> Result<()> {
-        let ticks = self.ticks.fetch_and(0, Ordering::Relaxed);
+        let ticks = {
+            let _watches = CLOCK_SET_WATCHES.disable_irq().lock();
+            if self.state.cancelled.swap(false, Ordering::AcqRel) {
+                self.state.ticks.store(0, Ordering::Relaxed);
+                return_errno_with_message!(Errno::ECANCELED, "the realtime clock was changed");
+            }
+            self.state.ticks.fetch_and(0, Ordering::Relaxed)
+        };
 
         if ticks == 0 {
             return_errno_with_message!(Errno::EAGAIN, "the counter is zero");
@@ -197,7 +274,7 @@ impl TimerfdFile {
     fn check_io_events(&self) -> IoEvents {
         let mut events = IoEvents::empty();
 
-        if self.ticks.load(Ordering::Relaxed) != 0 {
+        if self.state.cancelled.load(Ordering::Acquire) || self.state.ticks.load(Ordering::Relaxed) != 0 {
             events |= IoEvents::IN;
         }
 
@@ -207,8 +284,18 @@ impl TimerfdFile {
 
 impl Pollable for TimerfdFile {
     fn poll(&self, mask: IoEvents, poller: Option<&mut PollHandle>) -> IoEvents {
-        self.pollee
+        self.state.pollee
             .poll_with(mask, poller, || self.check_io_events())
+    }
+}
+
+impl Drop for TimerfdFile {
+    fn drop(&mut self) {
+        if self.clockid == ClockId::CLOCK_REALTIME as clockid_t {
+            CLOCK_SET_WATCHES.disable_irq().lock().retain(|watch| {
+                !core::ptr::eq(watch.as_ptr(), Arc::as_ptr(&self.state))
+            });
+        }
     }
 }
 
@@ -272,11 +359,12 @@ impl FileLike for TimerfdFile {
             flags |= CreationFlags::O_CLOEXEC.bits();
         }
 
-        let timer_guard = self.timer.lock();
+        let timers = self.timers.disable_irq().lock();
+        let timer_guard = timers.active().lock();
         Box::new(FdInfo {
             flags,
             clockid: self.clockid,
-            ticks: self.ticks.load(Ordering::Relaxed),
+            ticks: self.state.ticks.load(Ordering::Relaxed),
             settime_flags: self.settime_flags.load(Ordering::Relaxed).bits(),
             it_value: timer_guard.expired_time(),
             it_interval: timer_guard.interval(),

@@ -9,7 +9,7 @@ use crate::{
     prelude::*,
     process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::AsPosixThread},
     security::lsm::hooks as lsm_hooks,
-    time::{clockid_t, timespec_t},
+    time::{TIMEZONE, clockid_t, timerfd::with_realtime_clock_change, timespec_t, timeval_t, timezone_t},
 };
 
 const CLOCK_REALTIME: clockid_t = 0;
@@ -61,8 +61,71 @@ pub(super) fn sys_clock_settime(
     }
 
     let wall = core::time::Duration::new(timespec.sec as u64, timespec.nsec as u32);
-    aster_time::set_wall_time(wall, may_set_time(ctx)).map_err(adjust_error)?;
-    crate::vdso::refresh_wall_clock();
+    if wall < aster_time::read_monotonic_time() {
+        return_errno_with_message!(Errno::EINVAL, "time is earlier than the monotonic clock");
+    }
+    with_realtime_clock_change(|| {
+        aster_time::set_wall_time(wall, may_set_time(ctx)).map_err(adjust_error)?;
+        crate::vdso::refresh_wall_clock();
+        Ok(())
+    })?;
+    Ok(SyscallReturn::Return(0))
+}
+
+pub(super) fn sys_settimeofday(
+    timeval_addr: Vaddr,
+    timezone_addr: Vaddr,
+    ctx: &Context,
+) -> Result<SyscallReturn> {
+    let time = if timeval_addr == 0 {
+        None
+    } else {
+        Some(core::time::Duration::try_from(ctx.user_space().read_val::<timeval_t>(timeval_addr)?)?)
+    };
+    let timezone = if timezone_addr == 0 {
+        None
+    } else {
+        Some(ctx.user_space().read_val::<timezone_t>(timezone_addr)?)
+    };
+    if time.is_some_and(|time| time < aster_time::read_monotonic_time()) {
+        return_errno_with_message!(Errno::EINVAL, "time is earlier than the monotonic clock");
+    }
+    if !may_set_time(ctx) {
+        return_errno_with_message!(Errno::EPERM, "changing the clock needs CAP_SYS_TIME");
+    }
+    if timezone.is_some_and(|zone| !(-900..=900).contains(&zone.tz_minuteswest)) {
+        return_errno_with_message!(Errno::EINVAL, "timezone is outside the valid range");
+    }
+
+    let mut warp = None;
+    if let Some(zone) = timezone {
+        let mut state = TIMEZONE.disable_irq().lock();
+        if state.first_change && time.is_none() {
+            warp = Some(zone.tz_minuteswest);
+        }
+        state.timezone = zone;
+        state.first_change = false;
+        crate::vdso::refresh_timezone(zone);
+    }
+    if time.is_some() || warp.is_some() {
+        with_realtime_clock_change(|| {
+            let wall = if let Some(minutes) = warp {
+                let current_ns = aster_time::read_wall_time().as_nanos() as i128;
+                let shifted_ns = current_ns + i128::from(minutes) * 60 * 1_000_000_000;
+                if shifted_ns < 0 {
+                    return Ok(());
+                }
+                let seconds = u64::try_from(shifted_ns / 1_000_000_000)
+                    .map_err(|_| Error::with_message(Errno::EOVERFLOW, "timezone warp overflows"))?;
+                core::time::Duration::new(seconds, (shifted_ns % 1_000_000_000) as u32)
+            } else {
+                time.unwrap()
+            };
+            aster_time::set_wall_time(wall, true).map_err(adjust_error)?;
+            crate::vdso::refresh_wall_clock();
+            Ok(())
+        })?;
+    }
     Ok(SyscallReturn::Return(0))
 }
 
@@ -98,11 +161,18 @@ fn adjust_realtime(timex_addr: Vaddr, ctx: &Context) -> Result<SyscallReturn> {
         time_subsec: timex.time_subsec,
     };
 
-    let reply = aster_time::adjust_wall_clock(&request, may_set_time(ctx)).map_err(adjust_error)?;
-
-    if request.modes != 0 {
-        crate::vdso::refresh_wall_clock();
-    }
+    let adjust = || {
+        let reply = aster_time::adjust_wall_clock(&request, may_set_time(ctx)).map_err(adjust_error)?;
+        if request.modes != 0 {
+            crate::vdso::refresh_wall_clock();
+        }
+        Ok(reply)
+    };
+    let reply = if request.modes & adjust::ADJ_SETOFFSET != 0 {
+        with_realtime_clock_change(adjust)?
+    } else {
+        adjust()?
+    };
     fill_timex(&mut timex, &reply);
     ctx.user_space().write_val(timex_addr, &timex)?;
     Ok(SyscallReturn::Return(reply.state as isize))

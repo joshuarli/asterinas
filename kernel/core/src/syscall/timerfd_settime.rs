@@ -36,7 +36,7 @@ pub(super) fn sys_timerfd_settime(
     let interval = Duration::try_from(new_itimerspec.it_interval)?;
     let expire_time = Duration::try_from(new_itimerspec.it_value)?;
 
-    let (old_interval, remain) = timerfd_file.set_time(expire_time, interval, flags);
+    let (old_interval, remain) = timerfd_file.set_time(expire_time, interval, flags)?;
     if old_itimerspec_addr > 0 {
         let old_interval = timespec_t::from(old_interval);
         let remain = timespec_t::from(remain);

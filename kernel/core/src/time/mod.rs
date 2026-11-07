@@ -187,3 +187,13 @@ pub(crate) struct timezone_t {
     pub tz_minuteswest: i32,
     pub tz_dsttime: i32,
 }
+
+pub(crate) struct TimezoneState {
+    pub timezone: timezone_t,
+    pub first_change: bool,
+}
+
+pub(crate) static TIMEZONE: SpinLock<TimezoneState> = SpinLock::new(TimezoneState {
+    timezone: timezone_t { tz_minuteswest: 0, tz_dsttime: 0 },
+    first_change: true,
+});

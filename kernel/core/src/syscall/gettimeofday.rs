@@ -5,7 +5,7 @@ use ostd::mm::VmIo;
 use super::SyscallReturn;
 use crate::{
     prelude::*,
-    time::{SystemTime, timeval_t, timezone_t},
+    time::{SystemTime, TIMEZONE, timeval_t},
 };
 
 pub(super) fn sys_gettimeofday(
@@ -23,8 +23,7 @@ pub(super) fn sys_gettimeofday(
     }
 
     if timezone_addr != 0 {
-        // TODO: Return the actual system timezone when available.
-        let tz = timezone_t::default();
+        let tz = TIMEZONE.disable_irq().lock().timezone;
         ctx.user_space().write_val(timezone_addr, &tz)?;
     }
 
