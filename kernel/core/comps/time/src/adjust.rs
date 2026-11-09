@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The adjustable wall clock behind `CLOCK_REALTIME`, `clock_settime` and `adjtimex`.
+//! The disciplined clocks behind `CLOCK_MONOTONIC`, `CLOCK_REALTIME`, `clock_settime` and
+//! `adjtimex`.
 //!
-//! The wall clock is a linear function of the monotonic clock: a base pair of monotonic and
-//! wall time, plus a frequency correction in units of 2^-16 ppm. Setting the clock, stepping it
-//! and changing the frequency move the base pair, so the wall clock never jumps by anything but
-//! the requested amount.
+//! As on Linux, the monotonic clock is the raw clocksource time slewed by the frequency
+//! correction in units of 2^-16 ppm, and the wall clock is the monotonic clock plus an offset.
+//! Changing the frequency moves the base pair of raw and monotonic time, so neither clock jumps;
+//! setting or stepping the wall clock moves only the offset, so the monotonic clock never jumps.
 //!
 //! Reference: <https://elixir.bootlin.com/linux/v6.18/source/kernel/time/ntp.c> and
 //! `adjtimex(2)`. Only the modes the clock can honor are accepted; the others fail with
@@ -96,11 +97,12 @@ pub enum Error {
     Invalid,
 }
 
-/// The wall clock.
+/// The monotonic and wall clocks, both disciplined by one frequency correction.
 #[derive(Debug)]
 pub struct WallClock {
+    base_raw_ns: i128,
     base_monotonic_ns: i128,
-    base_wall_ns: i128,
+    wall_offset_ns: i128,
     frequency: i64,
     max_error_us: i64,
     max_error_at_second: i64,
@@ -111,11 +113,12 @@ pub struct WallClock {
 }
 
 impl WallClock {
-    /// Creates a wall clock that reads `wall_at_monotonic_zero_ns` when the monotonic clock is zero.
-    pub const fn new(wall_at_monotonic_zero_ns: i128) -> Self {
+    /// Creates clocks that read zero and `wall_at_raw_zero_ns` when the raw clock is zero.
+    pub const fn new(wall_at_raw_zero_ns: i128) -> Self {
         Self {
+            base_raw_ns: 0,
             base_monotonic_ns: 0,
-            base_wall_ns: wall_at_monotonic_zero_ns,
+            wall_offset_ns: wall_at_raw_zero_ns,
             frequency: 0,
             max_error_us: MAX_ERROR_US,
             max_error_at_second: 0,
@@ -126,10 +129,15 @@ impl WallClock {
         }
     }
 
-    /// Returns the wall time in nanoseconds since the Unix epoch.
-    pub fn wall_ns(&self, monotonic_ns: i128) -> i128 {
-        let elapsed = monotonic_ns - self.base_monotonic_ns;
-        self.base_wall_ns + elapsed + elapsed * i128::from(self.frequency) / FREQUENCY_SCALE
+    /// Returns the slewed monotonic time in nanoseconds at raw clocksource time `raw_ns`.
+    pub fn monotonic_ns(&self, raw_ns: i128) -> i128 {
+        let elapsed = raw_ns - self.base_raw_ns;
+        self.base_monotonic_ns + elapsed + elapsed * i128::from(self.frequency) / FREQUENCY_SCALE
+    }
+
+    /// Returns the wall time in nanoseconds since the Unix epoch at raw clocksource time `raw_ns`.
+    pub fn wall_ns(&self, raw_ns: i128) -> i128 {
+        self.monotonic_ns(raw_ns) + self.wall_offset_ns
     }
 
     /// Returns the current frequency correction in units of 2^-16 ppm.
@@ -140,7 +148,7 @@ impl WallClock {
     /// Sets the wall time, as `clock_settime(CLOCK_REALTIME)` does.
     pub fn set(
         &mut self,
-        monotonic_ns: i128,
+        raw_ns: i128,
         wall_ns: i128,
         privileged: bool,
     ) -> Result<(), Error> {
@@ -150,15 +158,14 @@ impl WallClock {
         if wall_ns < 0 {
             return Err(Error::Invalid);
         }
-        self.rebase(monotonic_ns);
-        self.base_wall_ns = wall_ns;
+        self.wall_offset_ns = wall_ns - self.monotonic_ns(raw_ns);
         Ok(())
     }
 
     /// Reads or changes the clock, as `adjtimex` does.
     pub fn adjust(
         &mut self,
-        monotonic_ns: i128,
+        raw_ns: i128,
         request: &Request,
         privileged: bool,
     ) -> Result<Reply, Error> {
@@ -190,7 +197,7 @@ impl WallClock {
                 i128::from(request.time_subsec) * 1000
             };
             let step = i128::from(request.time_sec) * NANOS_PER_SECOND + subsec_ns;
-            if self.wall_ns(monotonic_ns) + step < 0 {
+            if self.wall_ns(raw_ns) + step < 0 {
                 return Err(Error::Invalid);
             }
             Some(step)
@@ -198,18 +205,17 @@ impl WallClock {
             None
         };
 
-        self.refresh_error(monotonic_ns);
+        self.refresh_error(raw_ns);
         if modes & ADJ_FREQUENCY != 0 {
-            self.rebase(monotonic_ns);
+            self.rebase(raw_ns);
             self.frequency = request.frequency.clamp(-MAX_FREQUENCY, MAX_FREQUENCY);
         }
         if let Some(step) = step_ns {
-            self.rebase(monotonic_ns);
-            self.base_wall_ns += step;
+            self.wall_offset_ns += step;
         }
         if modes & ADJ_MAXERROR != 0 {
             self.max_error_us = request.max_error.clamp(0, MAX_ERROR_US);
-            self.max_error_at_second = monotonic_seconds(monotonic_ns);
+            self.max_error_at_second = raw_seconds(raw_ns);
         }
         if modes & ADJ_ESTERROR != 0 {
             self.est_error_us = request.est_error.clamp(0, MAX_ERROR_US);
@@ -229,8 +235,8 @@ impl WallClock {
             self.status &= !STA_NANO;
         }
 
-        self.refresh_error(monotonic_ns);
-        let wall_ns = self.wall_ns(monotonic_ns);
+        self.refresh_error(raw_ns);
+        let wall_ns = self.wall_ns(raw_ns);
         let time_sec = wall_ns.div_euclid(NANOS_PER_SECOND) as i64;
         let sub_ns = wall_ns.rem_euclid(NANOS_PER_SECOND) as i64;
         Ok(Reply {
@@ -257,13 +263,13 @@ impl WallClock {
         })
     }
 
-    fn rebase(&mut self, monotonic_ns: i128) {
-        self.base_wall_ns = self.wall_ns(monotonic_ns);
-        self.base_monotonic_ns = monotonic_ns;
+    fn rebase(&mut self, raw_ns: i128) {
+        self.base_monotonic_ns = self.monotonic_ns(raw_ns);
+        self.base_raw_ns = raw_ns;
     }
 
-    fn refresh_error(&mut self, monotonic_ns: i128) {
-        let now = monotonic_seconds(monotonic_ns);
+    fn refresh_error(&mut self, raw_ns: i128) {
+        let now = raw_seconds(raw_ns);
         let grown = self.max_error_us + (now - self.max_error_at_second) * ERROR_GROWTH_US_PER_SECOND;
         self.max_error_at_second = now;
         if grown > MAX_ERROR_US {
@@ -275,8 +281,8 @@ impl WallClock {
     }
 }
 
-fn monotonic_seconds(monotonic_ns: i128) -> i64 {
-    (monotonic_ns / NANOS_PER_SECOND) as i64
+fn raw_seconds(raw_ns: i128) -> i64 {
+    (raw_ns / NANOS_PER_SECOND) as i64
 }
 
 #[cfg(ktest)]
@@ -352,6 +358,57 @@ mod test {
         )
         .unwrap();
         assert_eq!(clock.wall_ns(300 * SECOND), START + 300 * SECOND + 10_000 * 1000 - 5_000 * 1000);
+    }
+
+    #[ktest]
+    fn a_frequency_correction_slews_the_monotonic_clock_without_a_jump() {
+        let mut clock = WallClock::new(START);
+        assert_eq!(clock.monotonic_ns(100 * SECOND), 100 * SECOND);
+        adjust(
+            &mut clock,
+            100 * SECOND,
+            Request { modes: ADJ_FREQUENCY, frequency: 100 << 16, ..Request::default() },
+        )
+        .unwrap();
+        assert_eq!(clock.monotonic_ns(100 * SECOND), 100 * SECOND);
+        assert_eq!(clock.monotonic_ns(200 * SECOND), 200 * SECOND + 10_000 * 1000);
+        adjust(
+            &mut clock,
+            200 * SECOND,
+            Request { modes: ADJ_FREQUENCY, frequency: -(50 << 16), ..Request::default() },
+        )
+        .unwrap();
+        assert_eq!(clock.monotonic_ns(200 * SECOND), 200 * SECOND + 10_000 * 1000);
+        assert_eq!(
+            clock.monotonic_ns(300 * SECOND),
+            300 * SECOND + 10_000 * 1000 - 5_000 * 1000
+        );
+        assert_eq!(clock.wall_ns(300 * SECOND) - clock.monotonic_ns(300 * SECOND), START);
+    }
+
+    #[ktest]
+    fn setting_or_stepping_the_wall_clock_leaves_the_monotonic_clock_alone() {
+        let mut clock = WallClock::new(START);
+        adjust(
+            &mut clock,
+            10 * SECOND,
+            Request { modes: ADJ_FREQUENCY, frequency: 200 << 16, ..Request::default() },
+        )
+        .unwrap();
+        let before = clock.monotonic_ns(20 * SECOND);
+        clock.set(20 * SECOND, START + 1_000 * SECOND, true).unwrap();
+        adjust(
+            &mut clock,
+            20 * SECOND,
+            Request { modes: ADJ_SETOFFSET | ADJ_NANO, time_sec: -7, ..Request::default() },
+        )
+        .unwrap();
+        assert_eq!(clock.monotonic_ns(20 * SECOND), before);
+        assert_eq!(clock.wall_ns(20 * SECOND), START + 993 * SECOND);
+        assert_eq!(
+            clock.monotonic_ns(30 * SECOND) - before,
+            clock.wall_ns(30 * SECOND) - clock.wall_ns(20 * SECOND)
+        );
     }
 
     #[ktest]

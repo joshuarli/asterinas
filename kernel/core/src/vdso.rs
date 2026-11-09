@@ -15,7 +15,7 @@
 use alloc::sync::Arc;
 use core::{mem::ManuallyDrop, time::Duration};
 
-use aster_time::{Instant, read_monotonic_time};
+use aster_time::{DisciplinedTime, Instant, read_raw_monotonic_time};
 use aster_util::coeff::Coeff;
 use ostd::{
     const_assert,
@@ -161,32 +161,29 @@ impl VdsoData {
 
     fn update_high_res_instant(&mut self, instant: Instant, instant_cycles: u64) {
         self.last_cycles = instant_cycles;
-        let (wall_secs, wall_nanos, frequency) = wall_instant(instant);
-        self.set_clock_mode(if frequency == 0 {
+        let raw = Duration::new(instant.secs(), instant.nanos());
+        let disciplined = aster_time::disciplined_time_at(raw);
+        self.set_clock_mode(if disciplined.frequency == 0 {
             DEFAULT_CLOCK_MODE
         } else {
             VdsoClockMode::None
         });
         for clock_id in HIGH_RES_CLOCK_IDS {
-            let (secs, nanos) = if clock_id == ClockId::CLOCK_REALTIME {
-                (wall_secs, wall_nanos)
-            } else {
-                (instant.secs(), instant.nanos() as u64)
-            };
-
-            self.update_clock_instant(clock_id as usize, secs, nanos << self.shift as u64);
+            let time = clock_time(clock_id, raw, &disciplined);
+            self.update_clock_instant(
+                clock_id as usize,
+                time.as_secs(),
+                u64::from(time.subsec_nanos()) << self.shift as u64,
+            );
         }
     }
 
     fn update_coarse_res_instant(&mut self, instant: Instant) {
-        let (wall_secs, wall_nanos, _) = wall_instant(instant);
+        let raw = Duration::new(instant.secs(), instant.nanos());
+        let disciplined = aster_time::disciplined_time_at(raw);
         for clock_id in COARSE_RES_CLOCK_IDS {
-            let (secs, nanos) = if clock_id == ClockId::CLOCK_REALTIME_COARSE {
-                (wall_secs, wall_nanos)
-            } else {
-                (instant.secs(), instant.nanos() as u64)
-            };
-            self.update_clock_instant(clock_id as usize, secs, nanos);
+            let time = clock_time(clock_id, raw, &disciplined);
+            self.update_clock_instant(clock_id as usize, time.as_secs(), u64::from(time.subsec_nanos()));
         }
     }
 }
@@ -358,18 +355,18 @@ impl Vdso {
     }
 }
 
-/// Returns the wall time at the monotonic `instant` as seconds and nanoseconds, with the wall
-/// clock's frequency correction.
-fn wall_instant(instant: Instant) -> (u64, u64, i64) {
-    let instant_ns = i128::from(instant.secs()) * 1_000_000_000 + i128::from(instant.nanos());
-    let (offset_ns, frequency) =
-        aster_time::wall_offset_and_frequency(Duration::new(instant.secs(), instant.nanos()));
-    let wall_ns = (instant_ns + offset_ns).max(0);
-    (
-        (wall_ns / 1_000_000_000) as u64,
-        (wall_ns % 1_000_000_000) as u64,
-        frequency,
-    )
+/// Returns the time `clock_id` reads at raw clocksource time `raw`.
+fn clock_time(clock_id: ClockId, raw: Duration, disciplined: &DisciplinedTime) -> Duration {
+    match clock_id {
+        ClockId::CLOCK_REALTIME | ClockId::CLOCK_REALTIME_COARSE => disciplined.wall,
+        ClockId::CLOCK_MONOTONIC_RAW => raw,
+        ClockId::CLOCK_MONOTONIC | ClockId::CLOCK_MONOTONIC_COARSE | ClockId::CLOCK_BOOTTIME => {
+            disciplined.monotonic
+        }
+        ClockId::CLOCK_PROCESS_CPUTIME_ID | ClockId::CLOCK_THREAD_CPUTIME_ID => {
+            unreachable!("the vDSO publishes no CPU-time clock")
+        }
+    }
 }
 
 /// Publishes the wall clock to user space after it was set or adjusted.
@@ -391,7 +388,7 @@ fn update_vdso_high_res_instant(instant: Instant, instant_cycles: u64) {
 
 /// Updates instants with respect to coarse-resolution clocks in vDSO data.
 fn update_vdso_coarse_res_instant(_guard: TimerGuard) {
-    let instant = Instant::from(read_monotonic_time());
+    let instant = Instant::from(read_raw_monotonic_time());
     VDSO.get().unwrap().update_coarse_res_instant(instant);
 }
 

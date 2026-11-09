@@ -22,11 +22,11 @@ static long long now_ns(clockid_t clock)
 	return (long long)ts.tv_sec * NANOS + ts.tv_nsec;
 }
 
-static long long raw_realtime_ns(void)
+static long long raw_clock_ns(clockid_t clock)
 {
 	struct timespec ts;
 
-	if (syscall(SYS_clock_gettime, CLOCK_REALTIME, &ts) != 0)
+	if (syscall(SYS_clock_gettime, clock, &ts) != 0)
 		return -1;
 	return (long long)ts.tv_sec * NANOS + ts.tv_nsec;
 }
@@ -72,7 +72,7 @@ END_TEST()
 FN_TEST(the_syscall_reads_what_the_vdso_reads)
 {
 	long long vdso = now_ns(CLOCK_REALTIME);
-	long long raw = raw_realtime_ns();
+	long long raw = raw_clock_ns(CLOCK_REALTIME);
 
 	TEST_RES(raw - vdso, abs_ll(_ret) < 50000000LL);
 }
@@ -86,7 +86,7 @@ FN_TEST(a_nanosecond_step_moves_only_the_realtime_clock)
 	TEST_RES(step_by_ns(1500000000LL), _ret == TIME_OK || _ret == TIME_ERROR);
 	TEST_RES(now_ns(CLOCK_REALTIME) - real,
 		 _ret > 1400000000LL && _ret < 1700000000LL);
-	TEST_RES(raw_realtime_ns() - real,
+	TEST_RES(raw_clock_ns(CLOCK_REALTIME) - real,
 		 _ret > 1400000000LL && _ret < 1700000000LL);
 	TEST_RES(now_ns(CLOCK_MONOTONIC) - monotonic, _ret >= 0 && _ret < 100000000LL);
 
@@ -150,6 +150,53 @@ FN_TEST(a_frequency_correction_changes_the_rate_with_the_requested_sign)
 				      (_ret < -200000LL && _ret > -700000LL));
 	}
 	TEST_SUCC(set_frequency(0));
+}
+END_TEST()
+
+struct raw_bracket {
+	long long raw_before;
+	long long clock;
+	long long raw_after;
+};
+
+static struct raw_bracket bracket(clockid_t clock)
+{
+	struct raw_bracket sample;
+
+	sample.raw_before = now_ns(CLOCK_MONOTONIC_RAW);
+	sample.clock = now_ns(clock);
+	sample.raw_after = now_ns(CLOCK_MONOTONIC_RAW);
+	return sample;
+}
+
+static int slew_may_lie_within(struct raw_bracket start, struct raw_bracket end,
+			       long long low, long long high)
+{
+	long long elapsed = end.clock - start.clock;
+	long long least = elapsed - (end.raw_after - start.raw_before);
+	long long most = elapsed - (end.raw_before - start.raw_after);
+
+	return least < high && most > low;
+}
+
+FN_TEST(a_frequency_correction_slews_monotonic_and_boottime_but_not_raw)
+{
+	struct raw_bracket monotonic = bracket(CLOCK_MONOTONIC);
+	struct raw_bracket boottime = bracket(CLOCK_BOOTTIME);
+	long long before;
+	long long vdso;
+
+	TEST_SUCC(set_frequency(200L << 16));
+	usleep(2000000);
+	TEST_RES(slew_may_lie_within(monotonic, bracket(CLOCK_MONOTONIC), 200000LL, 700000LL),
+		 _ret);
+	TEST_RES(slew_may_lie_within(boottime, bracket(CLOCK_BOOTTIME), 200000LL, 700000LL),
+		 _ret);
+	TEST_SUCC(set_frequency(0));
+
+	before = raw_clock_ns(CLOCK_MONOTONIC);
+	vdso = now_ns(CLOCK_MONOTONIC);
+	TEST_RES(raw_clock_ns(CLOCK_MONOTONIC), before <= vdso && vdso <= _ret);
 }
 END_TEST()
 
