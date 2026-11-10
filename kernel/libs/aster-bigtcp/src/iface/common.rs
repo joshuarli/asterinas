@@ -25,6 +25,7 @@ use smoltcp::{
 use super::{
     Iface, InterfaceName, IpTap, NetworkRegistry,
     ip_tap::IpTaps,
+    link_state::{Carrier, LinkCounters, LinkState},
     poll::{PollContext, SocketTableAction},
     poll_iface::PollableIface,
     port::BindPortConfig,
@@ -47,6 +48,7 @@ pub struct IfaceCommon<E: Ext> {
     name: InterfaceName,
     type_: InterfaceType,
     flags: AtomicU32,
+    link_state: LinkState,
 
     interface: SpinLock<PollableIface<E>, BottomHalfDisabled>,
     used_ports: SpinLock<PortTable, BottomHalfDisabled>,
@@ -79,6 +81,13 @@ pub(super) enum PhyProcessResult {
 
 pub(super) trait PollPhy {
     fn is_loopback(&self) -> bool { false }
+
+    /// Returns the link-layer header length that the frame counters add to each frame.
+    ///
+    /// Linux gives loopback frames an Ethernet header, so its byte counters include one.
+    fn counted_header_len(&self) -> usize {
+        if self.is_loopback() { 14 } else { 0 }
+    }
     fn process(
         &self,
         packet: RxPacket<LinkLayer>,
@@ -167,6 +176,7 @@ impl<E: Ext> IfaceCommon<E> {
             name,
             type_,
             flags: AtomicU32::new(flags.bits()),
+            link_state: LinkState::new(type_, flags),
             interface: SpinLock::new(interface),
             used_ports: SpinLock::new(PortTable::new()),
             sockets: SpinLock::new(SocketTable::new()),
@@ -207,10 +217,23 @@ impl<E: Ext> IfaceCommon<E> {
         };
         let was_up = previous & InterfaceFlags::UP.bits() != 0;
         if was_up != up {
+            self.link_state.admin_changed(up);
             self.network.set_local_addresses(self.index, &self.ipv4_cidrs(), up);
             if !up { self.raw_ip_tx.lock().clear(); }
             self.taps.link_changed(up);
         }
+    }
+
+    pub(super) fn carrier(&self) -> Carrier {
+        self.link_state.carrier()
+    }
+
+    pub(super) fn link_counters(&self) -> LinkCounters {
+        self.link_state.counters()
+    }
+
+    pub(super) fn record_tx_frame(&self, phy: &dyn PollPhy, len: usize) {
+        self.link_state.record_tx(len + phy.counted_header_len());
     }
 
     /// Fails unless the interface is up.
@@ -415,7 +438,7 @@ impl<E: Ext> IfaceCommon<E> {
         let mut sockets = self.sockets.lock();
         let mut socket_actions = Vec::new();
 
-        let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, &self.network, &self.ip_taps, &self.raw_ip_tx, self.index, &mut socket_actions);
+        let mut context = PollContext::new(interface.as_mut(), &sockets, &udp_sockets, &self.network, &self.ip_taps, &self.raw_ip_tx, &self.link_state, self.index, &mut socket_actions);
         if link_up {
             context.poll_ingress(device, phy, &self.taps);
             context.poll_egress(device, phy, &self.taps);

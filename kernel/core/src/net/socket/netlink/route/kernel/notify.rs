@@ -6,7 +6,7 @@ use aster_bigtcp::iface::InterfaceFlags;
 
 use super::{
     addr::ipv4_to_addr,
-    link::iface_to_new_link,
+    link::{LinkStats, iface_to_new_link},
     route::record_to_route,
     rule::record_to_rule,
 };
@@ -92,6 +92,7 @@ pub(in crate::net) fn publish_network_events(events: Vec<NetworkEvent>) {
                     &notification_header(RequestOrigin::KERNEL),
                     iface,
                     changed_flags.bits(),
+                    LinkStats::Included,
                 )),
                 LINK_GROUP,
             ),

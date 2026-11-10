@@ -4,6 +4,7 @@ mod common;
 #[expect(clippy::module_inception)]
 mod iface;
 mod ip_tap;
+mod link_state;
 mod packet_slice;
 mod phy;
 mod poll;
@@ -22,6 +23,7 @@ pub use common::{BoundPort, BoundTcpPort, InterfaceFlags, InterfaceType};
 pub(crate) use common::UdpFailure;
 pub use iface::{Iface, PathMtu, PathMtuRoute};
 pub use ip_tap::IpTap;
+pub use link_state::{Carrier, LinkCounters};
 pub(crate) use packet_slice::PacketSlice;
 pub use phy::{EtherIface, IpIface};
 pub(crate) use poll_iface::{PollKey, PollableIfaceMut};

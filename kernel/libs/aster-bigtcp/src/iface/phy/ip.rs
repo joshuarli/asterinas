@@ -117,6 +117,7 @@ impl<D: WithDevice + 'static, E: Ext> Iface<E> for IpIface<D, E> {
         let packet = link_packet_from_bytes::<D::Device>(payload)?;
         self.common.tap_outgoing(self, origin, &packet);
         let packet = packet.to_rx_packet().ok_or(LinkSendError::NoMemory)?;
+        self.common.record_tx_frame(self, packet.len());
         self.looped.lock().push_back(packet);
         Ok(())
     }

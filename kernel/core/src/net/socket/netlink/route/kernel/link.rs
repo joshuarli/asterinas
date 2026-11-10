@@ -15,7 +15,10 @@ use crate::{
         iface::{DEFAULT_TX_QUEUE_LEN, Iface, iter_all_ifaces},
         socket::netlink::{
             message::{CMsgSegHdr, CSegmentType, GetRequestFlags, SegHdrCommonFlags},
-            route::message::{LinkAttr, LinkSegment, LinkSegmentBody, OperState, RtnlSegment},
+            route::message::{
+                CLinkStats64, LinkAttr, LinkSegment, LinkSegmentBody, OperState, RtExtFilter,
+                RtnlSegment,
+            },
         },
     },
     prelude::*,
@@ -27,6 +30,11 @@ const UNSPECIFIED_LINK_ADDR: EthernetAddress = EthernetAddress([0; 6]);
 
 pub(super) fn do_get_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegment>> {
     let filter_by = FilterBy::from_request(request_segment)?;
+    let stats = if skips_stats(request_segment) {
+        LinkStats::Skipped
+    } else {
+        LinkStats::Included
+    };
 
     let mut response_segments: Vec<RtnlSegment> = iter_all_ifaces()
         // Filter to include only requested links.
@@ -35,7 +43,7 @@ pub(super) fn do_get_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
             FilterBy::Name(name) => *name == iface.name().as_cstr(),
             FilterBy::Dump => true,
         })
-        .map(|iface| iface_to_new_link(request_segment.header(), iface, 0))
+        .map(|iface| iface_to_new_link(request_segment.header(), iface, 0, stats))
         .map(RtnlSegment::NewLink)
         .collect();
 
@@ -48,6 +56,19 @@ pub(super) fn do_get_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
     finish_response(request_segment.header(), dump_all, &mut response_segments);
 
     Ok(response_segments)
+}
+
+/// Whether a link message carries the link's counters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LinkStats {
+    Included,
+    Skipped,
+}
+
+fn skips_stats(request_segment: &LinkSegment) -> bool {
+    request_segment.attrs().iter().any(|attr| {
+        matches!(attr, LinkAttr::ExtMask(filter) if filter.contains(RtExtFilter::SKIP_STATS))
+    })
 }
 
 enum FilterBy<'a> {
@@ -141,6 +162,7 @@ pub(super) fn iface_to_new_link(
     request_header: &CMsgSegHdr,
     iface: &Arc<Iface>,
     change: u32,
+    stats: LinkStats,
 ) -> LinkSegment {
     let header = CMsgSegHdr {
         len: 0,
@@ -162,13 +184,17 @@ pub(super) fn iface_to_new_link(
     // See the reference below for the complete attribute list and ordering.
     // TODO: Asterinas currently reports only a subset of these attributes.
     // Reference: <https://elixir.bootlin.com/linux/v7.1/source/net/core/rtnetlink.c#L2050>.
-    let mut attrs = Vec::with_capacity(7);
+    let carrier = iface.carrier();
+    let mut attrs = Vec::with_capacity(12);
     attrs.extend([
         LinkAttr::Name(*iface.name()),
         LinkAttr::TxqLen(DEFAULT_TX_QUEUE_LEN),
         LinkAttr::OperState(oper_state(iface)),
         LinkAttr::Mtu(iface.mtu() as u32),
-        LinkAttr::Carrier(1),
+        LinkAttr::Carrier(u8::from(carrier.on)),
+        LinkAttr::CarrierChanges(carrier.changes()),
+        LinkAttr::CarrierUpCount(carrier.up_count),
+        LinkAttr::CarrierDownCount(carrier.down_count),
     ]);
 
     let (link_addr, link_broadcast_addr) = match iface.ethernet_addr() {
@@ -179,6 +205,18 @@ pub(super) fn iface_to_new_link(
         LinkAttr::Address(link_addr),
         LinkAttr::Broadcast(link_broadcast_addr),
     ]);
+
+    if stats == LinkStats::Included {
+        let counters = iface.link_counters();
+        let stats = CLinkStats64 {
+            rx_packets: counters.rx_packets,
+            tx_packets: counters.tx_packets,
+            rx_bytes: counters.rx_bytes,
+            tx_bytes: counters.tx_bytes,
+            ..CLinkStats64::default()
+        };
+        attrs.extend([LinkAttr::Stats64(stats), LinkAttr::Stats(stats.truncated())]);
+    }
 
     LinkSegment::new(header, link_message, attrs)
 }

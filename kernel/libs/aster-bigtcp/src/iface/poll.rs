@@ -17,6 +17,7 @@ use super::{
     common::{PhyProcessResult, PollPhy, TxPacketWithDst},
     packet_slice::PacketSlice,
     poll_iface::PollableIfaceMut,
+    link_state::LinkState,
     tap::{FrameDirection, LinkTaps},
     wire::{
         icmp,
@@ -37,10 +38,14 @@ fn send_frame(
     device: &mut dyn AnyNetworkDevice,
     phy: &dyn PollPhy,
     taps: &LinkTaps,
+    link_state: &LinkState,
     packet: TxPacket<LinkLayer>,
 ) -> Result<(), NetError> {
     taps.deliver(phy, FrameDirection::Outgoing, None, || packet.reader());
-    device.send(packet)
+    let len = packet.len() + phy.counted_header_len();
+    device.send(packet)?;
+    link_state.record_tx(len);
+    Ok(())
 }
 
 pub(super) struct PollContext<'a, E: Ext> {
@@ -50,6 +55,7 @@ pub(super) struct PollContext<'a, E: Ext> {
     network_registry: &'a super::NetworkRegistry<E>,
     ip_taps: &'a super::ip_tap::IpTaps,
     raw_ip_tx: &'a SpinLock<VecDeque<TxPacketWithDst>, BottomHalfDisabled>,
+    link_state: &'a LinkState,
     ifindex: u32,
     actions: &'a mut Vec<SocketTableAction<E>>,
 }
@@ -71,6 +77,7 @@ impl<'a, E: Ext> PollContext<'a, E> {
         network_registry: &'a super::NetworkRegistry<E>,
         ip_taps: &'a super::ip_tap::IpTaps,
         raw_ip_tx: &'a SpinLock<VecDeque<TxPacketWithDst>, BottomHalfDisabled>,
+        link_state: &'a LinkState,
         ifindex: u32,
         actions: &'a mut Vec<SocketTableAction<E>>,
     ) -> Self {
@@ -81,6 +88,7 @@ impl<'a, E: Ext> PollContext<'a, E> {
             network_registry,
             ip_taps,
             raw_ip_tx,
+            link_state,
             ifindex,
             actions,
         }
@@ -109,6 +117,7 @@ impl<E: Ext> PollContext<'_, E> {
                 }
             };
 
+            self.link_state.record_rx(rx_packet.len() + phy.counted_header_len());
             taps.deliver(phy, FrameDirection::Incoming, None, || rx_packet.reader());
 
             let Some(processed) = phy.process(rx_packet, self.iface.context_mut(), ipv4_cidrs) else {
@@ -119,7 +128,7 @@ impl<E: Ext> PollContext<'_, E> {
                 PhyProcessResult::Ipv4(packet) => (packet, Some(ip::Version::V4)),
                 PhyProcessResult::Ipv6(packet) => (packet, Some(ip::Version::V6)),
                 PhyProcessResult::Tx(packet) => {
-                    if let Err(err) = send_frame(device, phy, taps, packet) {
+                    if let Err(err) = send_frame(device, phy, taps, self.link_state, packet) {
                         ostd::error!("failed to send a network packet: {:?}", err);
                     }
                     continue;
@@ -141,7 +150,7 @@ impl<E: Ext> PollContext<'_, E> {
             } else { packet };
             if let Some(reply) = self.parse_and_process_ip(phy, packet, ip_version, device.mtu(), false, self.ifindex)
                 && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
-                && let Err(err) = send_frame(device, phy, taps, tx_packet)
+                && let Err(err) = send_frame(device, phy, taps, self.link_state, tx_packet)
             {
                 ostd::error!("failed to send a network packet: {:?}", err);
             }
@@ -154,7 +163,7 @@ impl<E: Ext> PollContext<'_, E> {
             if let Some(reply) = self.parse_and_process_ip(phy, forwarded.packet, Some(ip::Version::V4), device.mtu(), true, forwarded.ingress_ifindex)
                 && link_up
                 && let Some(tx_packet) = phy.dispatch(reply, self.iface.context_mut(), ipv4_cidrs)
-                && let Err(err) = send_frame(device, phy, taps, tx_packet)
+                && let Err(err) = send_frame(device, phy, taps, self.link_state, tx_packet)
             { ostd::error!("failed to send a network packet: {:?}", err); }
         }
     }
@@ -676,7 +685,7 @@ impl<E: Ext> PollContext<'_, E> {
         let ipv4_cidrs = self.iface.ipv4_cidrs();
         while device.can_send() {
             if let Some(frame) = phy.take_neighbor_frame(self.iface.context_mut(), ipv4_cidrs) {
-                if let Err(err) = send_frame(device, phy, taps, frame) {
+                if let Err(err) = send_frame(device, phy, taps, self.link_state, frame) {
                     ostd::error!("failed to send a network packet: {:?}", err);
                     break;
                 }
@@ -713,7 +722,7 @@ impl<E: Ext> PollContext<'_, E> {
 
             if let Some(packet) = packet
                 && let Some(tx_packet) = phy.dispatch(packet, self.iface.context_mut(), ipv4_cidrs)
-                && let Err(err) = send_frame(device, phy, taps, tx_packet)
+                && let Err(err) = send_frame(device, phy, taps, self.link_state, tx_packet)
             {
                 ostd::error!("failed to send a network packet: {:?}", err);
                 break;
@@ -761,7 +770,7 @@ impl<E: Ext> PollContext<'_, E> {
 
             let (reply, became_dead) =
                 TcpConnectionBg::dispatch(&socket, &mut self.iface, |iface, ip_repr, tcp_repr| {
-                    let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.network_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, self.actions);
+                    let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.network_registry, self.ip_taps, self.raw_ip_tx, self.link_state, self.ifindex, self.actions);
 
                     if !link_up || !this.iface.is_unicast_local(ip_repr.dst_addr()) {
                         tx_packet = this.emit_tcp(phy, ip_repr, tcp_repr);
@@ -882,7 +891,7 @@ impl<E: Ext> PollContext<'_, E> {
             let (cx, pending, fragments, reassembly, ipv4_cidrs) = self.iface.inner_mut();
             socket.dispatch(self.ifindex, cx, |cx, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation, ipv4_options| {
                 let iface = PollableIfaceMut::new(cx, pending, fragments, reassembly, ipv4_cidrs);
-                let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.network_registry, self.ip_taps, self.raw_ip_tx, self.ifindex, &mut actions);
+                let mut this = PollContext::new(iface, self.sockets, self.udp_sockets, self.network_registry, self.ip_taps, self.raw_ip_tx, self.link_state, self.ifindex, &mut actions);
 
                 if ipv4_options.is_some() {
                     tx_packet = this.emit_udp(phy, ip_repr, udp_repr, udp_payload, tos, next_hop, fragmentation, ipv4_options);

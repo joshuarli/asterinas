@@ -95,6 +95,94 @@ pub(crate) enum OperState {
     Up = 6,
 }
 
+macro_rules! link_stats {
+    ($(#[$meta:meta])* $name:ident, $counter:ty $(, $extra:ident)*) => {
+        $(#[$meta])*
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Immutable, IntoBytes)]
+        pub(crate) struct $name {
+            pub(crate) rx_packets: $counter,
+            pub(crate) tx_packets: $counter,
+            pub(crate) rx_bytes: $counter,
+            pub(crate) tx_bytes: $counter,
+            pub(crate) rx_errors: $counter,
+            pub(crate) tx_errors: $counter,
+            pub(crate) rx_dropped: $counter,
+            pub(crate) tx_dropped: $counter,
+            pub(crate) multicast: $counter,
+            pub(crate) collisions: $counter,
+            pub(crate) rx_length_errors: $counter,
+            pub(crate) rx_over_errors: $counter,
+            pub(crate) rx_crc_errors: $counter,
+            pub(crate) rx_frame_errors: $counter,
+            pub(crate) rx_fifo_errors: $counter,
+            pub(crate) rx_missed_errors: $counter,
+            pub(crate) tx_aborted_errors: $counter,
+            pub(crate) tx_carrier_errors: $counter,
+            pub(crate) tx_fifo_errors: $counter,
+            pub(crate) tx_heartbeat_errors: $counter,
+            pub(crate) tx_window_errors: $counter,
+            pub(crate) rx_compressed: $counter,
+            pub(crate) tx_compressed: $counter,
+            pub(crate) rx_nohandler: $counter,
+            $(pub(crate) $extra: $counter,)*
+        }
+    };
+}
+
+link_stats!(
+    /// `struct rtnl_link_stats64` in Linux.
+    ///
+    /// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/if_link.h>.
+    CLinkStats64,
+    u64,
+    rx_otherhost_dropped
+);
+
+link_stats!(
+    /// `struct rtnl_link_stats` in Linux, whose counters wrap at 32 bits.
+    ///
+    /// Unlike [`CLinkStats64`], it has no `rx_otherhost_dropped` counter.
+    ///
+    /// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/if_link.h>.
+    CLinkStats,
+    u32
+);
+
+const _: () = assert!(size_of::<CLinkStats64>() == 200 && size_of::<CLinkStats>() == 96);
+
+impl CLinkStats64 {
+    /// Returns the counters truncated to 32 bits, as Linux copies them into `IFLA_STATS`.
+    pub(crate) fn truncated(&self) -> CLinkStats {
+        CLinkStats {
+            rx_packets: self.rx_packets as u32,
+            tx_packets: self.tx_packets as u32,
+            rx_bytes: self.rx_bytes as u32,
+            tx_bytes: self.tx_bytes as u32,
+            rx_errors: self.rx_errors as u32,
+            tx_errors: self.tx_errors as u32,
+            rx_dropped: self.rx_dropped as u32,
+            tx_dropped: self.tx_dropped as u32,
+            multicast: self.multicast as u32,
+            collisions: self.collisions as u32,
+            rx_length_errors: self.rx_length_errors as u32,
+            rx_over_errors: self.rx_over_errors as u32,
+            rx_crc_errors: self.rx_crc_errors as u32,
+            rx_frame_errors: self.rx_frame_errors as u32,
+            rx_fifo_errors: self.rx_fifo_errors as u32,
+            rx_missed_errors: self.rx_missed_errors as u32,
+            tx_aborted_errors: self.tx_aborted_errors as u32,
+            tx_carrier_errors: self.tx_carrier_errors as u32,
+            tx_fifo_errors: self.tx_fifo_errors as u32,
+            tx_heartbeat_errors: self.tx_heartbeat_errors as u32,
+            tx_window_errors: self.tx_window_errors as u32,
+            rx_compressed: self.rx_compressed as u32,
+            tx_compressed: self.tx_compressed as u32,
+            rx_nohandler: self.rx_nohandler as u32,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum LinkAttr {
     // FIXME: Linux link-layer addresses have device-specific lengths.
@@ -107,6 +195,11 @@ pub(crate) enum LinkAttr {
     TxqLen(u32),
     OperState(OperState),
     Carrier(u8),
+    CarrierChanges(u32),
+    CarrierUpCount(u32),
+    CarrierDownCount(u32),
+    Stats64(CLinkStats64),
+    Stats(CLinkStats),
     LinkMode(u8),
     ExtMask(RtExtFilter),
 }
@@ -121,6 +214,11 @@ impl LinkAttr {
             LinkAttr::TxqLen(_) => LinkAttrClass::TXQLEN,
             LinkAttr::OperState(_) => LinkAttrClass::OPERSTATE,
             LinkAttr::Carrier(_) => LinkAttrClass::CARRIER,
+            LinkAttr::CarrierChanges(_) => LinkAttrClass::CARRIER_CHANGES,
+            LinkAttr::CarrierUpCount(_) => LinkAttrClass::CARRIER_UP_COUNT,
+            LinkAttr::CarrierDownCount(_) => LinkAttrClass::CARRIER_DOWN_COUNT,
+            LinkAttr::Stats64(_) => LinkAttrClass::STATS64,
+            LinkAttr::Stats(_) => LinkAttrClass::STATS,
             LinkAttr::LinkMode(_) => LinkAttrClass::LINKMODE,
             LinkAttr::ExtMask(_) => LinkAttrClass::EXT_MASK,
         }
@@ -141,6 +239,11 @@ impl Attribute for LinkAttr {
             LinkAttr::TxqLen(txq_len) => txq_len.as_bytes(),
             LinkAttr::OperState(state) => state.as_bytes(),
             LinkAttr::Carrier(carrier) => carrier.as_bytes(),
+            LinkAttr::CarrierChanges(count)
+            | LinkAttr::CarrierUpCount(count)
+            | LinkAttr::CarrierDownCount(count) => count.as_bytes(),
+            LinkAttr::Stats64(stats) => stats.as_bytes(),
+            LinkAttr::Stats(stats) => stats.as_bytes(),
             LinkAttr::LinkMode(link_mode) => link_mode.as_bytes(),
             LinkAttr::ExtMask(ext_filter) => ext_filter.as_bytes(),
         }

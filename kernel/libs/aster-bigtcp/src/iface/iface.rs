@@ -8,7 +8,7 @@ use smoltcp::{
 };
 
 use super::{
-    BindPortConfig, BoundTcpPort, InterfaceFlags, InterfaceName, InterfaceType,
+    BindPortConfig, Carrier, LinkCounters, BoundTcpPort, InterfaceFlags, InterfaceName, InterfaceType,
     LinkTap, IpTap,
 };
 use crate::{
@@ -87,6 +87,16 @@ impl<E: Ext> dyn Iface<E> {
     /// In Linux, the name is usually the driver name followed by a unit number.
     pub fn name(&self) -> &InterfaceName {
         self.common().name()
+    }
+
+    /// Returns the carrier of the iface and how many times it gained and lost one.
+    pub fn carrier(&self) -> Carrier {
+        self.common().carrier()
+    }
+
+    /// Returns the frames and bytes that the iface received and transmitted.
+    pub fn link_counters(&self) -> LinkCounters {
+        self.common().link_counters()
     }
 
     /// Registers an observer of the link-layer frames of the iface.

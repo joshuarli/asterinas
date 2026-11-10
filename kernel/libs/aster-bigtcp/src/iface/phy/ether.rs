@@ -116,7 +116,10 @@ impl<D: WithDevice + 'static, E: Ext> Iface<E> for EtherIface<D, E> {
                 return Err(LinkSendError::Busy);
             }
             self.common.tap_outgoing(self, origin, &packet);
-            device.send(packet).map_err(|_| LinkSendError::Busy)
+            let len = packet.len();
+            device.send(packet).map_err(|_| LinkSendError::Busy)?;
+            self.common.record_tx_frame(self, len);
+            Ok(())
         })
     }
 }
