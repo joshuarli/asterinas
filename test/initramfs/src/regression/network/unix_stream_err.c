@@ -114,6 +114,63 @@ FN_TEST(scm_rights)
 }
 END_TEST()
 
+static int send_fd(int sk, int fd)
+{
+	char byte = 'f';
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	struct iovec iov = { .iov_base = &byte, .iov_len = 1 };
+	struct msghdr mhdr = { .msg_iov = &iov,
+			       .msg_iovlen = 1,
+			       .msg_control = cbuf,
+			       .msg_controllen = sizeof(cbuf) };
+	struct cmsghdr *chdr = CMSG_FIRSTHDR(&mhdr);
+
+	chdr->cmsg_level = SOL_SOCKET;
+	chdr->cmsg_type = SCM_RIGHTS;
+	chdr->cmsg_len = CMSG_LEN(sizeof(int));
+	memcpy(CMSG_DATA(chdr), &fd, sizeof(int));
+	return sendmsg(sk, &mhdr, 0);
+}
+
+static int recv_fd(int sk, int flags)
+{
+	char byte;
+	char cbuf[CMSG_SPACE(sizeof(int))];
+	struct iovec iov = { .iov_base = &byte, .iov_len = 1 };
+	struct msghdr mhdr = { .msg_iov = &iov,
+			       .msg_iovlen = 1,
+			       .msg_control = cbuf,
+			       .msg_controllen = sizeof(cbuf) };
+	int fd;
+
+	if (recvmsg(sk, &mhdr, flags) != 1 || !CMSG_FIRSTHDR(&mhdr))
+		return -1;
+	memcpy(&fd, CMSG_DATA(CMSG_FIRSTHDR(&mhdr)), sizeof(int));
+	return fd;
+}
+
+FN_TEST(scm_rights_cmsg_cloexec)
+{
+	int fildes[2];
+	int received;
+
+	TEST_SUCC(socketpair(AF_UNIX, SOCK_STREAM, 0, fildes));
+
+	TEST_RES(send_fd(fildes[0], fildes[0]), _ret == 1);
+	received = TEST_SUCC(recv_fd(fildes[1], MSG_CMSG_CLOEXEC));
+	TEST_RES(fcntl(received, F_GETFD), _ret == FD_CLOEXEC);
+	TEST_SUCC(close(received));
+
+	TEST_RES(send_fd(fildes[0], fildes[0]), _ret == 1);
+	received = TEST_SUCC(recv_fd(fildes[1], 0));
+	TEST_RES(fcntl(received, F_GETFD), _ret == 0);
+	TEST_SUCC(close(received));
+
+	TEST_SUCC(close(fildes[0]));
+	TEST_SUCC(close(fildes[1]));
+}
+END_TEST()
+
 #define MAKE_SOCKOPTION_INHERIT_TEST(before_listen, after_listen,           \
 				     after_connect, after_accept)           \
 	int sk2_listen, sk2_connected, sk2_accepted;                        \

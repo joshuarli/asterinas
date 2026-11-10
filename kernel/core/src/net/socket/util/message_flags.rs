@@ -51,7 +51,7 @@ bitflags! {
         const MSG_CMSG_CLOEXEC = 0x40000000;
 
         const SUPPORTED        = RecvFlags::MSG_PEEK.bits | RecvFlags::MSG_TRUNC.bits
-            | RecvFlags::MSG_ERRQUEUE.bits;
+            | RecvFlags::MSG_ERRQUEUE.bits | RecvFlags::MSG_CMSG_CLOEXEC.bits;
     }
 }
 
