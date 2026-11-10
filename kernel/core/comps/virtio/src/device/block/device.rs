@@ -109,7 +109,7 @@ impl BlockDevice {
     /// processes the request.
     pub fn handle_requests(&self) {
         let request = self.queue.dequeue();
-        info!("Handle Request: {:?}", request);
+        debug!("Handle Request: {:?}", request);
         match request.type_() {
             BioType::Read => self.device.read(request),
             BioType::Write => self.device.write(request),
@@ -250,7 +250,7 @@ impl DeviceInner {
 
     /// Handles the IRQ issued from the device.
     fn handle_irq(&self) {
-        info!("block device handle IRQ");
+        debug!("block device handle IRQ");
         // When we enter the IRQs handling function,
         // IRQs have already been disabled,
         // so there is no need to call `disable_irq`.
