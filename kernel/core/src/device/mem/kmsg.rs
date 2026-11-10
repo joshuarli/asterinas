@@ -2,14 +2,14 @@
 
 //! The kernel message ring behind `/dev/kmsg`.
 //!
-//! The ring holds the records that user space writes to `/dev/kmsg`. Asterinas prints its own
-//! log to the console and does not add it to the ring.
+//! Reads return the kernel's own log records and the records that user space writes.
 //!
 //! Reference: <https://elixir.bootlin.com/linux/v7.1/source/kernel/printk/printk.c> (`devkmsg_*`).
 
 use alloc::format;
 
-use aster_time::read_raw_monotonic_time;
+use aster_logger::ring::{self, Cursor, ReadFailure, Readiness, RecordCopy};
+use ostd::sync::LocalIrqDisabled;
 
 use crate::{
     events::IoEvents,
@@ -21,11 +21,8 @@ use crate::{
     process::signal::{PollHandle, Pollable, Pollee},
 };
 
-/// The text that the ring holds before it drops its oldest records (`1 << CONFIG_LOG_BUF_SHIFT`).
-const RING_TEXT_CAPACITY: usize = 1 << 17;
-
 /// The longest write that forms one record (`PRINTKRB_RECORD_MAX`).
-const WRITE_LIMIT: usize = 1024;
+const WRITE_LIMIT: usize = ring::RECORD_TEXT_LIMIT;
 
 /// The level of a written record without a priority prefix (`CONFIG_MESSAGE_LOGLEVEL_DEFAULT`).
 const DEFAULT_LEVEL: u32 = 4;
@@ -33,79 +30,48 @@ const DEFAULT_LEVEL: u32 = 4;
 /// The facility of a written record whose prefix names none (`LOG_USER`).
 const USER_FACILITY: u32 = 1;
 
-struct Record {
-    sequence: u64,
-    microseconds: u64,
-    priority: u32,
-    text: Vec<u8>,
+/// Formats a record as one read of `/dev/kmsg` returns it.
+fn render(record: &RecordCopy) -> Vec<u8> {
+    let mut line = format!(
+        "{},{},{},-;",
+        record.priority, record.sequence, record.microseconds
+    )
+    .into_bytes();
+    escape_into(&mut line, record.text());
+    line.push(b'\n');
+    line
 }
 
-impl Record {
-    /// Formats the record as one read of `/dev/kmsg` returns it.
-    fn render(&self) -> Vec<u8> {
-        let mut line = format!(
-            "{},{},{},-;",
-            self.priority, self.sequence, self.microseconds
-        )
-        .into_bytes();
-        for &byte in &self.text {
-            if byte < b' ' || byte >= 0x7f || byte == b'\\' {
-                line.extend_from_slice(format!("\\x{:02x}", byte).as_bytes());
-            } else {
-                line.push(byte);
-            }
-        }
-        line.push(b'\n');
-        line
-    }
-}
-
-struct Ring {
-    records: VecDeque<Record>,
-    next_sequence: u64,
-    text_len: usize,
-    readers: Vec<Weak<Reader>>,
-}
-
-static RING: Mutex<Ring> = Mutex::new(Ring {
-    records: VecDeque::new(),
-    next_sequence: 0,
-    text_len: 0,
-    readers: Vec::new(),
-});
-
-impl Ring {
-    fn first_sequence(&self) -> u64 {
-        self.records
-            .front()
-            .map_or(self.next_sequence, |record| record.sequence)
-    }
-
-    fn record(&self, sequence: u64) -> Option<&Record> {
-        let index = sequence.checked_sub(self.first_sequence())?;
-        self.records.get(usize::try_from(index).ok()?)
-    }
-
-    fn push(&mut self, priority: u32, text: Vec<u8>) {
-        self.text_len += text.len();
-        self.records.push_back(Record {
-            sequence: self.next_sequence,
-            microseconds: read_raw_monotonic_time().as_micros() as u64,
-            priority,
-            text,
-        });
-        self.next_sequence += 1;
-        while self.text_len > RING_TEXT_CAPACITY
-            && let Some(dropped) = self.records.pop_front()
-        {
-            self.text_len -= dropped.text.len();
+fn escape_into(line: &mut Vec<u8>, text: &[u8]) {
+    for &byte in text {
+        if byte < b' ' || byte >= 0x7f || byte == b'\\' {
+            line.extend_from_slice(format!("\\x{:02x}", byte).as_bytes());
+        } else {
+            line.push(byte);
         }
     }
+}
 
-    fn live_readers(&mut self) -> Vec<Arc<Reader>> {
-        self.readers.retain(|reader| reader.strong_count() > 0);
-        self.readers.iter().filter_map(Weak::upgrade).collect()
+static READERS: SpinLock<Vec<Weak<Reader>>, LocalIrqDisabled> = SpinLock::new(Vec::new());
+
+fn live_readers() -> Vec<Arc<Reader>> {
+    let mut readers = READERS.lock();
+    readers.retain(|reader| reader.strong_count() > 0);
+    readers.iter().filter_map(Weak::upgrade).collect()
+}
+
+fn notify_readers() {
+    for reader in live_readers() {
+        reader.pollee.notify(IoEvents::IN);
     }
+}
+
+pub(super) fn init() {
+    ostd::timer::register_callback_on_cpu(|| {
+        if ring::take_kernel_record_pending() {
+            notify_readers();
+        }
+    });
 }
 
 /// Splits a write into the priority and the text of its record.
@@ -135,7 +101,7 @@ fn parse_write(line: &[u8]) -> (u32, &[u8]) {
 }
 
 struct Reader {
-    cursor: Mutex<u64>,
+    cursor: Mutex<Cursor>,
     pollee: Pollee,
 }
 
@@ -147,45 +113,39 @@ pub(super) struct KmsgFile {
 impl KmsgFile {
     /// Opens the ring at its oldest record.
     pub(super) fn open() -> Self {
-        let mut ring = RING.lock();
         let reader = Arc::new(Reader {
-            cursor: Mutex::new(ring.first_sequence()),
+            cursor: Mutex::new(ring::oldest()),
             pollee: Pollee::new(),
         });
-        let _ = ring.live_readers();
-        ring.readers.push(Arc::downgrade(&reader));
+        let mut readers = READERS.lock();
+        readers.retain(|reader| reader.strong_count() > 0);
+        readers.push(Arc::downgrade(&reader));
+        drop(readers);
         Self { reader }
     }
 
     fn check_io_events(&self) -> IoEvents {
-        let ring = RING.lock();
-        let cursor = *self.reader.cursor.lock();
-        if cursor < ring.first_sequence() {
-            IoEvents::IN | IoEvents::ERR | IoEvents::PRI
-        } else if cursor < ring.next_sequence {
-            IoEvents::IN
-        } else {
-            IoEvents::empty()
+        match ring::readiness(*self.reader.cursor.lock()) {
+            Readiness::Overrun => IoEvents::IN | IoEvents::ERR | IoEvents::PRI,
+            Readiness::Ready => IoEvents::IN,
+            Readiness::Drained => IoEvents::empty(),
         }
     }
 
     fn try_read(&self, writer: &mut VmWriter) -> Result<usize> {
-        let ring = RING.lock();
-        let mut cursor = self.reader.cursor.lock();
-        let first = ring.first_sequence();
-        if *cursor < first {
-            *cursor = first;
-            drop(cursor);
-            self.reader.pollee.invalidate();
-            return_errno_with_message!(Errno::EPIPE, "the ring dropped records before they were read");
-        }
-        let Some(record) = ring.record(*cursor) else {
-            return_errno_with_message!(Errno::EAGAIN, "the ring has no record to read");
-        };
-        let line = record.render();
-        *cursor += 1;
-        drop(cursor);
+        let read = ring::read(&mut self.reader.cursor.lock());
         self.reader.pollee.invalidate();
+        let record = match read {
+            Ok(record) => record,
+            Err(ReadFailure::Overrun) => return_errno_with_message!(
+                Errno::EPIPE,
+                "the ring dropped records before they were read"
+            ),
+            Err(ReadFailure::Drained) => {
+                return_errno_with_message!(Errno::EAGAIN, "the ring has no record to read")
+            }
+        };
+        let line = render(&record);
         if line.len() > writer.avail() {
             return_errno_with_message!(
                 Errno::EINVAL,
@@ -236,15 +196,8 @@ impl FileOps for KmsgFile {
             .read_fallible(&mut VmWriter::from(buffer.as_mut_slice()))
             .map_err(|(error, _)| error)?;
         let (priority, text) = parse_write(&buffer);
-
-        let readers = {
-            let mut ring = RING.lock();
-            ring.push(priority, text.to_vec());
-            ring.live_readers()
-        };
-        for reader in readers {
-            reader.pollee.notify(IoEvents::IN);
-        }
+        ring::push_user(priority, text);
+        notify_readers();
         Ok(len)
     }
 }
@@ -259,10 +212,9 @@ impl PerOpenFileOps for KmsgFile {
     }
 
     fn seek_position(&self, pos: SeekFrom) -> Option<Result<usize>> {
-        let ring = RING.lock();
-        let sequence = match pos {
-            SeekFrom::Start(0) => ring.first_sequence(),
-            SeekFrom::End(0) => ring.next_sequence,
+        let cursor = match pos {
+            SeekFrom::Start(0) => ring::oldest(),
+            SeekFrom::End(0) => ring::newest(),
             SeekFrom::Current(0) => {
                 return Some(Err(Error::with_message(
                     Errno::EINVAL,
@@ -276,8 +228,7 @@ impl PerOpenFileOps for KmsgFile {
                 )));
             }
         };
-        *self.reader.cursor.lock() = sequence;
-        drop(ring);
+        *self.reader.cursor.lock() = cursor;
         self.reader.pollee.invalidate();
         Some(Ok(0))
     }
@@ -308,12 +259,8 @@ mod test {
 
     #[ktest]
     fn a_record_escapes_control_bytes_and_backslashes() {
-        let record = Record {
-            sequence: 7,
-            microseconds: 42,
-            priority: 14,
-            text: b"tab\there\\back".to_vec(),
-        };
-        assert_eq!(record.render(), b"14,7,42,-;tab\\x09here\\x5cback\n");
+        let mut line = Vec::new();
+        escape_into(&mut line, b"tab\there\\back");
+        assert_eq!(line, b"tab\\x09here\\x5cback");
     }
 }

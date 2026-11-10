@@ -1,21 +1,31 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::time::Duration;
+use core::{
+    sync::atomic::{AtomicU8, Ordering},
+    time::Duration,
+};
 
 use ostd::{
-    log::{Level, Record},
+    log::{Level, LevelFilter, Record},
     timer::Jiffies,
 };
+
+use crate::ring;
 
 /// The logger used for Asterinas.
 struct AsterLogger;
 
 static LOGGER: AsterLogger = AsterLogger;
 
+static CONSOLE_LEVEL: AtomicU8 = AtomicU8::new(LevelFilter::Off as u8);
+
 impl ostd::log::Log for AsterLogger {
     fn log(&self, record: &Record) {
-        let timestamp = Jiffies::elapsed().as_duration();
-        print_logs(record, &timestamp);
+        ring::push_kernel(record.level() as u8, record.prefix(), record.args());
+        if (record.level() as u8) < CONSOLE_LEVEL.load(Ordering::Relaxed) {
+            let timestamp = Jiffies::elapsed().as_duration();
+            print_logs(record, &timestamp);
+        }
     }
 }
 
@@ -62,5 +72,8 @@ fn print_logs(record: &Record, timestamp: &Duration) {
 }
 
 pub(super) fn init() {
+    let console_level = ostd::log::max_level();
+    CONSOLE_LEVEL.store(console_level as u8, Ordering::Relaxed);
     ostd::log::inject_logger(&LOGGER);
+    ostd::log::set_max_level(console_level.max(LevelFilter::Info));
 }
