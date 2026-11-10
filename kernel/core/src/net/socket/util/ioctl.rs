@@ -165,42 +165,12 @@ fn network_device_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
     })
 }
 
-/// Flags that user space can request to change on a Linux network device.
-///
-/// Reference: `dev_change_flags` in <https://elixir.bootlin.com/linux/v7.1/source/net/core/dev.c>.
-const USER_CHANGEABLE_FLAGS: InterfaceFlags = InterfaceFlags::UP
-    .union(InterfaceFlags::DEBUG)
-    .union(InterfaceFlags::NOTRAILERS)
-    .union(InterfaceFlags::NOARP)
-    .union(InterfaceFlags::DYNAMIC)
-    .union(InterfaceFlags::MULTICAST)
-    .union(InterfaceFlags::PORTSEL)
-    .union(InterfaceFlags::AUTOMEDIA)
-    .union(InterfaceFlags::PROMISC)
-    .union(InterfaceFlags::ALLMULTI);
-
 /// Applies the requested flags of `SIOCSIFFLAGS`.
-///
-/// Only `IFF_UP` can change; a request that changes any other user-changeable flag fails
-/// instead of being ignored.
 fn set_iface_flags(ifreq: &CIfReq) -> Result<()> {
     let ifreq = *ifreq;
     let iface = ifreq.get_iface_by_name()?;
     let requested = InterfaceFlags::from_bits_truncate(u32::from(*ifreq.data.flags() as u16));
-    let current = iface.flags();
-
-    let changed = (requested ^ current) & USER_CHANGEABLE_FLAGS;
-    if !(changed - InterfaceFlags::UP).is_empty() {
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "only the up flag of an interface can be changed"
-        );
-    }
-    if changed.contains(InterfaceFlags::UP) {
-        config::set_administratively_up(iface, requested.contains(InterfaceFlags::UP));
-    }
-
-    Ok(())
+    config::change_flags(iface, requested)
 }
 
 /// Applies `SIOCSIFADDR`.

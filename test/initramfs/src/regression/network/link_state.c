@@ -110,6 +110,64 @@ static int link_lower_up(const char *name)
 	return read_link(name, &facts) ? -1 : !!(facts.flags & IFF_LOWER_UP);
 }
 
+struct link_request {
+	uint16_t flags;
+	int index;
+	const char *name;
+	unsigned int ifi_flags;
+	unsigned int change;
+	uint32_t mtu;
+};
+
+static int new_link(struct link_request request)
+{
+	uint8_t payload[256] = { 0 };
+	struct ifinfomsg *body = (struct ifinfomsg *)payload;
+	size_t length = NLMSG_ALIGN(sizeof(*body));
+	struct rtnl_reply reply;
+	int fd = rtnl_open(0);
+
+	body->ifi_family = AF_UNSPEC;
+	body->ifi_index = request.index;
+	body->ifi_flags = request.ifi_flags;
+	body->ifi_change = request.change;
+	if (request.name)
+		length = rtnl_put(payload, length, IFLA_IFNAME, request.name,
+				  strlen(request.name) + 1);
+	if (request.mtu)
+		length = rtnl_put(payload, length, IFLA_MTU, &request.mtu,
+				  sizeof(request.mtu));
+	if (fd < 0 ||
+	    rtnl_send(fd, RTM_NEWLINK, NLM_F_REQUEST | NLM_F_ACK | request.flags,
+		      31, payload, length) ||
+	    rtnl_receive(fd, &reply, 31) || !reply.saw_error) {
+		close(fd);
+		return -1000;
+	}
+	close(fd);
+	return reply.error;
+}
+
+static unsigned int lo_index(void)
+{
+	return if_nametoindex("lo");
+}
+
+static int lo_is_up(void)
+{
+	unsigned int flags;
+
+	return get_flags("lo", &flags) ? -1 : !!(flags & IFF_UP);
+}
+
+static int lo_mtu(void)
+{
+	struct ifreq request = { 0 };
+
+	strncpy(request.ifr_name, "lo", IFNAMSIZ - 1);
+	return ioctl(control_socket, SIOCGIFMTU, &request) ? -1 : request.ifr_mtu;
+}
+
 static int ipv4_loopback_route_count(void)
 {
 	struct rtmsg body = { .rtm_family = AF_INET };
@@ -271,6 +329,100 @@ FN_TEST(changing_the_interface_flags_requires_net_admin)
 }
 END_TEST()
 
+FN_TEST(netlink_takes_a_link_down_and_brings_it_back_up)
+{
+	TEST_RES(new_link((struct link_request){ .index = lo_index(), .change = IFF_UP }),
+		 _ret == 0);
+	TEST_RES(lo_is_up(), _ret == 0);
+	TEST_RES(link_operstate("lo"), _ret == OPERSTATE_DOWN);
+	TEST_RES(ipv4_loopback_route_count(), _ret == 2);
+	TEST_RES(new_link((struct link_request){ .index = lo_index(), .ifi_flags = IFF_UP, .change = IFF_UP }),
+		 _ret == 0);
+	TEST_RES(lo_is_up(), _ret == 1);
+	TEST_RES(link_operstate("lo"), _ret == OPERSTATE_UNKNOWN);
+	TEST_RES(ipv4_loopback_route_count(), _ret == 3);
+}
+END_TEST()
+
+FN_TEST(netlink_finds_a_link_by_name_without_an_index)
+{
+	TEST_RES(new_link((struct link_request){ .name = "lo", .change = IFF_UP }), _ret == 0);
+	TEST_RES(lo_is_up(), _ret == 0);
+	TEST_RES(new_link((struct link_request){ .name = "lo", .ifi_flags = IFF_UP, .change = IFF_UP }),
+		 _ret == 0);
+	TEST_RES(lo_is_up(), _ret == 1);
+}
+END_TEST()
+
+FN_TEST(netlink_without_a_change_mask_requests_every_flag)
+{
+	unsigned int flags;
+
+	TEST_SUCC(get_flags("lo", &flags));
+	TEST_RES(new_link((struct link_request){ .index = lo_index(), .ifi_flags = flags & ~IFF_UP }),
+		 _ret == 0);
+	TEST_RES(lo_is_up(), _ret == 0);
+	TEST_RES(new_link((struct link_request){ .index = lo_index(), .ifi_flags = flags | IFF_UP }),
+		 _ret == 0);
+	TEST_RES(lo_is_up(), _ret == 1);
+}
+END_TEST()
+
+FN_TEST(netlink_without_flags_or_a_change_mask_changes_nothing)
+{
+	TEST_RES(new_link((struct link_request){ .index = lo_index() }), _ret == 0);
+	TEST_RES(lo_is_up(), _ret == 1);
+	TEST_RES(new_link((struct link_request){ .index = lo_index(), .mtu = lo_mtu() }), _ret == 0);
+	TEST_RES(new_link((struct link_request){ .index = lo_index(), .name = "lo" }), _ret == 0);
+	TEST_RES(lo_is_up(), _ret == 1);
+}
+END_TEST()
+
+FN_TEST(netlink_does_not_find_an_unknown_link)
+{
+	TEST_RES(new_link((struct link_request){ .index = 9999, .change = IFF_UP }), _ret == -ENODEV);
+	TEST_RES(new_link((struct link_request){ .name = "missing0", .change = IFF_UP }), _ret == -ENODEV);
+	TEST_RES(new_link((struct link_request){ .change = IFF_UP }), _ret == -ENODEV);
+	TEST_RES(lo_is_up(), _ret == 1);
+}
+END_TEST()
+
+FN_TEST(netlink_creates_no_link_without_a_kind)
+{
+	TEST_RES(new_link((struct link_request){ .flags = NLM_F_CREATE, .name = "missing0" }),
+		 _ret == -EOPNOTSUPP);
+}
+END_TEST()
+
+FN_TEST(netlink_refuses_to_create_or_replace_an_existing_link)
+{
+	TEST_RES(new_link((struct link_request){ .flags = NLM_F_CREATE | NLM_F_EXCL, .index = lo_index(), .change = IFF_UP }),
+		 _ret == -EEXIST);
+	TEST_RES(new_link((struct link_request){ .flags = NLM_F_REPLACE, .index = lo_index(), .change = IFF_UP }),
+		 _ret == -EOPNOTSUPP);
+	TEST_RES(lo_is_up(), _ret == 1);
+}
+END_TEST()
+
+FN_TEST(netlink_link_changes_require_net_admin)
+{
+	pid_t child = CHECK(fork());
+
+	if (child == 0) {
+		if (setresuid(65534, 65534, 65534))
+			_exit(2);
+		_exit(new_link((struct link_request){ .index = lo_index(), .change = IFF_UP }) == -EPERM ?
+			      0 :
+			      1);
+	}
+	int status;
+
+	TEST_RES(waitpid(child, &status, 0),
+		 WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	TEST_RES(lo_is_up(), _ret == 1);
+}
+END_TEST()
+
 #ifdef __asterinas__
 FN_TEST(changing_another_flag_is_not_supported)
 {
@@ -278,6 +430,17 @@ FN_TEST(changing_another_flag_is_not_supported)
 
 	TEST_SUCC(get_flags("lo", &flags));
 	TEST_ERRNO(set_flags("lo", flags | IFF_NOARP), EOPNOTSUPP);
+}
+END_TEST()
+FN_TEST(netlink_changes_only_the_up_flag)
+{
+	TEST_RES(new_link((struct link_request){ .index = lo_index(), .ifi_flags = IFF_NOARP, .change = IFF_NOARP }),
+		 _ret == -EOPNOTSUPP);
+	TEST_RES(new_link((struct link_request){ .index = lo_index(), .mtu = 1280, .change = IFF_UP }),
+		 _ret == -EOPNOTSUPP);
+	TEST_RES(new_link((struct link_request){ .index = lo_index(), .name = "lo2", .change = IFF_UP }),
+		 _ret == -EOPNOTSUPP);
+	TEST_RES(lo_is_up(), _ret == 1);
 }
 END_TEST()
 #endif

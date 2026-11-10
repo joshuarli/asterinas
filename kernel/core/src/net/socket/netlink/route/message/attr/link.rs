@@ -9,6 +9,11 @@ use crate::{
     util::MultiRead,
 };
 
+const ETHERNET_ADDRESS_LEN: usize = 6;
+
+/// The longest hardware address an `IFLA_ADDRESS` attribute may carry (`MAX_ADDR_LEN`).
+const MAX_ADDRESS_LEN: usize = 32;
+
 /// Link-level attributes.
 ///
 /// Reference: <https://elixir.bootlin.com/linux/v6.13/source/include/uapi/linux/if_link.h#L297>.
@@ -279,6 +284,12 @@ impl Attribute for LinkAttr {
 
                 let name = InterfaceName::from_bytes_until_nul(&name_bytes);
                 Self::Name(name)
+            }
+            (LinkAttrClass::ADDRESS, ETHERNET_ADDRESS_LEN..=MAX_ADDRESS_LEN) => {
+                let mut address = [0u8; ETHERNET_ADDRESS_LEN];
+                reader.read(&mut VmWriter::from(&mut address[..]))?;
+                reader.skip_some(payload_len - ETHERNET_ADDRESS_LEN);
+                Self::Address(EthernetAddress(address))
             }
             (LinkAttrClass::MTU, 4) => Self::Mtu(reader.read_val_opt::<u32>()?.unwrap()),
             (LinkAttrClass::TXQLEN, 4) => Self::TxqLen(reader.read_val_opt::<u32>()?.unwrap()),

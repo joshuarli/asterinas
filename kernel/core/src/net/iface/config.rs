@@ -167,6 +167,38 @@ pub(in crate::net) fn set_administratively_up(iface: &Arc<Iface>, up: bool) {
     publish_network_events(events);
 }
 
+/// Flags that user space can request to change on a Linux network device.
+///
+/// Reference: `dev_change_flags` in <https://elixir.bootlin.com/linux/v7.1/source/net/core/dev.c>.
+const USER_CHANGEABLE_FLAGS: InterfaceFlags = InterfaceFlags::UP
+    .union(InterfaceFlags::DEBUG)
+    .union(InterfaceFlags::NOTRAILERS)
+    .union(InterfaceFlags::NOARP)
+    .union(InterfaceFlags::DYNAMIC)
+    .union(InterfaceFlags::MULTICAST)
+    .union(InterfaceFlags::PORTSEL)
+    .union(InterfaceFlags::AUTOMEDIA)
+    .union(InterfaceFlags::PROMISC)
+    .union(InterfaceFlags::ALLMULTI);
+
+/// Requests the flags of an interface, as `SIOCSIFFLAGS` and `RTM_NEWLINK` do.
+///
+/// Only `IFF_UP` can change; a request that changes any other user-changeable flag fails
+/// instead of being ignored, and flags that user space cannot change are ignored as in Linux.
+pub(in crate::net) fn change_flags(iface: &Arc<Iface>, requested: InterfaceFlags) -> Result<()> {
+    let changed = (requested ^ iface.flags()) & USER_CHANGEABLE_FLAGS;
+    if !(changed - InterfaceFlags::UP).is_empty() {
+        return_errno_with_message!(
+            Errno::EOPNOTSUPP,
+            "only the up flag of an interface can be changed"
+        );
+    }
+    if changed.contains(InterfaceFlags::UP) {
+        set_administratively_up(iface, requested.contains(InterfaceFlags::UP));
+    }
+    Ok(())
+}
+
 pub(in crate::net) fn add_ipv4_rule(request: Ipv4RuleRequest, exclusive: bool, origin: RequestOrigin) -> Result<()> {
     let _addresses = IPV4_ADDRESSES.get().unwrap().lock();
     let rule = route::add_ipv4_rule(request, exclusive)?;

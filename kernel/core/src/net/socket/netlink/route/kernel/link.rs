@@ -12,13 +12,18 @@ use aster_bigtcp::{
 use super::util::finish_response;
 use crate::{
     net::{
-        iface::{DEFAULT_TX_QUEUE_LEN, Iface, iter_all_ifaces},
-        socket::netlink::{
-            message::{CMsgSegHdr, CSegmentType, GetRequestFlags, SegHdrCommonFlags},
-            route::message::{
-                CLinkStats64, LinkAttr, LinkSegment, LinkSegmentBody, OperState, RtExtFilter,
-                RtnlSegment,
+        iface::{DEFAULT_TX_QUEUE_LEN, Iface, config, iter_all_ifaces},
+        socket::{
+            netlink::{
+                message::{
+                    CMsgSegHdr, CSegmentType, GetRequestFlags, NewRequestFlags, SegHdrCommonFlags,
+                },
+                route::message::{
+                    CLinkStats64, LinkAttr, LinkSegment, LinkSegmentBody, OperState, RtExtFilter,
+                    RtnlSegment,
+                },
             },
+            util::options::check_current_privileged,
         },
     },
     prelude::*,
@@ -56,6 +61,75 @@ pub(super) fn do_get_link(request_segment: &LinkSegment) -> Result<Vec<RtnlSegme
     finish_response(request_segment.header(), dump_all, &mut response_segments);
 
     Ok(response_segments)
+}
+
+/// Changes an existing link, as `do_setlink` does for `RTM_NEWLINK`.
+///
+/// Only bringing a link up or down applies. A request to change the name, the hardware address,
+/// the MTU, the queue length or the link mode fails before anything changes.
+///
+/// Reference: `rtnl_newlink` in <https://elixir.bootlin.com/linux/v7.1/source/net/core/rtnetlink.c>.
+pub(super) fn do_new_link(request_segment: &LinkSegment) -> Result<()> {
+    check_current_privileged()?;
+
+    let body = request_segment.body();
+    let attrs = request_segment.attrs();
+    let name = attrs.iter().find_map(|attr| match attr {
+        LinkAttr::Name(name) => Some(name),
+        _ => None,
+    });
+    let index = body
+        .index
+        .filter(|index| i32::try_from(index.get()).is_ok());
+    let iface = match (index, name) {
+        (Some(index), _) => iter_all_ifaces().find(|iface| iface.index() == index.get()),
+        (None, Some(name)) => iter_all_ifaces().find(|iface| iface.name().as_cstr() == name.as_cstr()),
+        (None, None) => None,
+    };
+
+    let request_flags = NewRequestFlags::from_bits_truncate(request_segment.header().flags);
+    let Some(iface) = iface else {
+        if request_flags.contains(NewRequestFlags::CREATE) {
+            return_errno_with_message!(Errno::EOPNOTSUPP, "creating a link is not supported");
+        }
+        return_errno_with_message!(Errno::ENODEV, "no link found");
+    };
+    if request_flags.contains(NewRequestFlags::EXCL) {
+        return_errno_with_message!(Errno::EEXIST, "the link already exists");
+    }
+    if request_flags.contains(NewRequestFlags::REPLACE) {
+        return_errno_with_message!(Errno::EOPNOTSUPP, "replacing a link is not supported");
+    }
+
+    for attr in attrs {
+        let unchanged = match attr {
+            LinkAttr::Name(name) => name.as_cstr() == iface.name().as_cstr(),
+            LinkAttr::Address(address) => {
+                *address == iface.ethernet_addr().unwrap_or(UNSPECIFIED_LINK_ADDR)
+            }
+            LinkAttr::Mtu(mtu) => *mtu as usize == iface.mtu(),
+            LinkAttr::TxqLen(len) => *len == DEFAULT_TX_QUEUE_LEN,
+            LinkAttr::LinkMode(mode) => *mode == 0,
+            _ => true,
+        };
+        if !unchanged {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "only the up flag of a link can be changed"
+            );
+        }
+    }
+
+    if body.flags.is_empty() && body.change == 0 {
+        return Ok(());
+    }
+    let requested = if body.change == 0 {
+        body.flags
+    } else {
+        let change = InterfaceFlags::from_bits_truncate(body.change);
+        (body.flags & change) | (iface.flags() - change)
+    };
+    config::change_flags(iface, requested)
 }
 
 /// Whether a link message carries the link's counters.
