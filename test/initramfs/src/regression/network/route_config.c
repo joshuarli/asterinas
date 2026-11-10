@@ -281,12 +281,19 @@ FN_TEST(removing_an_address_keeps_the_routes_but_the_gateway_becomes_unreachable
 }
 END_TEST()
 
+FN_TEST(a_reject_route_cannot_have_a_gateway)
+{
+	CHECK(address(RTM_NEWADDR, LOCAL_ADDRESS, 24));
+	TEST_RES(add((struct route){ .destination = "10.20.0.0", .prefix_length = 16, .gateway = GATEWAY, .type = RTN_BLACKHOLE }),
+		 _ret == -EINVAL);
+	TEST_RES(address(RTM_DELADDR, LOCAL_ADDRESS, 24), _ret == 0);
+}
+END_TEST()
+
 #ifdef __asterinas__
 FN_TEST(unsupported_route_requests_are_rejected)
 {
 	CHECK(address(RTM_NEWADDR, LOCAL_ADDRESS, 24));
-	TEST_RES(add((struct route){ .destination = "10.20.0.0", .prefix_length = 16, .gateway = GATEWAY, .type = RTN_BLACKHOLE }),
-		 _ret == -EOPNOTSUPP);
 	TEST_RES(add((struct route){ .destination = "10.20.0.0", .prefix_length = 16, .gateway = GATEWAY, .with_source = 1 }),
 		 _ret == -EOPNOTSUPP);
 	TEST_RES(add((struct route){ .destination = "10.20.0.0", .prefix_length = 16, .gateway = GATEWAY, .tos = 4 }),

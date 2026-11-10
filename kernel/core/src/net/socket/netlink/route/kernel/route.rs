@@ -10,7 +10,9 @@ use super::{notify::RequestOrigin, util::finish_response};
 use crate::{
     net::{
         iface::config,
-        route::{Ipv4RouteSelector, NewIpv4Route, RouteRecord, dump_routes},
+        route::{
+            Ipv4RouteSelector, NewIpv4Route, NewRouteAction, Rejection, RouteRecord, dump_routes,
+        },
         socket::{
             netlink::{
                 message::{
@@ -52,11 +54,57 @@ pub(super) fn do_get_route(request_segment: &RouteSegment) -> Result<Vec<RtnlSeg
     Ok(response_segments)
 }
 
-/// `RTN_UNICAST` in Linux.
-const TYPE_UNICAST: u8 = 1;
+/// `RT_SCOPE_HOST` in Linux.
+const SCOPE_HOST: u8 = 254;
 
 /// `RT_SCOPE_NOWHERE` in Linux.
 const SCOPE_NOWHERE: u8 = 255;
+
+/// Returns what a new route of a type does, after the checks that Linux makes before it looks
+/// for an existing route.
+///
+/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/net/ipv4/fib_semantics.c> (`fib_props`
+/// and `fib_create_info`).
+fn new_route_action(type_: u8, scope: u8, has_device: bool) -> Result<NewRouteAction> {
+    if scope < widest_scope(type_) {
+        return_errno_with_message!(Errno::EINVAL, "the route type or its scope is invalid");
+    }
+
+    let rejection = match type_ {
+        6 => Rejection::Blackhole,
+        7 => Rejection::Unreachable,
+        8 => Rejection::Prohibit,
+        9 => Rejection::Throw,
+        1..=5 => {
+            if scope > SCOPE_HOST {
+                return_errno_with_message!(Errno::EINVAL, "the route scope is invalid");
+            }
+            if type_ == 1 {
+                return Ok(NewRouteAction::Unicast);
+            }
+            if !has_device {
+                return_errno_with_message!(Errno::ENODEV, "the route type needs a device");
+            }
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "only unicast routes and routes without a device can be installed"
+            );
+        }
+        _ => return_errno_with_message!(Errno::EINVAL, "the route type is invalid"),
+    };
+    Ok(NewRouteAction::Reject(rejection))
+}
+
+/// Returns the widest scope a route of a type can have; `RT_SCOPE_NOWHERE` for the types that
+/// Linux refuses.
+fn widest_scope(type_: u8) -> u8 {
+    match type_ {
+        2 => SCOPE_HOST,
+        3 | 4 => 253,
+        1 | 5..=9 => 0,
+        _ => SCOPE_NOWHERE,
+    }
+}
 
 pub(super) fn do_new_route(request_segment: &RouteSegment) -> Result<()> {
     check_current_privileged()?;
@@ -71,12 +119,11 @@ pub(super) fn do_new_route(request_segment: &RouteSegment) -> Result<()> {
             "replacing or appending a route is not supported"
         );
     }
-    if body.type_ != TYPE_UNICAST {
-        return_errno_with_message!(Errno::EOPNOTSUPP, "only unicast routes can be installed");
-    }
+    let action = new_route_action(body.type_, body.scope, parsed.iface_index.is_some())?;
 
     config::add_ipv4_route(
         NewIpv4Route {
+            action,
             table: parsed.table,
             destination: parsed.destination,
             gateway: parsed.gateway,
@@ -229,7 +276,9 @@ pub(super) fn record_to_route(
     if let Some(gateway) = record.gateway {
         attrs.push(RouteAttr::Gateway(gateway));
     }
-    attrs.push(RouteAttr::Oif(record.iface_index));
+    if let Some(iface_index) = record.iface_index {
+        attrs.push(RouteAttr::Oif(iface_index));
+    }
     if !is_ipv4 {
         attrs.push(RouteAttr::empty_cache_info());
         attrs.push(RouteAttr::Pref(0));

@@ -14,9 +14,9 @@ use aster_bigtcp::{
 use spin::Once;
 
 pub(super) use self::{
-    user::{Ipv4RouteSelector, NewIpv4Route},
+    user::{Ipv4RouteSelector, NewIpv4Route, NewRouteAction},
     dump::{RouteRecord, RuleOutcome, RuleRecord, dump_routes, dump_rules},
-    entry::{RouteProtocol, RouteScope, RouteType},
+    entry::{Rejection, RouteProtocol, RouteScope, RouteType},
     rule::MarkSelector,
 };
 use self::{dump::entry_record, manager::RouteManager, rule::Rule};
@@ -389,11 +389,11 @@ fn publish_ipv4_poll_routes(manager: &RouteManager<Ipv4Address>) {
 pub(super) fn lookup_ipv4_poll_route(dst: Ipv4Address, mark: u32) -> Result<(Arc<Iface>, aster_bigtcp::socket::IpNextHop, aster_bigtcp::iface::PathMtuRoute)> {
     let key = RouteLookupKey { dst, mark, direct: false, device: None };
     let route = IPV4_POLL_ROUTES.get().unwrap().lock().lookup_entry(&key)?;
-    let next_hop = route.gateway().map_or(aster_bigtcp::socket::IpNextHop::Direct, aster_bigtcp::socket::IpNextHop::Gateway);
-    let path = if route.table_id() == RouteTableId::MAIN { aster_bigtcp::iface::PathMtuRoute::Default } else {
-        aster_bigtcp::iface::PathMtuRoute::Table { table: route.table_id().get(), gateway: route.gateway() }
+    let next_hop = route.gateway.map_or(aster_bigtcp::socket::IpNextHop::Direct, aster_bigtcp::socket::IpNextHop::Gateway);
+    let path = if route.table_id == RouteTableId::MAIN { aster_bigtcp::iface::PathMtuRoute::Default } else {
+        aster_bigtcp::iface::PathMtuRoute::Table { table: route.table_id.get(), gateway: route.gateway }
     };
-    Ok((route.output_iface().clone(), next_hop, path))
+    Ok((route.iface, next_hop, path))
 }
 
 /// Gives an interface the main-table gateway routes through it, for next-hop selection.
@@ -404,7 +404,7 @@ fn sync_gateway_routes(manager: &RouteManager<Ipv4Address>, iface: &Arc<Iface>) 
             continue;
         };
         if entry.table_id() == RouteTableId::MAIN
-            && entry.output_iface().index() == iface.index()
+            && entry.leaves_through(iface.index())
             && !routes.iter().any(|(cidr, _)| cidr == entry.dst())
         {
             routes.push((*entry.dst(), gateway));
@@ -435,16 +435,16 @@ pub(super) fn lookup_output_route(dst: IpAddress, mark: u32, direct: bool, devic
                     return Err(error);
                 }
             };
-            let next_hop = route.gateway().map_or(aster_bigtcp::socket::IpNextHop::Direct, aster_bigtcp::socket::IpNextHop::Gateway);
-            let path = if route.table_id() == RouteTableId::MAIN { aster_bigtcp::iface::PathMtuRoute::Default } else {
-                aster_bigtcp::iface::PathMtuRoute::Table { table: route.table_id().get(), gateway: route.gateway() }
+            let next_hop = route.gateway.map_or(aster_bigtcp::socket::IpNextHop::Direct, aster_bigtcp::socket::IpNextHop::Gateway);
+            let path = if route.table_id == RouteTableId::MAIN { aster_bigtcp::iface::PathMtuRoute::Default } else {
+                aster_bigtcp::iface::PathMtuRoute::Table { table: route.table_id.get(), gateway: route.gateway }
             };
-            Ok((route.output_iface().clone(), next_hop, path))
+            Ok((route.iface, next_hop, path))
         }
         IpAddress::Ipv6(dst) => {
             let key = RouteLookupKey { dst, mark, direct, device };
             let route = IPV6_ROUTE_MANAGER.get().unwrap().read().lookup_entry(&key)?;
-            Ok((route.output_iface().clone(), if direct { aster_bigtcp::socket::IpNextHop::Direct } else { aster_bigtcp::socket::IpNextHop::Routed }, aster_bigtcp::iface::PathMtuRoute::Default))
+            Ok((route.iface, if direct { aster_bigtcp::socket::IpNextHop::Direct } else { aster_bigtcp::socket::IpNextHop::Routed }, aster_bigtcp::iface::PathMtuRoute::Default))
         }
     }
 }
@@ -460,15 +460,13 @@ fn lookup_iface_with_scope(dst: IpAddress, direct: bool, device: Option<u32>) ->
             .unwrap()
             .read()
             .lookup_entry(&if direct { RouteLookupKey::direct(dst, device) } else { RouteLookupKey::new(dst) })?
-            .output_iface()
-            .clone(),
+            .iface,
         IpAddress::Ipv6(dst) => IPV6_ROUTE_MANAGER
             .get()
             .unwrap()
             .read()
             .lookup_entry(&if direct { RouteLookupKey::direct(dst, device) } else { RouteLookupKey::new(dst) })?
-            .output_iface()
-            .clone(),
+            .iface,
     };
     Ok(iface)
 }
@@ -488,7 +486,7 @@ pub(super) fn lookup_local_iface(address: IpAddress) -> Result<Arc<Iface>> {
                         "the address is not available from the local machine",
                     )
                 })?;
-            (entry.type_(), entry.output_iface().clone())
+            (entry.type_, entry.iface)
         }
         IpAddress::Ipv6(address) => {
             let entry = IPV6_ROUTE_MANAGER
@@ -502,7 +500,7 @@ pub(super) fn lookup_local_iface(address: IpAddress) -> Result<Arc<Iface>> {
                         "the address is not available from the local machine",
                     )
                 })?;
-            (entry.type_(), entry.output_iface().clone())
+            (entry.type_, entry.iface)
         }
     };
 
@@ -533,5 +531,5 @@ pub(super) fn is_broadcast_endpoint(endpoint: &IpEndpoint) -> bool {
             .unwrap()
             .read()
             .lookup_entry(&RouteLookupKey::new(address))
-            .is_ok_and(|entry| entry.type_() == RouteType::Broadcast)
+            .is_ok_and(|entry| entry.type_ == RouteType::Broadcast)
 }

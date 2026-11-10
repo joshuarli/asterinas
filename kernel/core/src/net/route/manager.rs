@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{
+    entry::{Rejection, ResolvedRoute, RouteMatch},
     RouteAddressFamily, RouteEntry, RouteLookupKey, RouteMetric, RouteProtocol, RouteTableId,
     rule::{Rule, RuleAction, RulePriority},
     table::RouteTable,
@@ -50,7 +51,7 @@ impl<A: RouteAddressFamily> RouteManager<A> {
     pub(super) fn derived_routes_of(&self, iface_index: u32) -> Vec<RouteEntry<A>> {
         self.entries()
             .filter(|entry| {
-                entry.output_iface().index() == iface_index
+                entry.leaves_through(iface_index)
                     && entry.origin().protocol == RouteProtocol::KERNEL
             })
             .cloned()
@@ -71,7 +72,7 @@ impl<A: RouteAddressFamily> RouteManager<A> {
         let previous = self.derived_routes_of(iface_index);
         for table in self.tables.values_mut() {
             table.retain(|entry| {
-                entry.output_iface().index() != iface_index
+                !entry.leaves_through(iface_index)
                     || (keep_user_routes && entry.origin().protocol != RouteProtocol::KERNEL)
             });
         }
@@ -167,7 +168,7 @@ impl<A: RouteAddressFamily> RouteManager<A> {
         self.rules.values().flatten()
     }
 
-    pub(super) fn lookup_entry(&self, key: &RouteLookupKey<A>) -> Result<RouteEntry<A>> {
+    pub(super) fn lookup_entry(&self, key: &RouteLookupKey<A>) -> Result<ResolvedRoute<A>> {
         for rules in self.rules.values() {
             for rule in rules {
                 if !rule.matches_mark(key.mark) { continue; }
@@ -176,8 +177,21 @@ impl<A: RouteAddressFamily> RouteManager<A> {
                         let Some(table) = self.tables.get(table_id) else {
                             continue;
                         };
-                        if let Some(route) = table.lookup(key) {
-                            return Ok(route);
+                        let Some(route) = table.lookup(key) else {
+                            continue;
+                        };
+                        match route.to_match() {
+                            RouteMatch::Resolved(resolved) => return Ok(resolved),
+                            RouteMatch::Rejected(Rejection::Throw) => continue,
+                            RouteMatch::Rejected(Rejection::Blackhole) => {
+                                return_errno_with_message!(Errno::EINVAL, "the route discards the packet");
+                            }
+                            RouteMatch::Rejected(Rejection::Unreachable) => {
+                                return_errno_with_message!(Errno::EHOSTUNREACH, "the route rejects the packet");
+                            }
+                            RouteMatch::Rejected(Rejection::Prohibit) => {
+                                return_errno_with_message!(Errno::EACCES, "the route prohibits the packet");
+                            }
                         }
                     }
                     RuleAction::Unreachable => {
@@ -202,7 +216,10 @@ impl<A: RouteAddressFamily> RouteManager<A> {
         return_errno_with_message!(Errno::ENETUNREACH, "no route to the destination")
     }
 
-    pub(super) fn lookup_in_local_table(&self, key: &RouteLookupKey<A>) -> Option<RouteEntry<A>> {
-        self.tables.get(&RouteTableId::LOCAL)?.lookup(key)
+    pub(super) fn lookup_in_local_table(&self, key: &RouteLookupKey<A>) -> Option<ResolvedRoute<A>> {
+        match self.tables.get(&RouteTableId::LOCAL)?.lookup(key)?.to_match() {
+            RouteMatch::Resolved(resolved) => Some(resolved),
+            RouteMatch::Rejected(_) => None,
+        }
     }
 }

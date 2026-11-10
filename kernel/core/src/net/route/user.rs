@@ -9,7 +9,7 @@ use aster_bigtcp::{
 
 use super::{
     IPV4_ROUTE_MANAGER, RouteRecord, dump::entry_record, RouteEntry, RouteMetric, RouteOrigin, RouteProtocol, RouteScope,
-    RouteTableId, RouteType,
+    RouteTableId, RouteType, entry::Rejection,
 };
 use crate::{
     net::iface::{Iface, config::InterfaceAddress, iter_all_ifaces},
@@ -22,8 +22,18 @@ const FIRST_SCOPE_WITHOUT_GATEWAY: u8 = 253;
 /// `RT_SCOPE_NOWHERE`, which a removal request uses for "any scope".
 const ANY_SCOPE: u8 = 255;
 
-/// A request to install a unicast route.
+/// What an installed route does with the packets it matches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::net) enum NewRouteAction {
+    /// Sends the packets through an interface.
+    Unicast,
+    /// Refuses the packets without an interface.
+    Reject(Rejection),
+}
+
+/// A request to install a route.
 pub(in crate::net) struct NewIpv4Route {
+    pub action: NewRouteAction,
     pub table: u32,
     pub destination: Ipv4Cidr,
     pub gateway: Option<Ipv4Address>,
@@ -55,6 +65,10 @@ pub(super) fn add_ipv4_route(
 ) -> Result<RouteRecord> {
     if request.destination != request.destination.network() {
         return_errno_with_message!(Errno::EINVAL, "the route destination is not a network");
+    }
+
+    if let NewRouteAction::Reject(rejection) = request.action {
+        return add_reject_route(&request, rejection);
     }
 
     let iface = route_iface(&request, addresses)?;
@@ -99,6 +113,34 @@ pub(super) fn add_ipv4_route(
     Ok(record)
 }
 
+/// Installs a route that refuses packets, which Linux accepts without a gateway or a device.
+fn add_reject_route(request: &NewIpv4Route, rejection: Rejection) -> Result<RouteRecord> {
+    if request.gateway.is_some() || request.iface_index.is_some() {
+        return_errno_with_message!(
+            Errno::EINVAL,
+            "a route of this type cannot have a gateway or a device"
+        );
+    }
+
+    let entry = RouteEntry::reject(
+        request.destination,
+        rejection,
+        RouteTableId::new(request.table),
+        RouteMetric::new(request.priority),
+        RouteOrigin {
+            protocol: RouteProtocol::new(request.protocol),
+            scope: RouteScope::new(request.scope),
+            preferred_source: None,
+        },
+    )?;
+    let record = entry_record(&entry);
+
+    let mut manager = IPV4_ROUTE_MANAGER.get().unwrap().write();
+    manager.insert_user_route(entry)?;
+    super::publish_ipv4_poll_routes(&manager);
+    Ok(record)
+}
+
 /// Removes a route. The caller holds the interface configuration lock.
 pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<RouteRecord> {
     let mut manager = IPV4_ROUTE_MANAGER.get().unwrap().write();
@@ -109,7 +151,7 @@ pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<RouteRec
             && selector.gateway.is_none_or(|gateway| Some(gateway) == entry.gateway())
             && selector
                 .iface_index
-                .is_none_or(|index| index == entry.output_iface().index())
+                .is_none_or(|index| entry.leaves_through(index))
             && selector
                 .protocol
                 .is_none_or(|protocol| protocol == entry.origin().protocol.get())
@@ -128,10 +170,11 @@ pub(super) fn remove_ipv4_route(selector: &Ipv4RouteSelector) -> Result<RouteRec
         );
     }
 
-    let iface = entry.output_iface().clone();
     manager.remove_route(table_id, &selector.destination, entry.metric());
-    super::sync_gateway_routes(&manager, &iface)
-        .expect("fewer gateway routes fit in the table that held more");
+    if let Some(iface) = entry.output_iface() {
+        super::sync_gateway_routes(&manager, iface)
+            .expect("fewer gateway routes fit in the table that held more");
+    }
     super::publish_ipv4_poll_routes(&manager);
 
     Ok(entry_record(&entry))
