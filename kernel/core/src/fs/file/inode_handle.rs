@@ -436,6 +436,9 @@ impl FileLike for InodeHandle {
         }
 
         if let Some(ref open_file) = self.open_file {
+            if let Some(result) = open_file.seek_position(pos) {
+                return result;
+            }
             open_file.check_seekable()?;
             if open_file.is_offset_aware() {
                 return do_seek_util(&self.offset, pos, open_file.seek_end()?);
@@ -556,7 +559,7 @@ impl Debug for InodeHandle {
 
 /// Describes the position to seek from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SeekFrom {
+pub enum SeekFrom {
     Start(usize),
     End(isize),
     Current(isize),
@@ -597,6 +600,13 @@ pub trait PerOpenFileOps: Pollable + FileOps + Any + Send + Sync + 'static {
     /// cleanly unified under [`FileOps`].
     fn seek_end(&self) -> Result<Option<usize>> {
         Ok(None)
+    }
+
+    /// Moves a file that keeps its own reading position rather than the offset of the open file.
+    ///
+    /// Returns `None` for a file that the offset of the open file positions.
+    fn seek_position(&self, _pos: SeekFrom) -> Option<Result<usize>> {
+        None
     }
 
     // See `FileLike::mappable`.
