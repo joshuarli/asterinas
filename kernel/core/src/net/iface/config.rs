@@ -210,7 +210,129 @@ pub(in crate::net) fn add_ipv4_address(
     origin: RequestOrigin,
 ) -> Result<()> {
     let mut addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    let (added, changes) = insert_locked(&mut addresses, iface, request)?;
+    let mut events = vec![NetworkEvent::AddressAdded {
+        address: added,
+        origin,
+    }];
+    events.extend(route_added_events(changes.added));
+    publish_network_events(events);
+    Ok(())
+}
 
+/// Replaces the address that `label` selects, or installs `request` when the interface has no
+/// address with that label.
+///
+/// Linux's `SIOCSIFADDR` finds the first address whose label is the interface name and, unless it
+/// already holds the requested address, removes it before installing the requested one.
+pub(in crate::net) fn replace_labeled_ipv4_address(
+    iface: &Arc<Iface>,
+    label: &InterfaceName,
+    request: NewAddress,
+    origin: RequestOrigin,
+) -> Result<()> {
+    let mut addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    let selector = label_selector(label);
+
+    let mut events = Vec::new();
+    if let Some(existing) = addresses
+        .iter()
+        .find(|address| Arc::ptr_eq(&address.iface, iface) && selector.matches(address))
+    {
+        if existing.address() == request.cidr.address() {
+            return Ok(());
+        }
+        events.extend(removal_events(
+            remove_locked(&mut addresses, iface, &selector)?,
+            origin,
+        ));
+    }
+
+    let (added, changes) = insert_locked(&mut addresses, iface, request)?;
+    events.push(NetworkEvent::AddressAdded {
+        address: added,
+        origin,
+    });
+    events.extend(route_added_events(changes.added));
+    publish_network_events(events);
+    Ok(())
+}
+
+/// Gives the address that `label` selects a new prefix length.
+///
+/// Linux's `SIOCSIFNETMASK` removes the address, changes its mask, and installs it again. That
+/// recomputes the broadcast address when it had been derived from the old mask, and leaves an
+/// explicitly assigned broadcast address alone.
+pub(in crate::net) fn set_labeled_ipv4_netmask(
+    iface: &Arc<Iface>,
+    label: &InterfaceName,
+    prefix_len: u8,
+    origin: RequestOrigin,
+) -> Result<()> {
+    let mut addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    let selector = label_selector(label);
+
+    let Some(existing) = addresses
+        .iter()
+        .find(|address| Arc::ptr_eq(&address.iface, iface) && selector.matches(address))
+        .cloned()
+    else {
+        return_errno_with_message!(
+            Errno::EADDRNOTAVAIL,
+            "the interface does not have the address"
+        );
+    };
+    if existing.cidr().prefix_len() == prefix_len {
+        return Ok(());
+    }
+
+    let cidr = Ipv4Cidr::new(existing.address(), prefix_len);
+    let broadcast = if iface.flags().contains(InterfaceFlags::BROADCAST)
+        && prefix_len < 31
+        && existing.broadcast() == Some(broadcast_address(existing.cidr()))
+    {
+        Some(broadcast_address(cidr))
+    } else {
+        existing.broadcast()
+    };
+    let request = NewAddress {
+        cidr,
+        broadcast,
+        label: Some(*existing.label()),
+        scope: existing.scope(),
+    };
+
+    let mut events = removal_events(remove_locked(&mut addresses, iface, &selector)?, origin);
+    let (added, changes) = insert_locked(&mut addresses, iface, request)?;
+    events.push(NetworkEvent::AddressAdded {
+        address: added,
+        origin,
+    });
+    events.extend(route_added_events(changes.added));
+    publish_network_events(events);
+    Ok(())
+}
+
+fn label_selector(label: &InterfaceName) -> AddressSelector {
+    AddressSelector {
+        local: None,
+        network_member: None,
+        label: Some(*label),
+    }
+}
+
+/// The broadcast address of an IPv4 network: the local bits all set.
+pub(in crate::net) fn broadcast_address(cidr: Ipv4Cidr) -> Ipv4Address {
+    let [a, b, c, d] = cidr.address().octets();
+    let [ma, mb, mc, md] = cidr.netmask().octets();
+    Ipv4Address::new(a | !ma, b | !mb, c | !mc, d | !md)
+}
+
+fn insert_locked(
+    addresses: &mut Vec<InterfaceAddress>,
+    iface: &Arc<Iface>,
+    request: NewAddress,
+) -> Result<(InterfaceAddress, IfaceRouteChanges)> {
     let mut secondary = false;
     for address in addresses
         .iter()
@@ -259,14 +381,8 @@ pub(in crate::net) fn add_ipv4_address(
     };
     updated.insert(position, new_address.clone());
 
-    let changes = commit(iface, &mut addresses, updated)?;
-    let mut events = vec![NetworkEvent::AddressAdded {
-        address: new_address,
-        origin,
-    }];
-    events.extend(route_added_events(changes.added));
-    publish_network_events(events);
-    Ok(())
+    let changes = commit(iface, addresses, updated)?;
+    Ok((new_address, changes))
 }
 
 /// Removes an IPv4 address and the secondary addresses that depend on it.
@@ -279,7 +395,34 @@ pub(in crate::net) fn remove_ipv4_address(
     origin: RequestOrigin,
 ) -> Result<()> {
     let mut addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    let removals = remove_locked(&mut addresses, iface, selector)?;
+    publish_network_events(removal_events(removals, origin));
+    Ok(())
+}
 
+fn removal_events(
+    removals: Vec<(InterfaceAddress, IfaceRouteChanges)>,
+    origin: RequestOrigin,
+) -> Vec<NetworkEvent> {
+    let mut events = Vec::new();
+    for (removal, changes) in removals {
+        events.push(NetworkEvent::AddressRemoved {
+            address: removal,
+            origin,
+        });
+        events.extend(changes.removed.into_iter().map(|route| NetworkEvent::RouteRemoved {
+            route,
+            origin: RequestOrigin::KERNEL,
+        }));
+    }
+    events
+}
+
+fn remove_locked(
+    addresses: &mut Vec<InterfaceAddress>,
+    iface: &Arc<Iface>,
+    selector: &AddressSelector,
+) -> Result<Vec<(InterfaceAddress, IfaceRouteChanges)>> {
     let Some(removed) = addresses
         .iter()
         .find(|address| Arc::ptr_eq(&address.iface, iface) && selector.matches(address))
@@ -306,7 +449,7 @@ pub(in crate::net) fn remove_ipv4_address(
     }
     removals.push(removed);
 
-    let mut events = Vec::new();
+    let mut removals_with_changes = Vec::new();
     for removal in removals {
         let updated = addresses
             .iter()
@@ -315,18 +458,10 @@ pub(in crate::net) fn remove_ipv4_address(
             })
             .cloned()
             .collect();
-        let changes = commit(iface, &mut addresses, updated)?;
-        events.push(NetworkEvent::AddressRemoved {
-            address: removal,
-            origin,
-        });
-        events.extend(changes.removed.into_iter().map(|route| NetworkEvent::RouteRemoved {
-            route,
-            origin: RequestOrigin::KERNEL,
-        }));
+        let changes = commit(iface, addresses, updated)?;
+        removals_with_changes.push((removal, changes));
     }
-    publish_network_events(events);
-    Ok(())
+    Ok(removals_with_changes)
 }
 
 fn route_added_events(routes: Vec<route::RouteRecord>) -> impl Iterator<Item = NetworkEvent> {
