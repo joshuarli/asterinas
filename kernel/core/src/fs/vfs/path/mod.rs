@@ -506,6 +506,12 @@ impl Path {
         };
         let parent_mount = self.mount.parent().unwrap().upgrade().unwrap();
         let child_mount = parent_mount.do_unmount(&mountpoint, &mut topology_guard)?;
+        drop(topology_guard);
+        if Arc::strong_count(child_mount.fs()) == 1
+            && let Err(err) = child_mount.fs().put_super()
+        {
+            error!("failed to record the clean unmount: {:?}", err);
+        }
 
         Ok(child_mount)
     }

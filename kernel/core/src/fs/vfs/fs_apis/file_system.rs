@@ -21,6 +21,14 @@ pub(crate) trait FileSystem: Any + Sync + Send {
     /// Syncs the file system.
     fn sync(&self) -> Result<()>;
 
+    /// Releases the last mount of this file system after its final sync.
+    ///
+    /// The VFS calls this once when the final mount is detached, before the
+    /// file system is dropped. Implementations record a clean unmount here.
+    fn put_super(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns the root inode of this file system.
     ///
     /// For each mount, the VFS invokes this method only once and eagerly when

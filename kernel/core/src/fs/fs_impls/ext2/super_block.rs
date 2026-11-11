@@ -536,6 +536,27 @@ impl SuperBlock {
         self.wtime = time;
     }
 
+    /// Sets the last mount time.
+    pub(super) const fn set_mtime(&mut self, time: Duration) {
+        self.mtime = time;
+    }
+
+    /// Increments the mount count.
+    pub(super) const fn inc_mnt_count(&mut self) {
+        self.mnt_count = self.mnt_count.wrapping_add(1);
+    }
+
+    /// Clears the clean-unmount flag so that an offline checker knows the
+    /// volume was in use.
+    pub(super) fn mark_unclean(&mut self) {
+        self.state.remove(FsState::VALID);
+    }
+
+    /// Restores the file system state observed at mount time.
+    pub(super) const fn set_state(&mut self, state: FsState) {
+        self.state = state;
+    }
+
     /// Decreases the number of free inodes.
     pub(super) fn dec_free_inodes(&mut self) -> Result<()> {
         self.free_inodes_count = self
@@ -604,8 +625,8 @@ impl SuperBlock {
         sb_bid + (SUPER_BLOCK_SIZE.div_ceil(self.block_size) as u32)
     }
 
-    #[expect(dead_code)]
-    const fn state(&self) -> FsState {
+    /// Returns the file system state.
+    pub(super) const fn state(&self) -> FsState {
         self.state
     }
 

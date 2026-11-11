@@ -32,6 +32,10 @@ impl FileSystem for Ext2 {
         Ok(())
     }
 
+    fn put_super(&self) -> Result<()> {
+        self.end_write_session()
+    }
+
     fn root_inode(&self) -> Arc<dyn Inode> {
         self.root_inode().unwrap()
     }

@@ -28,7 +28,7 @@ use super::{
     block_group::{BlockGroup, RawBlockGroup},
     inode::{FilePerm, Inode, InodeDesc, RawInode},
     prelude::*,
-    super_block::{RawSuperBlock, SUPER_BLOCK_OFFSET, SuperBlock},
+    super_block::{FsState, RawSuperBlock, SUPER_BLOCK_OFFSET, SuperBlock},
 };
 use crate::{
     fs::{
@@ -64,6 +64,10 @@ pub(crate) struct Ext2 {
     mount_options: Ext2MountOptions,
     /// Recorded VFS filesystem flags.
     flags: AtomicFsFlags,
+    /// Whether this mount was created writable.
+    writable: bool,
+    /// File system state observed on disk at mount time.
+    initial_state: FsState,
     /// FS event stats for VFS.
     fs_event_subscriber_stats: FsEventSubscriberStats,
     /// Per-filesystem inode generation counter.
@@ -130,6 +134,8 @@ impl Ext2 {
         }
 
         let mount_options = Ext2MountOptions::parse(data);
+        let writable = !flags.contains(FsFlags::RDONLY);
+        let initial_state = super_block.state();
 
         let nr_inodes_per_group = super_block.nr_inodes_per_group();
 
@@ -183,12 +189,51 @@ impl Ext2 {
             group_descriptors_segment,
             mount_options,
             flags: AtomicFsFlags::new(flags),
+            writable,
+            initial_state,
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             next_generation: AtomicU32::new(utils::duration_to_ext2_secs(utils::now())),
             self_ref: weak_self.clone(),
         });
 
+        if writable {
+            ext2.begin_write_session()?;
+        }
+
         Ok(ext2)
+    }
+
+    /// Marks the volume in use and records the mount before serving writes.
+    pub(super) fn begin_write_session(&self) -> Result<()> {
+        {
+            let mut sb = self.super_block.write();
+            sb.mark_unclean();
+            sb.inc_mnt_count();
+            sb.set_mtime(utils::now());
+        }
+        self.sync_metadata()?;
+        self.flush_device()
+    }
+
+    /// Flushes the volume and restores the state observed at mount time.
+    pub(super) fn end_write_session(&self) -> Result<()> {
+        if !self.writable {
+            return Ok(());
+        }
+        {
+            let mut sb = self.super_block.write();
+            sb.set_state(self.initial_state);
+            sb.set_wtime(utils::now());
+        }
+        self.sync_all()?;
+        self.flush_device()
+    }
+
+    fn flush_device(&self) -> Result<()> {
+        if self.block_device().sync()? != BioStatus::Complete {
+            return_errno_with_message!(Errno::EIO, "failed to flush block device");
+        }
+        Ok(())
     }
 
     /// Returns the block device.
