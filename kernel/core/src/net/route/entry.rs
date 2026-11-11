@@ -34,6 +34,8 @@ enum IfaceRouteType {
     Unicast,
     Local,
     Broadcast,
+    Anycast,
+    Multicast,
 }
 
 /// How a route without an interface refuses the packets it matches.
@@ -90,6 +92,8 @@ impl<A: RouteAddressFamily> RouteEntry<A> {
             RouteType::Unicast => IfaceRouteType::Unicast,
             RouteType::Local => IfaceRouteType::Local,
             RouteType::Broadcast => IfaceRouteType::Broadcast,
+            RouteType::Anycast => IfaceRouteType::Anycast,
+            RouteType::Multicast => IfaceRouteType::Multicast,
             RouteType::Blackhole
             | RouteType::Unreachable
             | RouteType::Prohibit
@@ -379,6 +383,10 @@ pub(in crate::net) enum RouteType {
     Local = 2,
     /// Delivers IPv4 broadcasts.
     Broadcast = 3,
+    /// Delivers packets to the nearest member of an anycast group.
+    Anycast = 4,
+    /// Delivers IPv4 multicasts.
+    Multicast = 5,
     /// Discards packets.
     Blackhole = 6,
     /// Rejects packets as unreachable.
@@ -395,6 +403,8 @@ impl From<IfaceRouteType> for RouteType {
             IfaceRouteType::Unicast => Self::Unicast,
             IfaceRouteType::Local => Self::Local,
             IfaceRouteType::Broadcast => Self::Broadcast,
+            IfaceRouteType::Anycast => Self::Anycast,
+            IfaceRouteType::Multicast => Self::Multicast,
         }
     }
 }

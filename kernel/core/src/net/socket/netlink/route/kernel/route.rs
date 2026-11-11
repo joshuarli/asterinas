@@ -11,7 +11,8 @@ use crate::{
     net::{
         iface::config,
         route::{
-            Ipv4RouteSelector, NewIpv4Route, NewRouteAction, Rejection, RouteRecord, dump_routes,
+            Ipv4RouteSelector, NewIpv4Route, NewRouteAction, Rejection, RouteRecord, RouteType,
+            dump_routes,
         },
         socket::{
             netlink::{
@@ -79,16 +80,18 @@ fn new_route_action(type_: u8, scope: u8, has_device: bool) -> Result<NewRouteAc
             if scope > SCOPE_HOST {
                 return_errno_with_message!(Errno::EINVAL, "the route scope is invalid");
             }
-            if type_ == 1 {
-                return Ok(NewRouteAction::Unicast);
-            }
-            if !has_device {
+            if type_ != 1 && !has_device {
                 return_errno_with_message!(Errno::ENODEV, "the route type needs a device");
             }
-            return_errno_with_message!(
-                Errno::EOPNOTSUPP,
-                "only unicast routes and routes without a device can be installed"
-            );
+            let type_ = match type_ {
+                1 => RouteType::Unicast,
+                2 => RouteType::Local,
+                3 => RouteType::Broadcast,
+                4 => RouteType::Anycast,
+                5 => RouteType::Multicast,
+                _ => unreachable!(),
+            };
+            return Ok(NewRouteAction::Send(type_));
         }
         _ => return_errno_with_message!(Errno::EINVAL, "the route type is invalid"),
     };

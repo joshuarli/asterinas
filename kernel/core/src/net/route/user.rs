@@ -19,6 +19,10 @@ use crate::{
 /// The scope from which a route can no longer have a gateway (`RT_SCOPE_LINK`).
 const FIRST_SCOPE_WITHOUT_GATEWAY: u8 = 253;
 
+/// `RT_SCOPE_HOST`, the only scope that a route through a device may have while the device is
+/// down.
+const HOST_SCOPE: u8 = 254;
+
 /// `RT_SCOPE_NOWHERE`, which a removal request uses for "any scope".
 const ANY_SCOPE: u8 = 255;
 
@@ -26,7 +30,7 @@ const ANY_SCOPE: u8 = 255;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::net) enum NewRouteAction {
     /// Sends the packets through an interface.
-    Unicast,
+    Send(RouteType),
     /// Refuses the packets without an interface.
     Reject(Rejection),
 }
@@ -67,12 +71,13 @@ pub(super) fn add_ipv4_route(
         return_errno_with_message!(Errno::EINVAL, "the route destination is not a network");
     }
 
-    if let NewRouteAction::Reject(rejection) = request.action {
-        return add_reject_route(&request, rejection);
-    }
+    let type_ = match request.action {
+        NewRouteAction::Send(type_) => type_,
+        NewRouteAction::Reject(rejection) => return add_reject_route(&request, rejection),
+    };
 
     let iface = route_iface(&request, addresses)?;
-    if !iface.flags().contains(InterfaceFlags::UP) {
+    if request.scope != HOST_SCOPE && !iface.flags().contains(InterfaceFlags::UP) {
         return_errno_with_message!(Errno::ENETDOWN, "the route interface is down");
     }
 
@@ -91,7 +96,7 @@ pub(super) fn add_ipv4_route(
         iface.clone(),
         RouteTableId::new(request.table),
         RouteMetric::new(request.priority),
-        RouteType::Unicast,
+        type_,
         RouteOrigin {
             protocol: RouteProtocol::new(request.protocol),
             scope: RouteScope::new(request.scope),

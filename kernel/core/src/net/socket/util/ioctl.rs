@@ -10,7 +10,7 @@ use crate::{
     dispatch_ioctl,
     net::{
         iface::{DEFAULT_TX_QUEUE_LEN, Iface, config, iter_all_ifaces},
-        route::{Ipv4RouteSelector, NewIpv4Route, NewRouteAction},
+        route::{Ipv4RouteSelector, NewIpv4Route, NewRouteAction, RouteType},
         socket::{
             Socket,
             netlink::RequestOrigin,
@@ -276,7 +276,7 @@ fn add_route(rtentry: &CRtEntry) -> Result<()> {
     let route = parse_route(rtentry, true)?;
     config::add_ipv4_route(
         NewIpv4Route {
-            action: NewRouteAction::Unicast,
+            action: NewRouteAction::Send(RouteType::Unicast),
             table: route.table,
             destination: route.destination,
             gateway: route.gateway,
