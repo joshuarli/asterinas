@@ -46,10 +46,16 @@ pub const STA_NANO: i32 = 0x2000;
 
 const STA_READ_ONLY: i32 = 0xff00;
 const STA_UNSUPPORTED: i32 =
-    STA_PLL | STA_PPSFREQ | STA_PPSTIME | STA_FLL | STA_INS | STA_DEL | STA_FREQHOLD;
+    STA_PLL | STA_PPSFREQ | STA_PPSTIME | STA_FLL | STA_FREQHOLD;
 
 pub const TIME_OK: i32 = 0;
+pub const TIME_INS: i32 = 1;
+pub const TIME_DEL: i32 = 2;
+pub const TIME_OOP: i32 = 3;
+pub const TIME_WAIT: i32 = 4;
 pub const TIME_ERROR: i32 = 5;
+
+const SECONDS_PER_DAY: i128 = 86_400;
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 const FREQUENCY_SCALE: i128 = 65536 * 1_000_000;
@@ -86,6 +92,8 @@ pub struct Reply {
     pub tai: i32,
     pub time_sec: i64,
     pub time_subsec: i64,
+    /// The wall time in nanoseconds at which a scheduled leap second is due, or zero.
+    pub leap_at_ns: i64,
     pub state: i32,
 }
 
@@ -110,6 +118,9 @@ pub struct WallClock {
     status: i32,
     constant: i64,
     tai: i32,
+    leap_state: i32,
+    leap_at_ns: Option<i128>,
+    leap_end_ns: i128,
 }
 
 impl WallClock {
@@ -126,6 +137,9 @@ impl WallClock {
             status: STA_UNSYNC,
             constant: 2,
             tai: 0,
+            leap_state: TIME_OK,
+            leap_at_ns: None,
+            leap_end_ns: 0,
         }
     }
 
@@ -236,6 +250,7 @@ impl WallClock {
         }
 
         self.refresh_error(raw_ns);
+        self.refresh_leap(raw_ns);
         let wall_ns = self.wall_ns(raw_ns);
         let time_sec = wall_ns.div_euclid(NANOS_PER_SECOND) as i64;
         let sub_ns = wall_ns.rem_euclid(NANOS_PER_SECOND) as i64;
@@ -255,12 +270,83 @@ impl WallClock {
             } else {
                 sub_ns / 1000
             },
+            leap_at_ns: self.leap_at_ns.map_or(0, |ns| ns as i64),
             state: if self.status & STA_UNSYNC != 0 {
                 TIME_ERROR
             } else {
-                TIME_OK
+                self.leap_state
             },
         })
+    }
+
+    /// Applies a scheduled leap second. Returns whether one was pending.
+    ///
+    /// Reference: <https://elixir.bootlin.com/linux/v6.18/source/kernel/time/ntp.c>.
+    pub fn apply_pending_leap(&mut self) -> bool {
+        let leap = match self.leap_state {
+            TIME_INS if self.status & STA_INS != 0 => -1,
+            TIME_DEL if self.status & STA_DEL != 0 => 1,
+            _ => return false,
+        };
+        if leap < 0 {
+            self.wall_offset_ns -= NANOS_PER_SECOND;
+            self.tai += 1;
+            self.leap_end_ns = self.leap_at_ns.unwrap_or(0);
+            self.leap_state = TIME_OOP;
+        } else {
+            self.wall_offset_ns += NANOS_PER_SECOND;
+            self.tai -= 1;
+            self.leap_end_ns = 0;
+            self.leap_state = TIME_WAIT;
+        }
+        self.leap_at_ns = None;
+        true
+    }
+
+    /// Advances the leap-second state machine, as Linux's `second_overflow` does.
+    fn refresh_leap(&mut self, raw_ns: i128) {
+        let wall_ns = self.wall_ns(raw_ns);
+        let wall_sec = wall_ns.div_euclid(NANOS_PER_SECOND);
+        match self.leap_state {
+            TIME_OK => {
+                let leap_at_sec = if self.status & STA_INS != 0 {
+                    self.leap_state = TIME_INS;
+                    wall_sec + SECONDS_PER_DAY - wall_sec.rem_euclid(SECONDS_PER_DAY)
+                } else if self.status & STA_DEL != 0 {
+                    self.leap_state = TIME_DEL;
+                    wall_sec + SECONDS_PER_DAY
+                        - (wall_sec + 1).rem_euclid(SECONDS_PER_DAY)
+                } else {
+                    self.leap_at_ns = None;
+                    return;
+                };
+                self.leap_at_ns = Some(leap_at_sec * NANOS_PER_SECOND);
+            }
+            TIME_INS => {
+                if self.status & STA_INS == 0 {
+                    self.leap_at_ns = None;
+                    self.leap_state = TIME_OK;
+                }
+            }
+            TIME_DEL => {
+                if self.status & STA_DEL == 0 {
+                    self.leap_at_ns = None;
+                    self.leap_state = TIME_OK;
+                }
+            }
+            TIME_OOP => {
+                if wall_ns >= self.leap_end_ns {
+                    self.leap_end_ns = 0;
+                    self.leap_state = TIME_WAIT;
+                }
+            }
+            TIME_WAIT => {
+                if self.status & (STA_INS | STA_DEL) == 0 {
+                    self.leap_state = TIME_OK;
+                }
+            }
+            _ => {}
+        }
     }
 
     fn rebase(&mut self, raw_ns: i128) {
@@ -449,6 +535,71 @@ mod test {
     }
 
     #[ktest]
+    fn an_insertion_is_scheduled_at_the_next_day_boundary_and_repeats_the_second() {
+        let mut clock = WallClock::new(START);
+        let reply = adjust(
+            &mut clock,
+            0,
+            Request {
+                modes: ADJ_STATUS | ADJ_MAXERROR,
+                status: STA_INS,
+                max_error: 1_000,
+                ..Request::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reply.state, TIME_INS);
+        assert_eq!(reply.leap_at_ns, (START + 6400 * SECOND) as i64);
+
+        assert_eq!(clock.wall_ns(6400 * SECOND), START + 6400 * SECOND);
+        assert!(clock.apply_pending_leap());
+        assert_eq!(clock.wall_ns(6400 * SECOND), START + 6399 * SECOND);
+        assert_eq!(clock.tai, 1);
+
+        let reply = adjust(&mut clock, 6400 * SECOND + SECOND, Request::default()).unwrap();
+        assert_eq!(reply.state, TIME_WAIT);
+        assert!(!clock.apply_pending_leap());
+    }
+
+    #[ktest]
+    fn a_deletion_is_scheduled_at_the_second_it_removes() {
+        let mut clock = WallClock::new(START);
+        let reply = adjust(
+            &mut clock,
+            0,
+            Request {
+                modes: ADJ_STATUS | ADJ_MAXERROR,
+                status: STA_DEL,
+                max_error: 1_000,
+                ..Request::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reply.state, TIME_DEL);
+        assert_eq!(reply.leap_at_ns, (START + 6399 * SECOND) as i64);
+    }
+
+    #[ktest]
+    fn clearing_a_pending_leap_cancels_it() {
+        let mut clock = WallClock::new(START);
+        adjust(
+            &mut clock,
+            0,
+            Request { modes: ADJ_STATUS, status: STA_INS, ..Request::default() },
+        )
+        .unwrap();
+        let reply = adjust(
+            &mut clock,
+            0,
+            Request { modes: ADJ_STATUS, status: 0, ..Request::default() },
+        )
+        .unwrap();
+        assert_eq!(reply.state, TIME_OK);
+        assert_eq!(reply.leap_at_ns, 0);
+        assert!(!clock.apply_pending_leap());
+    }
+
+    #[ktest]
     fn unsupported_modes_and_status_bits_are_rejected() {
         let mut clock = WallClock::new(START);
         for modes in [0x0001, 0x4000, 0x8001, 0x0040] {
@@ -458,7 +609,7 @@ mod test {
                 "mode {modes:#x}"
             );
         }
-        for status in [STA_PLL, STA_FLL, STA_INS, STA_DEL, STA_FREQHOLD, STA_PPSTIME] {
+        for status in [STA_PLL, STA_FLL, STA_FREQHOLD, STA_PPSTIME] {
             assert_eq!(
                 adjust(&mut clock, 0, Request { modes: ADJ_STATUS, status, ..Request::default() }),
                 Err(Error::Invalid),

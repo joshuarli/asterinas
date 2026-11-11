@@ -13,6 +13,7 @@ use crate::prelude::*;
 pub(crate) mod clocks;
 mod core;
 pub(crate) mod cpu_time_stats;
+pub(crate) mod leap;
 mod softirq;
 mod system_time;
 pub(crate) mod timerfd;

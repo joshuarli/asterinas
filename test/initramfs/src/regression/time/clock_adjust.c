@@ -240,8 +240,6 @@ FN_TEST(modes_the_clock_cannot_honor_are_rejected)
 	}
 	tx = (struct timex){ .modes = ADJ_STATUS, .status = STA_PLL };
 	TEST_ERRNO(adjtimex(&tx), EINVAL);
-	tx = (struct timex){ .modes = ADJ_STATUS, .status = STA_INS };
-	TEST_ERRNO(adjtimex(&tx), EINVAL);
 }
 END_TEST()
 #endif

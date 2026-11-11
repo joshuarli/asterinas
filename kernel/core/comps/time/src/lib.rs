@@ -140,6 +140,11 @@ pub fn set_wall_time(wall: Duration, privileged: bool) -> Result<(), adjust::Err
         .set(raw_ns(), wall.as_nanos() as i128, privileged)
 }
 
+/// Applies a leap second scheduled through `adjtimex`. Returns whether one was pending.
+pub fn apply_pending_leap() -> bool {
+    WALL_CLOCK.get().unwrap().lock().apply_pending_leap()
+}
+
 /// Reads or changes the wall clock as `adjtimex` does.
 pub fn adjust_wall_clock(
     request: &adjust::Request,

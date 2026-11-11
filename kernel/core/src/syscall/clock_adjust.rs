@@ -103,6 +103,7 @@ fn adjust_realtime(timex_addr: Vaddr, ctx: &Context) -> Result<SyscallReturn> {
     if request.modes != 0 {
         crate::vdso::refresh_wall_clock();
     }
+    crate::time::leap::set_deadline(reply.leap_at_ns);
     fill_timex(&mut timex, &reply);
     ctx.user_space().write_val(timex_addr, &timex)?;
     Ok(SyscallReturn::Return(reply.state as isize))
