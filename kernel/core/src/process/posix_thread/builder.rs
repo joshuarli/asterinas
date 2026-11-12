@@ -36,6 +36,7 @@ pub(crate) struct PosixThreadBuilder {
     process: Weak<Process>,
     credentials: Credentials,
     vmar: VmarHandle,
+    cpu_affinity: CpuSet,
 
     // Optional part
     set_child_tid: Vaddr,
@@ -59,6 +60,7 @@ impl PosixThreadBuilder {
         user_ctx: Box<UserContext>,
         credentials: Credentials,
         vmar: VmarHandle,
+        cpu_affinity: CpuSet,
     ) -> Self {
         Self {
             tid,
@@ -67,6 +69,7 @@ impl PosixThreadBuilder {
             process: Weak::new(),
             credentials,
             vmar,
+            cpu_affinity,
             set_child_tid: 0,
             clear_child_tid: 0,
             file_table: None,
@@ -163,6 +166,7 @@ impl PosixThreadBuilder {
             process,
             credentials,
             vmar,
+            cpu_affinity,
             thread_name,
             set_child_tid,
             clear_child_tid,
@@ -218,7 +222,6 @@ impl PosixThreadBuilder {
                 }
             };
 
-            let cpu_affinity = CpuSet::new_full();
             let thread = Arc::new(Thread::new(
                 weak_task.clone(),
                 posix_thread,

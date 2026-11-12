@@ -2,7 +2,7 @@
 
 //! This module defines functions related to spawning the init process.
 
-use ostd::{arch::cpu::context::UserContext, task::Task, user::UserContextApi};
+use ostd::{arch::cpu::context::UserContext, cpu::CpuSet, task::Task, user::UserContextApi};
 
 use super::{Process, Session};
 use crate::{
@@ -125,9 +125,15 @@ fn create_init_task(
 
     let thread_name = derive_thread_name(&executable_abs_path);
 
-    let thread_builder =
-        PosixThreadBuilder::new(tid, thread_name, Box::new(user_ctx), credentials, vmar)
-            .process(Arc::downgrade(process))
-            .fs(Arc::new(fs));
+    let thread_builder = PosixThreadBuilder::new(
+        tid,
+        thread_name,
+        Box::new(user_ctx),
+        credentials,
+        vmar,
+        CpuSet::new_full(),
+    )
+    .process(Arc::downgrade(process))
+    .fs(Arc::new(fs));
     Ok(thread_builder.build())
 }

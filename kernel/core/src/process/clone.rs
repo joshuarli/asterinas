@@ -449,6 +449,7 @@ fn clone_child_task(
             child_user_ctx,
             credentials,
             child_vmar,
+            ctx.thread.atomic_cpu_affinity().load(Ordering::Relaxed),
         )
         .scheduling(ctx.thread.sched_attr().for_child())
         .process(posix_thread.weak_process().clone())
@@ -591,6 +592,7 @@ fn clone_child_process(
                 child_user_ctx,
                 credentials,
                 child_vmar,
+                ctx.thread.atomic_cpu_affinity().load(Ordering::Relaxed),
             )
             .scheduling(child_schedule)
             .sig_mask(child_sig_mask)
