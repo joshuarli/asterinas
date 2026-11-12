@@ -6,11 +6,13 @@ use crate::fs::{
     file::flock::FlockList,
     vfs::{inode::Inode, notify::FsEventPublisher, range_lock::RangeLockList},
 };
+use crate::prelude::Mutex;
 
 /// Context for FS locks.
 pub(crate) struct FsLockContext {
     range_lock_list: RangeLockList,
     flock_list: FlockList,
+    ownership_lock: Mutex<()>,
 }
 
 impl FsLockContext {
@@ -18,6 +20,7 @@ impl FsLockContext {
         Self {
             range_lock_list: RangeLockList::new(),
             flock_list: FlockList::new(),
+            ownership_lock: Mutex::new(()),
         }
     }
 
@@ -29,6 +32,10 @@ impl FsLockContext {
     /// Returns a reference to the flock list.
     pub(crate) fn flock_list(&self) -> &FlockList {
         &self.flock_list
+    }
+
+    pub(crate) fn ownership_lock(&self) -> &Mutex<()> {
+        &self.ownership_lock
     }
 }
 

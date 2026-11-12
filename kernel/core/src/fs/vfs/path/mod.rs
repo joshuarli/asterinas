@@ -29,13 +29,15 @@ use crate::{
         vfs::{
             file_system::{FileSystem, FsFlags},
             inode::{HardLinkability, Inode, Metadata, MknodType, RenameMode},
+            inode_ext::InodeExt,
             registry::FsAndRoot,
             xattr::{self, XattrName, XattrNamespace, XattrSetFlags},
         },
     },
     prelude::*,
     process::{
-        Gid, Uid, UserNamespace, credentials::capabilities::CapSet, posix_thread::AsPosixThread,
+        Gid, Uid, UserNamespace, credentials::capabilities::CapSet,
+        posix_thread::{AsPosixThread, PosixThread},
     },
     security::lsm::hooks as lsm_hooks,
 };
@@ -896,12 +898,40 @@ impl Path {
         self.inode().set_mode(&self.dentry, mode)
     }
 
-    pub(crate) fn set_owner(&self, uid: Uid) -> Result<()> {
-        self.inode().set_owner(&self.dentry, uid)
-    }
+    pub(crate) fn chown(
+        &self,
+        uid: Option<Uid>,
+        gid: Option<Gid>,
+        thread: &PosixThread,
+    ) -> Result<()> {
+        self.check_mount_writable()?;
+        let inode = self.inode();
+        let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+        let metadata = inode.metadata()?;
+        let credentials = thread.credentials();
+        let owns_file = credentials.fsuid() == metadata.uid;
+        let owner_allowed = uid.is_none_or(|requested| owns_file && requested == metadata.uid);
+        let group_allowed = gid.is_none_or(|requested| {
+            owns_file
+                && (requested == metadata.gid
+                    || requested == credentials.fsgid()
+                    || credentials.groups().contains(&requested))
+        });
+        if !owner_allowed || !group_allowed {
+            lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+                UserNamespace::get_init_singleton().as_ref(),
+                thread,
+                CapSet::CHOWN,
+            ))?;
+        }
 
-    pub(crate) fn set_group(&self, gid: Gid) -> Result<()> {
-        self.inode().set_group(&self.dentry, gid)
+        if let Some(uid) = uid {
+            inode.set_owner(&self.dentry, uid)?;
+        }
+        if let Some(gid) = gid {
+            inode.set_group(&self.dentry, gid)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn set_atime(&self, time: Duration) {
