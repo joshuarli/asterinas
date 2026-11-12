@@ -7,6 +7,7 @@ use spin::Once;
 use crate::{
     fs::{
         tmpfs::TmpFs,
+        fs_impls::ramfs::RootAttributes,
         vfs::{
             file_system::FileSystem,
             inode::RevalidationPolicy,
@@ -27,6 +28,7 @@ pub(in crate::fs) fn singleton() -> &'static Arc<TmpFs> {
         TmpFs::new_tmpfs_backing(
             "devtmpfs",
             RevalidationPolicy::REVALIDATE_EXISTS | RevalidationPolicy::REVALIDATE_ABSENT,
+            RootAttributes::kernel_root(),
         )
     })
 }

@@ -3,6 +3,7 @@
 //! Ramfs based on PageCache
 
 pub(crate) use fs::RamFs;
+pub(in crate::fs) use fs::RootAttributes;
 use fs::RamFsType;
 pub(super) use fs::RamInode;
 

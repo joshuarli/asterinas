@@ -315,7 +315,7 @@ impl MemfdTmpFs {
     pub(self) fn singleton() -> &'static Arc<TmpFs> {
         static MEMFD_TMPFS: Once<Arc<TmpFs>> = Once::new();
 
-        MEMFD_TMPFS.call_once(TmpFs::new_tmpfs)
+        MEMFD_TMPFS.call_once(|| TmpFs::new_tmpfs(super::RootAttributes::kernel_root()))
     }
 
     pub(self) fn new_path(memfd_inode: Arc<MemfdInode>) -> Path {

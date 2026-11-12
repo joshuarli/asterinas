@@ -41,6 +41,22 @@ use crate::{
     vm::page_cache::{PageCache, Vmo},
 };
 
+pub(in crate::fs) struct RootAttributes {
+    pub mode: InodeMode,
+    pub uid: Uid,
+    pub gid: Gid,
+}
+
+impl RootAttributes {
+    pub(in crate::fs) fn kernel_root() -> Self {
+        Self {
+            mode: mkmod!(a+rx, u+w),
+            uid: Uid::new_root(),
+            gid: Gid::new_root(),
+        }
+    }
+}
+
 /// A volatile file system whose data and metadata exists only in memory.
 pub(crate) struct RamFs {
     name: &'static str,
@@ -70,6 +86,7 @@ impl RamFs {
         anon_device_id: AnonDeviceId,
         sb: SuperBlock,
         revalidation_policy: RevalidationPolicy,
+        root_attributes: RootAttributes,
     ) -> Arc<Self> {
         let root_dev_id = anon_device_id.id();
         Arc::new_cyclic(move |weak_fs| Self {
@@ -80,9 +97,9 @@ impl RamFs {
             root: Arc::new_cyclic(|weak_root| RamInode {
                 inner: Inner::new_dir(weak_root.clone(), weak_root.clone()),
                 metadata: SpinLock::new(InodeMeta::new_dir(
-                    mkmod!(a+rx, u+w),
-                    Uid::new_root(),
-                    Gid::new_root(),
+                    root_attributes.mode,
+                    root_attributes.uid,
+                    root_attributes.gid,
                 )),
                 ino: ROOT_INO,
                 typ: InodeType::Dir,
@@ -103,7 +120,7 @@ impl RamFs {
     fn new_internal(name: &'static str) -> Arc<Self> {
         let anon_device_id = AnonDeviceId::acquire().expect("no device ID is available for ramfs");
         let sb = SuperBlock::new(RAMFS_MAGIC, BLOCK_SIZE, NAME_MAX, anon_device_id.id());
-        Self::new_with_sb(name, anon_device_id, sb, RevalidationPolicy::empty())
+        Self::new_with_sb(name, anon_device_id, sb, RevalidationPolicy::empty(), RootAttributes::kernel_root())
     }
 
     fn alloc_id(&self) -> u64 {
