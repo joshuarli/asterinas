@@ -123,12 +123,14 @@ pub(super) fn do_new_addr(request_segment: &AddrSegment) -> Result<()> {
         return_errno_with_message!(Errno::EOPNOTSUPP, "the address flags are not supported");
     }
 
-    if attrs.iter().any(|attr| {
-        matches!(attr, AddrAttr::CacheInfo(AddrCacheInfo { preferred, valid, .. })
-            if *preferred != INFINITE_LIFETIME || *valid != INFINITE_LIFETIME)
-    }) {
-        return_errno_with_message!(Errno::EOPNOTSUPP, "address lifetimes are not supported");
-    }
+    let lifetimes = attrs.iter().find_map(|attr| match attr {
+        AddrAttr::CacheInfo(info) => Some(*info),
+        _ => None,
+    });
+    let lifetimes = match lifetimes {
+        Some(info) => config::Ipv4AddressLifetimes::new(info.preferred, info.valid)?,
+        None => config::Ipv4AddressLifetimes::PERMANENT,
+    };
 
     let label = attrs.iter().find_map(|attr| match attr {
         AddrAttr::Label(label) => Some(InterfaceName::from_bytes_until_nul(
@@ -144,6 +146,7 @@ pub(super) fn do_new_addr(request_segment: &AddrSegment) -> Result<()> {
             broadcast,
             label,
             scope: body.scope as u8,
+            lifetimes,
         },
         RequestOrigin::request(request_segment.header()),
     )
@@ -251,7 +254,9 @@ pub(super) fn ipv4_to_addr(
     type_: CSegmentType,
     address: &InterfaceAddress,
 ) -> AddrSegment {
-    let mut flags = AddrMessageFlags::PERMANENT;
+    let mut flags = AddrMessageFlags::empty();
+    if address.valid_lifetime() == INFINITE_LIFETIME { flags |= AddrMessageFlags::PERMANENT; }
+    if address.is_deprecated() { flags |= AddrMessageFlags::DEPRECATED; }
     if address.is_secondary() {
         flags |= AddrMessageFlags::SECONDARY;
     }
@@ -282,8 +287,8 @@ pub(super) fn ipv4_to_addr(
         AddrAttr::Label(address.label().as_cstr().to_owned()),
         AddrAttr::Flags(flags),
         AddrAttr::CacheInfo(AddrCacheInfo {
-            preferred: INFINITE_LIFETIME,
-            valid: INFINITE_LIFETIME,
+            preferred: address.preferred_lifetime(),
+            valid: address.valid_lifetime(),
             created: address.created_centiseconds(),
             updated: address.created_centiseconds(),
         }),

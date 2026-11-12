@@ -7,7 +7,10 @@
 
 #include <linux/if_addr.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <time.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
 
 #define DEVICE "lo"
 #define PRIMARY "10.9.8.7"
@@ -33,6 +36,8 @@ struct address_request {
 	uint32_t flags_attribute;
 	int with_flags;
 	int with_lifetimes;
+	uint32_t preferred_lifetime;
+	uint32_t valid_lifetime;
 };
 
 static size_t build(uint8_t *buffer, const struct address_request *request)
@@ -59,8 +64,8 @@ static size_t build(uint8_t *buffer, const struct address_request *request)
 		length = rtnl_put(buffer, length, IFA_FLAGS,
 				  &request->flags_attribute, 4);
 	if (request->with_lifetimes) {
-		struct ifa_cacheinfo info = { .ifa_prefered = 60,
-					      .ifa_valid = 120 };
+		struct ifa_cacheinfo info = { .ifa_prefered = request->preferred_lifetime,
+					      .ifa_valid = request->valid_lifetime };
 
 		length = rtnl_put(buffer, length, IFA_CACHEINFO, &info,
 				  sizeof(info));
@@ -124,6 +129,7 @@ struct found_address {
 	char label[IFNAMSIZ];
 	int attribute_order_is_linux;
 	int position;
+	struct ifa_cacheinfo cache;
 };
 
 static struct found_address find_address(const char *text)
@@ -151,6 +157,10 @@ static struct found_address find_address(const char *text)
 		position++;
 		if (!local || memcmp(RTA_DATA(local), &wanted, 4))
 			continue;
+		struct rtattr *cache = rtnl_find(first, length, IFA_CACHEINFO);
+
+		if (cache && RTA_PAYLOAD(cache) == sizeof(found.cache))
+			memcpy(&found.cache, RTA_DATA(cache), sizeof(found.cache));
 		found.present = 1;
 		found.position = position;
 		found.flags = address->ifa_flags;
@@ -330,11 +340,224 @@ END_TEST()
 #ifdef __asterinas__
 FN_TEST(unsupported_address_properties_are_rejected)
 {
-	TEST_RES(add((struct address_request){ .local = PRIMARY, .prefix_length = 24, .with_local = 1, .with_lifetimes = 1 }),
-		 _ret == -EOPNOTSUPP);
 	TEST_RES(add((struct address_request){ .local = PRIMARY, .prefix_length = 24, .with_local = 1, .with_flags = 1, .flags_attribute = IFA_F_NODAD }),
 		 _ret == -EOPNOTSUPP);
 	TEST_RES(find_address(PRIMARY).present, _ret == 0);
 }
 END_TEST()
 #endif
+
+FN_SETUP(flush_lifetime_transcripts)
+{
+	CHECK(setvbuf(stdout, NULL, _IONBF, 0));
+}
+END_SETUP()
+
+static int64_t monotonic_milliseconds(void)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+struct lifetime_events {
+	int added;
+	int deprecated;
+	int removed;
+	int valid_deprecation;
+	int valid_removal;
+};
+
+enum event_stop { DEADLINE, REMOVAL, DEPRECATION };
+
+static struct lifetime_events lifetime_events(int fd, int timeout_ms, enum event_stop stop)
+{
+	struct lifetime_events events = { 0 };
+	int64_t deadline = monotonic_milliseconds() + timeout_ms;
+	struct in_addr wanted = parse(PRIMARY);
+
+	while (monotonic_milliseconds() < deadline && !(stop == REMOVAL && events.removed) && !(stop == DEPRECATION && events.deprecated)) {
+		struct pollfd pfd = { .fd = fd, .events = POLLIN };
+		int64_t remaining_ms = deadline - monotonic_milliseconds();
+
+		if (remaining_ms <= 0 || poll(&pfd, 1, remaining_ms) <= 0)
+			break;
+		uint8_t buffer[8192];
+		ssize_t length = recv(fd, buffer, sizeof(buffer), 0);
+		struct nlmsghdr *header = (void *)buffer;
+
+		for (; length > 0 && NLMSG_OK(header, length); header = NLMSG_NEXT(header, length)) {
+			if (header->nlmsg_type != RTM_NEWADDR && header->nlmsg_type != RTM_DELADDR)
+				continue;
+			struct ifaddrmsg *body = NLMSG_DATA(header);
+			struct rtattr *first = IFA_RTA(body);
+			size_t attributes_length = IFA_PAYLOAD(header);
+			struct rtattr *local = rtnl_find(first, attributes_length, IFA_LOCAL);
+			struct rtattr *cache = rtnl_find(first, attributes_length, IFA_CACHEINFO);
+
+			if (!local || memcmp(RTA_DATA(local), &wanted, 4) || !cache ||
+			    RTA_PAYLOAD(cache) != sizeof(struct ifa_cacheinfo))
+				continue;
+			struct ifa_cacheinfo *info = RTA_DATA(cache);
+
+			if (header->nlmsg_type == RTM_DELADDR) {
+				events.removed++;
+				events.valid_removal = body->ifa_flags == IFA_F_DEPRECATED &&
+					info->ifa_prefered == 0 && info->ifa_valid == 0;
+			} else if (body->ifa_flags & IFA_F_DEPRECATED) {
+				events.deprecated++;
+				events.valid_deprecation = body->ifa_flags == IFA_F_DEPRECATED &&
+					info->ifa_prefered == 0 && info->ifa_valid > 0 && info->ifa_valid < 4;
+			} else {
+				events.added++;
+			}
+		}
+	}
+	return events;
+}
+
+FN_TEST(finite_addresses_deprecate_expire_and_remove_their_routes)
+{
+	int fd = rtnl_open(RTMGRP_IPV4_IFADDR);
+	struct address_request request = { .local = PRIMARY, .prefix_length = 24,
+		.with_local = 1, .with_lifetimes = 1, .preferred_lifetime = 1, .valid_lifetime = 4 };
+
+	TEST_RES(fd, _ret >= 0);
+	TEST_RES(add(request), _ret == 0);
+	struct found_address found = find_address(PRIMARY);
+
+	TEST_RES(found.present, _ret == 1);
+	TEST_RES(found.flags, _ret == 0);
+	TEST_RES(found.cache.ifa_valid, _ret > 0 && _ret <= 4);
+	TEST_RES(found.cache.ifa_prefered, _ret <= 1);
+	TEST_RES(bind_tcp(PRIMARY), _ret == 0);
+	struct lifetime_events events = lifetime_events(fd, 10000, REMOVAL);
+
+	close(fd);
+	printf("NET_EXPIRY events added=%d deprecated=%d removed=%d deprecation-valid=%d removal-valid=%d\n",
+	       events.added, events.deprecated, events.removed,
+	       events.valid_deprecation, events.valid_removal);
+	TEST_RES(events.added, _ret == 1);
+	TEST_RES(events.deprecated, _ret == 1);
+	TEST_RES(events.removed, _ret == 1);
+	TEST_RES(events.valid_deprecation, _ret == 1);
+	TEST_RES(events.valid_removal, _ret == 1);
+	TEST_RES(find_address(PRIMARY).present, _ret == 0);
+	TEST_RES(bind_tcp(PRIMARY), _ret == EADDRNOTAVAIL);
+	TEST_RES(route_with(RT_TABLE_LOCAL, PRIMARY, 32, RTN_LOCAL, RT_SCOPE_HOST, PRIMARY), _ret == 0);
+}
+END_TEST()
+
+FN_TEST(address_lifetimes_validate_and_can_be_forever_but_deprecated)
+{
+	struct address_request request = { .local = PRIMARY, .prefix_length = 24,
+		.with_local = 1, .with_lifetimes = 1, .preferred_lifetime = 1, .valid_lifetime = 0 };
+
+	TEST_RES(add(request), _ret == -EINVAL);
+	request.valid_lifetime = 1;
+	request.preferred_lifetime = 2;
+	TEST_RES(add(request), _ret == -EINVAL);
+	request.preferred_lifetime = UINT32_MAX;
+	TEST_RES(add(request), _ret == -EINVAL);
+	request.preferred_lifetime = 0;
+	request.valid_lifetime = UINT32_MAX;
+	TEST_RES(add(request), _ret == 0);
+	struct found_address found = find_address(PRIMARY);
+
+	printf("NET_EXPIRY forever-deprecated flags=%u preferred=%u valid=%u\n",
+	       found.flags, found.cache.ifa_prefered, found.cache.ifa_valid);
+	TEST_RES(found.flags, _ret == (IFA_F_PERMANENT | IFA_F_DEPRECATED));
+	TEST_RES(found.cache.ifa_prefered, _ret == UINT32_MAX);
+	TEST_RES(found.cache.ifa_valid, _ret == UINT32_MAX);
+	TEST_RES(delete(request), _ret == 0);
+	request.preferred_lifetime = 1;
+	int fd = rtnl_open(RTMGRP_IPV4_IFADDR);
+
+	TEST_RES(fd, _ret >= 0);
+	TEST_RES(add(request), _ret == 0);
+	struct lifetime_events events = lifetime_events(fd, 2000, DEADLINE);
+
+	close(fd);
+	found = find_address(PRIMARY);
+	printf("NET_EXPIRY forever preferred=%u flags=%u deprecated-events=%d\n",
+	       found.cache.ifa_prefered, found.flags, events.deprecated);
+	TEST_RES(found.flags, _ret == IFA_F_PERMANENT);
+	TEST_RES(found.cache.ifa_prefered, _ret == UINT32_MAX);
+	TEST_RES(events.deprecated, _ret == 0);
+	TEST_RES(delete(request), _ret == 0);
+}
+END_TEST()
+
+FN_TEST(removing_a_finite_address_cancels_its_old_expiry)
+{
+	struct address_request request = { .local = PRIMARY, .prefix_length = 24,
+		.with_local = 1, .with_lifetimes = 1, .preferred_lifetime = 1, .valid_lifetime = 2 };
+
+	TEST_RES(add(request), _ret == 0);
+	TEST_RES(delete(request), _ret == 0);
+	request.with_lifetimes = 0;
+	int fd = rtnl_open(RTMGRP_IPV4_IFADDR);
+
+	TEST_RES(fd, _ret >= 0);
+	TEST_RES(add(request), _ret == 0);
+	struct lifetime_events events = lifetime_events(fd, 3000, DEADLINE);
+
+	close(fd);
+	printf("NET_EXPIRY replacement added=%d deprecated=%d removed=%d\n",
+	       events.added, events.deprecated, events.removed);
+	TEST_RES(events.added, _ret == 1);
+	TEST_RES(events.deprecated, _ret == 0);
+	TEST_RES(events.removed, _ret == 0);
+	TEST_RES(find_address(PRIMARY).flags, _ret == IFA_F_PERMANENT);
+	TEST_RES(delete(request), _ret == 0);
+}
+END_TEST()
+
+static int change_netmask(const char *label, const char *mask)
+{
+	struct ifreq request = { 0 };
+	struct sockaddr_in *netmask = (void *)&request.ifr_netmask;
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+	snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", label);
+	netmask->sin_family = AF_INET;
+	netmask->sin_addr = parse(mask);
+	int result = ioctl(fd, SIOCSIFNETMASK, &request) ? -errno : 0;
+
+	close(fd);
+	return result;
+}
+
+FN_TEST(changing_a_netmask_preserves_expiry_and_deprecation)
+{
+	int fd = rtnl_open(RTMGRP_IPV4_IFADDR);
+	struct address_request request = { .local = PRIMARY, .prefix_length = 24,
+		.label = "lo:expiry", .with_local = 1, .with_lifetimes = 1,
+		.preferred_lifetime = 1, .valid_lifetime = 4 };
+
+	TEST_RES(fd, _ret >= 0);
+	TEST_RES(add(request), _ret == 0);
+	struct lifetime_events events = lifetime_events(fd, 5000, DEPRECATION);
+
+	close(fd);
+	TEST_RES(events.deprecated, _ret == 1);
+	TEST_RES(change_netmask("lo:expiry", "255.255.0.0"), _ret == 0);
+	struct found_address found = find_address(PRIMARY);
+
+	printf("NET_EXPIRY netmask flags=%u prefix=%d valid-not-renewed=%d preferred=%u\n",
+	       found.flags, found.prefix_length, found.cache.ifa_valid < 4,
+	       found.cache.ifa_prefered);
+	TEST_RES(found.flags, _ret == IFA_F_DEPRECATED);
+	TEST_RES(found.prefix_length, _ret == 16);
+	TEST_RES(found.cache.ifa_valid, _ret > 0 && _ret < 4);
+	TEST_RES(found.cache.ifa_prefered, _ret == 0);
+	fd = rtnl_open(RTMGRP_IPV4_IFADDR);
+	TEST_RES(fd, _ret >= 0);
+	events = lifetime_events(fd, 6000, REMOVAL);
+	close(fd);
+	TEST_RES(events.removed, _ret == 1);
+	TEST_RES(events.deprecated, _ret == 0);
+	TEST_RES(find_address(PRIMARY).present, _ret == 0);
+}
+END_TEST()

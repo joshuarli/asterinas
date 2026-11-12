@@ -46,6 +46,7 @@ struct route_request {
 	uint32_t priority;
 	int with_priority;
 	uint32_t ifindex;
+	const char *gateway;
 };
 
 static int add_route(struct route_request route)
@@ -69,6 +70,11 @@ static int add_route(struct route_request route)
 		uint32_t ifindex = route.ifindex;
 
 		length = rtnl_put(payload, length, RTA_OIF, &ifindex, 4);
+	}
+	if (route.gateway) {
+		struct in_addr gateway = parse(route.gateway);
+
+		length = rtnl_put(payload, length, RTA_GATEWAY, &gateway, 4);
 	}
 	if (route.with_priority)
 		length = rtnl_put(payload, length, RTA_PRIORITY,
@@ -99,6 +105,11 @@ static int delete_route(struct route_request route)
 
 		length = rtnl_put(payload, length, RTA_OIF, &ifindex, 4);
 	}
+	if (route.gateway) {
+		struct in_addr gateway = parse(route.gateway);
+
+		length = rtnl_put(payload, length, RTA_GATEWAY, &gateway, 4);
+	}
 	if (route.with_priority)
 		length = rtnl_put(payload, length, RTA_PRIORITY,
 				  &route.priority, 4);
@@ -117,6 +128,8 @@ struct found_route {
 	int type;
 	int flags;
 	int has_gateway;
+	uint32_t gateway_address;
+	uint32_t ifindex;
 	int has_preferred_source;
 	int attributes_match;
 };
@@ -202,7 +215,14 @@ static struct found_route find_route(const char *destination,
 		found.scope = route->rtm_scope;
 		found.type = route->rtm_type;
 		found.flags = route->rtm_flags;
-		found.has_gateway = rtnl_find(first, length, RTA_GATEWAY) != NULL;
+		struct rtattr *gateway = rtnl_find(first, length, RTA_GATEWAY);
+		struct rtattr *oif = rtnl_find(first, length, RTA_OIF);
+
+		found.has_gateway = gateway != NULL;
+		if (gateway)
+			found.gateway_address = *(uint32_t *)RTA_DATA(gateway);
+		if (oif)
+			found.ifindex = *(uint32_t *)RTA_DATA(oif);
 		found.has_preferred_source =
 			rtnl_find(first, length, RTA_PREFSRC) != NULL;
 		found.attributes_match = attributes_match(
@@ -466,5 +486,49 @@ FN_TEST(the_device_route_types_share_the_dump)
 	TEST_RES(find_route("10.49.0.0", 16).count, _ret == 0);
 	TEST_RES(find_route("10.50.0.0", 16).count, _ret == 0);
 	TEST_RES(find_route("10.51.0.0", 16).count, _ret == 0);
+}
+END_TEST()
+
+FN_TEST(gateways_follow_the_route_type_scope_and_device_rules)
+{
+	const int types[] = { RTN_LOCAL, RTN_BROADCAST, RTN_ANYCAST,
+			      RTN_MULTICAST };
+	const int scopes[] = { RT_SCOPE_UNIVERSE, RT_SCOPE_LINK,
+			       RT_SCOPE_HOST, RT_SCOPE_NOWHERE };
+	uint32_t lo = if_nametoindex(DEVICE);
+	const uint32_t devices[] = { 0, lo, 4242 };
+
+	for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+		for (size_t s = 0; s < sizeof(scopes) / sizeof(scopes[0]); s++) {
+			for (size_t d = 0; d < sizeof(devices) / sizeof(devices[0]); d++) {
+				struct route_request route = device_route(
+					"10.60.0.0", 16, types[t], scopes[s]);
+				int result, expected = -EINVAL;
+
+				route.gateway = "127.0.0.2";
+				route.ifindex = devices[d];
+				if ((types[t] == RTN_MULTICAST || scopes[s] == RT_SCOPE_LINK) &&
+				    types[t] != RTN_LOCAL && scopes[s] < RT_SCOPE_HOST)
+					expected = d == 2 ? -ENETUNREACH : 0;
+				result = add_route(route);
+				TEST_RES(result, _ret == expected);
+				printf("NET_GATEWAY type=%d scope=%d device=%s errno=%d\n",
+				       types[t], scopes[s],
+				       d == 0 ? "inferred" : d == 1 ? "lo" : "missing",
+				       result);
+				if (result == 0) {
+					TEST_RES(find_route("10.60.0.0", 16).count, _ret == 1);
+					struct found_route found = find_route("10.60.0.0", 16);
+
+					TEST_RES(found.has_gateway, _ret == 1);
+					TEST_RES(found.gateway_address, _ret == parse(route.gateway).s_addr);
+					TEST_RES(found.ifindex, _ret == lo);
+					TEST_RES(found.scope, _ret == scopes[s]);
+					TEST_RES(found.type, _ret == types[t]);
+					TEST_RES(delete_route(route), _ret == 0);
+				}
+			}
+		}
+	}
 }
 END_TEST()

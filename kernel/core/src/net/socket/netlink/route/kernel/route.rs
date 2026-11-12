@@ -12,7 +12,7 @@ use crate::{
         iface::config,
         route::{
             Ipv4RouteSelector, NewIpv4Route, NewRouteAction, Rejection, RouteRecord, RouteType,
-            dump_routes,
+            dump_routes, Ipv4RouteQuery, Ipv4RouteQueryMode, lookup_ipv4_route,
         },
         socket::{
             netlink::{
@@ -25,13 +25,14 @@ use crate::{
         },
     },
     prelude::*,
+    process::posix_thread::AsPosixThread,
     util::net::CSocketAddrFamily,
 };
 
 pub(super) fn do_get_route(request_segment: &RouteSegment) -> Result<Vec<RtnlSegment>> {
     let flags = GetRequestFlags::from_bits_truncate(request_segment.header().flags);
     if !flags.contains(GetRequestFlags::DUMP) {
-        return_errno_with_message!(Errno::EOPNOTSUPP, "GETROUTE only supports dump requests");
+        return do_lookup_route(request_segment);
     }
 
     // Linux dumps every family when the requested family has no route handler.
@@ -55,6 +56,76 @@ pub(super) fn do_get_route(request_segment: &RouteSegment) -> Result<Vec<RtnlSeg
     Ok(response_segments)
 }
 
+const RTM_F_CLONED: u32 = 0x200;
+const RTM_F_LOOKUP_TABLE: u32 = 0x1000;
+const RTM_F_FIB_MATCH: u32 = 0x2000;
+
+fn do_lookup_route(request: &RouteSegment) -> Result<Vec<RtnlSegment>> {
+    let body = request.body();
+    if body.family != CSocketAddrFamily::AF_INET as u8 {
+        return_errno_with_message!(Errno::EOPNOTSUPP, "only IPv4 route queries are supported");
+    }
+    let mut query = Ipv4RouteQuery { mode: if body.flags & RTM_F_FIB_MATCH != 0 { Ipv4RouteQueryMode::FibMatch } else { Ipv4RouteQueryMode::Output }, destination: Ipv4Addr::UNSPECIFIED, source: None, device: None, mark: 0 };
+    let current = current_thread!();
+    let mut uid = Some(u32::from(current.as_posix_thread().unwrap().credentials().fsuid()));
+    for attr in request.attrs() {
+        match attr {
+            RouteAttr::Dst(IpAddr::V4(address)) => query.destination = *address,
+            RouteAttr::Src(IpAddr::V4(address)) => query.source = Some(*address).filter(|address| !address.is_unspecified()),
+            RouteAttr::Oif(index) => query.device = Some(*index).filter(|index| *index != 0),
+            RouteAttr::Mark(mark) => query.mark = *mark,
+            RouteAttr::Uid(value) => uid = Some(*value).filter(|value| *value != u32::MAX),
+            RouteAttr::Dst(IpAddr::V6(_)) | RouteAttr::Src(IpAddr::V6(_)) => {
+                return_errno_with_message!(Errno::EINVAL, "the route query attribute is invalid");
+            }
+            RouteAttr::Iif(index) if *index != 0 => {
+                return_errno_with_message!(Errno::EOPNOTSUPP, "input route queries are not supported");
+            }
+            _ => {}
+        }
+    }
+    let (record, source) = lookup_ipv4_route(&query)?;
+    let response = if body.flags & RTM_F_FIB_MATCH != 0 {
+        record_to_route(request.header(), CSegmentType::NEWROUTE, &record)
+    } else {
+        let output_index = record.iface_index.unwrap();
+        let output_is_loopback = crate::net::iface::iter_all_ifaces()
+            .any(|iface| iface.index() == output_index && iface.type_() == aster_bigtcp::iface::InterfaceType::LOOPBACK);
+        let flags = RTM_F_CLONED | match record.type_ {
+            RouteType::Broadcast => 0x9000_0000,
+            RouteType::Multicast => 0x2000_0000,
+            RouteType::Local => 0x8000_0000,
+            _ if output_is_loopback => 0x8000_0000,
+            _ => 0,
+        };
+        let table = if body.flags & RTM_F_LOOKUP_TABLE != 0 { record.table } else { 254 };
+        let mut attrs = vec![RouteAttr::Table(table), RouteAttr::Dst(IpAddr::V4(query.destination))];
+        if let Some(source) = query.source {
+            attrs.push(RouteAttr::Src(IpAddr::V4(source)));
+        }
+        attrs.push(RouteAttr::Oif(output_index));
+        if query.source.is_none() && let Some(source) = source {
+            attrs.push(RouteAttr::PrefSrc(IpAddr::V4(source)));
+        }
+        if !output_is_loopback && let Some(gateway) = record.gateway {
+            attrs.push(RouteAttr::Gateway(gateway));
+        }
+        if query.mark != 0 { attrs.push(RouteAttr::Mark(query.mark)); }
+        if let Some(uid) = uid { attrs.push(RouteAttr::Uid(uid)); }
+        attrs.push(RouteAttr::empty_cache_info());
+        let body = RouteSegmentBody {
+            family: CSocketAddrFamily::AF_INET as u8,
+            dst_len: 32, src_len: if query.source.is_some() { 32 } else { 0 }, tos: body.tos,
+            table: u8::try_from(table).unwrap_or(252), protocol: 0, scope: 0,
+            type_: record.type_ as u8, flags,
+        };
+        RouteSegment::new(CMsgSegHdr { len: 0, type_: CSegmentType::NEWROUTE as _, flags: 0, seq: request.header().seq, pid: request.header().pid }, body, attrs)
+    };
+    let mut segments = vec![RtnlSegment::NewRoute(response)];
+    segments.extend(super::acknowledgement(request.header()));
+    Ok(segments)
+}
+
 /// `RT_SCOPE_HOST` in Linux.
 const SCOPE_HOST: u8 = 254;
 
@@ -66,7 +137,7 @@ const SCOPE_NOWHERE: u8 = 255;
 ///
 /// Reference: <https://elixir.bootlin.com/linux/v7.1/source/net/ipv4/fib_semantics.c> (`fib_props`
 /// and `fib_create_info`).
-fn new_route_action(type_: u8, scope: u8, has_device: bool) -> Result<NewRouteAction> {
+fn new_route_action(type_: u8, scope: u8, parsed: &ParsedRoute) -> Result<NewRouteAction> {
     if scope < widest_scope(type_) {
         return_errno_with_message!(Errno::EINVAL, "the route type or its scope is invalid");
     }
@@ -80,7 +151,10 @@ fn new_route_action(type_: u8, scope: u8, has_device: bool) -> Result<NewRouteAc
             if scope > SCOPE_HOST {
                 return_errno_with_message!(Errno::EINVAL, "the route scope is invalid");
             }
-            if type_ != 1 && !has_device {
+            if parsed.gateway.is_some() && scope == SCOPE_HOST {
+                return_errno_with_message!(Errno::EINVAL, "a host route cannot have a gateway");
+            }
+            if type_ != 1 && parsed.iface_index.is_none() && parsed.gateway.is_none() {
                 return_errno_with_message!(Errno::ENODEV, "the route type needs a device");
             }
             let type_ = match type_ {
@@ -122,7 +196,7 @@ pub(super) fn do_new_route(request_segment: &RouteSegment) -> Result<()> {
             "replacing or appending a route is not supported"
         );
     }
-    let action = new_route_action(body.type_, body.scope, parsed.iface_index.is_some())?;
+    let action = new_route_action(body.type_, body.scope, &parsed)?;
 
     config::add_ipv4_route(
         NewIpv4Route {
@@ -204,7 +278,8 @@ impl ParsedRoute {
                 RouteAttr::Oif(index) => iface_index = Some(*index).filter(|index| *index != 0),
                 RouteAttr::Priority(value) => priority = Some(*value),
                 RouteAttr::Pref(_) => {}
-                RouteAttr::PrefSrc(_) | RouteAttr::CacheInfo(_) => {
+                RouteAttr::PrefSrc(_) | RouteAttr::CacheInfo(_) | RouteAttr::Src(_)
+                | RouteAttr::Iif(_) | RouteAttr::Mark(_) | RouteAttr::Uid(_) => {
                     return_errno_with_message!(
                         Errno::EOPNOTSUPP,
                         "the route attribute is not supported"

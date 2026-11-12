@@ -169,6 +169,13 @@ impl<A: RouteAddressFamily> RouteManager<A> {
     }
 
     pub(super) fn lookup_entry(&self, key: &RouteLookupKey<A>) -> Result<ResolvedRoute<A>> {
+        match self.lookup_matching_entry(key)?.to_match() {
+            RouteMatch::Resolved(route) => Ok(route),
+            RouteMatch::Rejected(_) => unreachable!(),
+        }
+    }
+
+    pub(super) fn lookup_matching_entry(&self, key: &RouteLookupKey<A>) -> Result<RouteEntry<A>> {
         for rules in self.rules.values() {
             for rule in rules {
                 if !rule.matches_mark(key.mark) { continue; }
@@ -181,7 +188,7 @@ impl<A: RouteAddressFamily> RouteManager<A> {
                             continue;
                         };
                         match route.to_match() {
-                            RouteMatch::Resolved(resolved) => return Ok(resolved),
+                            RouteMatch::Resolved(_) => return Ok(route),
                             RouteMatch::Rejected(Rejection::Throw) => continue,
                             RouteMatch::Rejected(Rejection::Blackhole) => {
                                 return_errno_with_message!(Errno::EINVAL, "the route discards the packet");

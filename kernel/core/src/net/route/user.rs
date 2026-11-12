@@ -16,8 +16,8 @@ use crate::{
     prelude::*,
 };
 
-/// The scope from which a route can no longer have a gateway (`RT_SCOPE_LINK`).
-const FIRST_SCOPE_WITHOUT_GATEWAY: u8 = 253;
+/// The scope from which a route can no longer have a gateway (`RT_SCOPE_HOST`).
+const FIRST_SCOPE_WITHOUT_GATEWAY: u8 = 254;
 
 /// `RT_SCOPE_HOST`, the only scope that a route through a device may have while the device is
 /// down.

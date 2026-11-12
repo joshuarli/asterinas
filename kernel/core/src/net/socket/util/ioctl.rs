@@ -211,6 +211,7 @@ fn set_iface_address(ifreq: &CIfReq) -> Result<()> {
             broadcast,
             label: Some(ifreq.name),
             scope,
+            lifetimes: config::Ipv4AddressLifetimes::PERMANENT,
         },
         RequestOrigin::KERNEL,
     )
@@ -616,8 +617,10 @@ impl CIfReq {
     }
 
     pub(in crate::net::socket) fn get_iface_by_name(&self) -> Result<&'static Arc<Iface>> {
+        let label = self.name.as_cstr().to_bytes();
+        let name = &label[..label.iter().position(|byte| *byte == b':').unwrap_or(label.len())];
         iter_all_ifaces()
-            .find(|iface| iface.name() == &self.name)
+            .find(|iface| iface.name().as_cstr().to_bytes() == name)
             .ok_or_else(|| Error::with_message(Errno::ENODEV, "no interface found"))
     }
 

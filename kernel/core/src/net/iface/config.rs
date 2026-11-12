@@ -5,6 +5,8 @@
 //! One lock serializes every change together with the update of the interface and the routes
 //! derived from it, so the routes always reflect the latest configuration.
 
+use core::time::Duration;
+
 use aster_bigtcp::{
     iface::{InterfaceFlags, InterfaceName},
     wire::{Ipv4Address, Ipv4Cidr},
@@ -18,6 +20,8 @@ use crate::{
         socket::netlink::{NetworkEvent, RequestOrigin, publish_network_events},
     },
     prelude::*,
+    thread::work_queue::{submit_work_item, work_item::WorkItem, WorkPriority},
+    time::{clocks::MonotonicClock, timer::{Timer, Timeout}},
 };
 
 /// The state of the lock is the list of all IPv4 addresses.
@@ -35,7 +39,9 @@ pub(in crate::net) struct InterfaceAddress {
     label: InterfaceName,
     scope: u8,
     secondary: bool,
-    created_centiseconds: u32,
+    created_at: Duration,
+    lifetimes: Ipv4AddressLifetimes,
+    deprecated: bool,
 }
 
 impl InterfaceAddress {
@@ -73,7 +79,44 @@ impl InterfaceAddress {
 
     /// The creation time, in hundredths of a second since boot.
     pub(in crate::net) fn created_centiseconds(&self) -> u32 {
-        self.created_centiseconds
+        (self.created_at.as_millis() / 10) as u32
+    }
+
+    pub(in crate::net) fn preferred_lifetime(&self) -> u32 {
+        if self.lifetimes.valid == u32::MAX { return u32::MAX; }
+        self.remaining_lifetime(self.lifetimes.preferred)
+    }
+
+    pub(in crate::net) fn valid_lifetime(&self) -> u32 {
+        self.remaining_lifetime(self.lifetimes.valid)
+    }
+
+    pub(in crate::net) fn is_deprecated(&self) -> bool { self.deprecated }
+
+    fn remaining_lifetime(&self, lifetime: u32) -> u32 {
+        if lifetime == u32::MAX { return u32::MAX; }
+        let elapsed = aster_time::read_monotonic_time().saturating_sub(self.created_at).as_secs();
+        lifetime.saturating_sub(u32::try_from(elapsed).unwrap_or(u32::MAX))
+    }
+
+    fn deadline(&self, lifetime: u32) -> Option<Duration> {
+        (lifetime != u32::MAX).then(|| self.created_at + Duration::from_secs(u64::from(lifetime)))
+    }
+}
+
+/// The preferred and valid IPv4 address lifetimes in seconds; `u32::MAX` means forever.
+#[derive(Clone, Copy)]
+pub(in crate::net) struct Ipv4AddressLifetimes { preferred: u32, valid: u32 }
+
+impl Ipv4AddressLifetimes {
+    pub(in crate::net) const PERMANENT: Self = Self { preferred: u32::MAX, valid: u32::MAX };
+
+    pub(in crate::net) fn new(preferred: u32, valid: u32) -> Result<Self> {
+        if valid == 0 || preferred > valid {
+            return_errno_with_message!(Errno::EINVAL, "the address lifetimes are invalid");
+        }
+        let preferred = if valid == u32::MAX && preferred != 0 { u32::MAX } else { preferred };
+        Ok(Self { preferred, valid })
     }
 }
 
@@ -83,6 +126,7 @@ pub(in crate::net) struct NewAddress {
     pub broadcast: Option<Ipv4Address>,
     pub label: Option<InterfaceName>,
     pub scope: u8,
+    pub lifetimes: Ipv4AddressLifetimes,
 }
 
 /// Selects the address an unassign request removes.
@@ -117,7 +161,9 @@ pub(super) fn init() {
                 label: *iface.name(),
                 scope: LOOPBACK_SCOPE,
                 secondary: false,
-                created_centiseconds: 0,
+                created_at: Duration::ZERO,
+                lifetimes: Ipv4AddressLifetimes::PERMANENT,
+                deprecated: false,
             })
         })
         .collect();
@@ -242,7 +288,9 @@ pub(in crate::net) fn add_ipv4_address(
     origin: RequestOrigin,
 ) -> Result<()> {
     let mut addresses = IPV4_ADDRESSES.get().unwrap().lock();
-    let (added, changes) = insert_locked(&mut addresses, iface, request)?;
+    let inserted = insert_locked(&mut addresses, iface, request);
+    schedule_address_expiry(&addresses);
+    let (added, changes) = inserted?;
     let mut events = vec![NetworkEvent::AddressAdded {
         address: added,
         origin,
@@ -280,7 +328,9 @@ pub(in crate::net) fn replace_labeled_ipv4_address(
         ));
     }
 
-    let (added, changes) = insert_locked(&mut addresses, iface, request)?;
+    let inserted = insert_locked(&mut addresses, iface, request);
+    schedule_address_expiry(&addresses);
+    let (added, changes) = inserted?;
     events.push(NetworkEvent::AddressAdded {
         address: added,
         origin,
@@ -327,15 +377,14 @@ pub(in crate::net) fn set_labeled_ipv4_netmask(
     } else {
         existing.broadcast()
     };
-    let request = NewAddress {
-        cidr,
-        broadcast,
-        label: Some(*existing.label()),
-        scope: existing.scope(),
-    };
+    let mut replacement = existing;
+    replacement.cidr = cidr;
+    replacement.broadcast = broadcast;
 
     let mut events = removal_events(remove_locked(&mut addresses, iface, &selector)?, origin);
-    let (added, changes) = insert_locked(&mut addresses, iface, request)?;
+    let inserted = insert_address_locked(&mut addresses, replacement);
+    schedule_address_expiry(&addresses);
+    let (added, changes) = inserted?;
     events.push(NetworkEvent::AddressAdded {
         address: added,
         origin,
@@ -365,16 +414,35 @@ fn insert_locked(
     iface: &Arc<Iface>,
     request: NewAddress,
 ) -> Result<(InterfaceAddress, IfaceRouteChanges)> {
+    let new_address = InterfaceAddress {
+        iface: iface.clone(),
+        cidr: request.cidr,
+        broadcast: request.broadcast,
+        label: request.label.unwrap_or(*iface.name()),
+        scope: request.scope,
+        secondary: false,
+        created_at: aster_time::read_monotonic_time(),
+        lifetimes: request.lifetimes,
+        deprecated: request.lifetimes.preferred == 0,
+    };
+    insert_address_locked(addresses, new_address)
+}
+
+fn insert_address_locked(
+    addresses: &mut Vec<InterfaceAddress>,
+    mut new_address: InterfaceAddress,
+) -> Result<(InterfaceAddress, IfaceRouteChanges)> {
+    let iface = new_address.iface.clone();
     let mut secondary = false;
     for address in addresses
         .iter()
-        .filter(|address| Arc::ptr_eq(&address.iface, iface))
-        .filter(|address| same_network(&address.cidr, &request.cidr))
+        .filter(|address| Arc::ptr_eq(&address.iface, &iface))
+        .filter(|address| same_network(&address.cidr, &new_address.cidr))
     {
-        if address.address() == request.cidr.address() {
+        if address.address() == new_address.cidr.address() {
             return_errno_with_message!(Errno::EEXIST, "the interface already has the address");
         }
-        if address.scope != request.scope {
+        if address.scope != new_address.scope {
             return_errno_with_message!(
                 Errno::EINVAL,
                 "an address on the same network has another scope"
@@ -382,15 +450,7 @@ fn insert_locked(
         }
         secondary = true;
     }
-    let new_address = InterfaceAddress {
-        iface: iface.clone(),
-        cidr: request.cidr,
-        broadcast: request.broadcast,
-        label: request.label.unwrap_or(*iface.name()),
-        scope: request.scope,
-        secondary,
-        created_centiseconds: now_centiseconds(),
-    };
+    new_address.secondary = secondary;
 
     let mut updated = addresses.clone();
     let position = if secondary {
@@ -401,19 +461,19 @@ fn insert_locked(
         let last_primary = updated
             .iter()
             .rposition(|address| {
-                Arc::ptr_eq(&address.iface, iface)
+                Arc::ptr_eq(&address.iface, &iface)
                     && !address.secondary
                     && new_address.scope <= address.scope
             })
             .map(|index| index + 1);
         let first_of_iface = updated
             .iter()
-            .position(|address| Arc::ptr_eq(&address.iface, iface));
+            .position(|address| Arc::ptr_eq(&address.iface, &iface));
         last_primary.or(first_of_iface).unwrap_or(updated.len())
     };
     updated.insert(position, new_address.clone());
 
-    let changes = commit(iface, addresses, updated)?;
+    let changes = commit(&iface, addresses, updated)?;
     Ok((new_address, changes))
 }
 
@@ -427,7 +487,9 @@ pub(in crate::net) fn remove_ipv4_address(
     origin: RequestOrigin,
 ) -> Result<()> {
     let mut addresses = IPV4_ADDRESSES.get().unwrap().lock();
-    let removals = remove_locked(&mut addresses, iface, selector)?;
+    let removed = remove_locked(&mut addresses, iface, selector);
+    schedule_address_expiry(&addresses);
+    let removals = removed?;
     publish_network_events(removal_events(removals, origin));
     Ok(())
 }
@@ -534,6 +596,54 @@ fn same_network(first: &Ipv4Cidr, second: &Ipv4Cidr) -> bool {
     first.prefix_len() == second.prefix_len() && first.network() == second.network()
 }
 
-fn now_centiseconds() -> u32 {
-    (aster_time::read_monotonic_time().as_millis() / 10) as u32
+struct AddressExpiry {
+    timer: Arc<Timer>,
+    work: Arc<WorkItem>,
+}
+
+static ADDRESS_EXPIRY: Once<AddressExpiry> = Once::new();
+
+fn schedule_address_expiry(addresses: &[InterfaceAddress]) {
+    let deadline = addresses.iter().flat_map(|address| {
+        [address.deadline(address.lifetimes.valid),
+            (!address.deprecated).then(|| address.deadline(address.lifetimes.preferred)).flatten()]
+            .into_iter().flatten()
+    }).min();
+    let Some(deadline) = deadline else {
+        if let Some(expiry) = ADDRESS_EXPIRY.get() { expiry.timer.lock().cancel(); }
+        return;
+    };
+    let expiry = ADDRESS_EXPIRY.call_once(|| AddressExpiry {
+        timer: MonotonicClock::timer_manager().create_timer(|_| {
+            submit_work_item(ADDRESS_EXPIRY.get().unwrap().work.clone(), WorkPriority::Normal);
+        }),
+        work: WorkItem::new(Box::new(expire_ipv4_addresses)),
+    });
+    let mut timer = expiry.timer.lock();
+    let armed = timer.expired_time();
+    if armed <= aster_time::read_monotonic_time() || deadline < armed {
+        timer.set_timeout(Timeout::When(deadline));
+    }
+}
+
+fn expire_ipv4_addresses() {
+    let mut addresses = IPV4_ADDRESSES.get().unwrap().lock();
+    let now = aster_time::read_monotonic_time();
+    let mut events = Vec::new();
+    while let Some(expired) = addresses.iter().find(|address| {
+        address.deadline(address.lifetimes.valid).is_some_and(|deadline| deadline <= now)
+    }).cloned() {
+        let selector = AddressSelector { local: Some(expired.address()), network_member: None, label: None };
+        let removed = remove_locked(&mut addresses, &expired.iface, &selector)
+            .expect("removing addresses cannot exceed the interface capacity");
+        events.extend(removal_events(removed, RequestOrigin::KERNEL));
+    }
+    for address in addresses.iter_mut() {
+        if !address.deprecated && address.deadline(address.lifetimes.preferred).is_some_and(|deadline| deadline <= now) {
+            address.deprecated = true;
+            events.push(NetworkEvent::AddressAdded { address: address.clone(), origin: RequestOrigin::KERNEL });
+        }
+    }
+    publish_network_events(events);
+    schedule_address_expiry(&addresses);
 }

@@ -415,6 +415,67 @@ fn sync_gateway_routes(manager: &RouteManager<Ipv4Address>, iface: &Arc<Iface>) 
     })
 }
 
+pub(in crate::net) enum Ipv4RouteQueryMode { Output, FibMatch }
+
+pub(in crate::net) struct Ipv4RouteQuery {
+    pub mode: Ipv4RouteQueryMode,
+    pub destination: Ipv4Address,
+    pub source: Option<Ipv4Address>,
+    pub device: Option<u32>,
+    pub mark: u32,
+}
+
+/// Resolves an IPv4 output query through the same policy rules and tables as sockets.
+pub(in crate::net) fn lookup_ipv4_route(query: &Ipv4RouteQuery) -> Result<(RouteRecord, Option<Ipv4Address>)> {
+    if let Some(index) = query.device {
+        let iface = iface::iter_all_ifaces().find(|iface| iface.index() == index)
+            .ok_or_else(|| Error::from(Errno::ENODEV))?;
+        if !iface.flags().contains(InterfaceFlags::UP) {
+            return_errno_with_message!(Errno::ENETUNREACH, "the output interface is down");
+        }
+    }
+    if let Some(source) = query.source.filter(|source| !source.is_unspecified()) {
+        let local = IPV4_ROUTE_MANAGER.get().unwrap().read()
+            .lookup_in_local_table(&RouteLookupKey::new(source));
+        if !local.is_some_and(|route| route.type_ == RouteType::Local) {
+            return_errno_with_message!(Errno::ENETUNREACH, "the source address is not local unicast");
+        }
+    }
+    let destination = if query.destination.is_unspecified() {
+        query.source.filter(|source| !source.is_unspecified()).unwrap_or(Ipv4Address::LOCALHOST)
+    } else {
+        query.destination
+    };
+    let key = RouteLookupKey { dst: destination, mark: query.mark, direct: false, device: query.device };
+    let entry = match IPV4_ROUTE_MANAGER.get().unwrap().read().lookup_matching_entry(&key) {
+        Ok(entry) => entry,
+        Err(error) => {
+            let Some(index) = query.device else { return Err(error); };
+            if matches!(query.mode, Ipv4RouteQueryMode::FibMatch) {
+                return_errno_with_message!(Errno::EHOSTUNREACH, "the direct output path has no FIB entry");
+            }
+            let iface = iface::iter_all_ifaces().find(|iface| iface.index() == index).unwrap();
+            RouteEntry::new(Ipv4Cidr::new(destination, 32), None, iface.clone(), RouteTableId::MAIN,
+                RouteMetric::default(), RouteType::Unicast,
+                RouteOrigin { protocol: RouteProtocol::new(0), scope: RouteScope::LINK, preferred_source: None })?
+        }
+    };
+    let record = entry_record(&entry);
+    let source = if let Some(source) = query.source.filter(|source| !source.is_unspecified()) {
+        Some(source)
+    } else if let Some(source) = entry.origin().preferred_source {
+        Some(source)
+    } else if entry.type_() == RouteType::Local {
+        Some(destination)
+    } else {
+        let addresses = config::ipv4_addresses(entry.output_iface().unwrap());
+        let mut candidates = addresses.iter().filter(|address| !address.is_secondary() && address.scope() <= entry.origin().scope.get());
+        candidates.clone().find(|address| address.cidr().contains_addr(&destination))
+            .or_else(|| candidates.next()).map(InterfaceAddress::address)
+    };
+    Ok((record, source))
+}
+
 /// Looks up the output interface for an IP destination.
 pub(super) fn lookup_iface(dst: IpAddress) -> Result<Arc<Iface>> {
     lookup_iface_with_scope(dst, false, None)
