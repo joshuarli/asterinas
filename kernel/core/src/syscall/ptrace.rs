@@ -37,6 +37,7 @@ pub(super) fn sys_ptrace(
             let current_thread = current_thread!();
             let parent_guard = ctx.process.parent().lock();
             let parent_main_thread = parent_guard.process().upgrade().unwrap().main_thread();
+            drop(parent_guard);
 
             do_ptrace_attach(&parent_main_thread, current_thread)?;
         }
