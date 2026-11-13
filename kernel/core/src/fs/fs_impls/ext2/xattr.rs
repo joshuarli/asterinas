@@ -45,8 +45,8 @@
 //! - `name_len` — byte length of the suffix that follows the header.
 //! - `value_offset` — byte offset of the value from the start of the block.
 //! - `value_len` — byte length of the value.
-//! - `hash` — per-entry hash covering name and value (currently always 0;
-//!   block sharing via mb_cache is not implemented).
+//! - `hash` — per-entry hash covering name and value, computed as in Linux
+//!   (block sharing via mb_cache is not implemented).
 //!
 //! The entry list is terminated by an `XattrEntry` with `name_len == 0`
 //! (a 16-byte zeroed header), matching Linux's `IS_LAST_ENTRY` check.
@@ -500,11 +500,12 @@ impl XattrCache {
             .fill_zeros(0, BLOCK_SIZE)
             .map_err(|(error, _)| error)?;
 
+        let entry_hashes: Vec<u32> = entries.iter().map(XattrEntryData::hash).collect();
         let header = XattrHeader {
             magic: XATTR_MAGIC,
             ref_count: 1,
             nblocks: XATTR_NBLOCKS as u32,
-            hash: 0,
+            hash: xattr_block_hash(&entry_hashes),
             reserved: [0u32; 4],
         };
         block.write_val(0, &header)?;
@@ -512,7 +513,7 @@ impl XattrCache {
         let mut entry_cursor = XATTR_HEADER_SIZE;
         let mut value_cursor = BLOCK_SIZE;
 
-        for entry in entries {
+        for (entry, &entry_hash) in entries.iter().zip(&entry_hashes) {
             let entry_padded_size = xattr_entry_len(entry.name.len());
             let value_padded_size = xattr_value_size(entry.value.len());
 
@@ -538,7 +539,7 @@ impl XattrCache {
                 },
                 value_block: 0,
                 value_len: entry.value.len() as u32,
-                hash: 0,
+                hash: entry_hash,
             };
             block.write_val(entry_cursor, &raw_entry)?;
 
@@ -718,14 +719,41 @@ impl XattrNameIndex {
 ///   store the name as an owned `Vec<u8>` during the in-memory phase.  It
 ///   is written back to the correct offset in the block buffer on flush.
 /// - **`hash` is not stored here**: The per-entry hash in `XattrEntry::hash`
-///   is always written as zero.  Block sharing via `mb_cache` (which would
-///   require hash-based deduplication) is not implemented; `ref_count` is
-///   always 1.
+///   is recomputed from the name and value on every flush.  Block sharing via
+///   `mb_cache` is not implemented; `ref_count` is always 1.
 #[derive(Clone, Debug)]
 struct XattrEntryData {
     name_index: XattrNameIndex,
     name: Vec<u8>,
     value: Vec<u8>,
+}
+
+impl XattrEntryData {
+    /// Computes Linux `ext2_xattr_hash_entry` for an inline value; e2fsck
+    /// rejects entries whose stored hash differs.
+    fn hash(&self) -> u32 {
+        let name_hash = self
+            .name
+            .iter()
+            .fold(0u32, |hash, &byte| hash.rotate_left(5) ^ u32::from(byte));
+        self.value
+            .chunks(XATTR_ALIGN)
+            .fold(name_hash, |hash, chunk| {
+                let mut word = [0u8; XATTR_ALIGN];
+                word[..chunk.len()].copy_from_slice(chunk);
+                hash.rotate_left(16) ^ u32::from_le_bytes(word)
+            })
+    }
+}
+
+/// Computes Linux `ext2_xattr_rehash`: a zero entry hash zeroes the block hash.
+fn xattr_block_hash(entry_hashes: &[u32]) -> u32 {
+    if entry_hashes.contains(&0) {
+        return 0;
+    }
+    entry_hashes
+        .iter()
+        .fold(0, |hash, &entry_hash| hash.rotate_left(16) ^ entry_hash)
 }
 
 /// On-disk header of an ext2 extended-attribute block (32 bytes).
@@ -765,4 +793,36 @@ fn cmp_entry_key(
         .cmp(&(rhs_index as u8))
         .then(lhs_name.len().cmp(&rhs_name.len()))
         .then(lhs_name.cmp(rhs_name))
+}
+
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    fn disk_acl() -> Vec<u8> {
+        let mut acl = 1u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in [(1u16, 6u16, None), (2, 4, Some(12345u32)), (4, 0, None), (8, 2, Some(12346)), (16, 6, None), (32, 0, None)] {
+            acl.extend_from_slice(&tag.to_le_bytes());
+            acl.extend_from_slice(&perm.to_le_bytes());
+            if let Some(id) = id {
+                acl.extend_from_slice(&id.to_le_bytes());
+            }
+        }
+        acl
+    }
+
+    /// Expected hashes were read from EA blocks written by Linux ext2 and
+    /// accepted by `e2fsck -fn`.
+    #[ktest]
+    fn entry_hash_matches_linux() {
+        let acl = XattrEntryData { name_index: XattrNameIndex::PosixAclAccess, name: Vec::new(), value: disk_acl() };
+        let mime = XattrEntryData { name_index: XattrNameIndex::User, name: b"mime".to_vec(), value: b"text/plain".to_vec() };
+        assert_eq!(acl.value.len(), 36);
+        assert_eq!(acl.hash(), 0x3024_301f);
+        assert_eq!(mime.hash(), 0x2d92_6a46);
+        assert_eq!(xattr_block_hash(&[acl.hash()]), 0x3024_301f);
+        assert_eq!(xattr_block_hash(&[acl.hash(), 0]), 0);
+    }
 }

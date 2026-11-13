@@ -315,3 +315,48 @@ fn decode_disk_acl(disk: &[u8]) -> Result<Option<PosixAcl>> {
     }
     PosixAcl::decode(&wire).map_err(|_| Error::with_message(Errno::EIO, "invalid ext2 ACL entries"))
 }
+
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::ktest;
+
+    use super::*;
+    use crate::fs::ext2::{
+        inode::test::read_raw_inode_from_disk,
+        test_utils::{create_file, default_fixture},
+    };
+
+    const BLOCK_SECTORS: u32 = (BLOCK_SIZE / SECTOR_SIZE) as u32;
+
+    #[ktest]
+    fn xattr_block_is_counted_in_i_blocks() {
+        let (f, root) = default_fixture();
+        let file = create_file(&root, "file");
+        let data = vec![0x5au8; BLOCK_SIZE];
+        file.write_direct_at(0, &mut VmReader::from(data.as_slice()).to_fallible())
+            .unwrap();
+        let name = XattrName::try_from_full_name("user.mime").unwrap();
+        file.set_xattr(
+            name,
+            &mut VmReader::from(b"text/plain".as_slice()).to_fallible(),
+            XattrSetFlags::CREATE_OR_REPLACE,
+        )
+        .unwrap();
+        f.ext2.sync_all().unwrap();
+        let raw = read_raw_inode_from_disk(&f, file.ino());
+        assert_ne!(raw.file_acl, 0);
+        assert_eq!(raw.sector_count, 2 * BLOCK_SECTORS);
+        assert_eq!(file.metadata().nr_sectors_allocated, 2 * BLOCK_SECTORS as usize);
+
+        file.write_direct_at(BLOCK_SIZE, &mut VmReader::from(data.as_slice()).to_fallible())
+            .unwrap();
+        f.ext2.sync_all().unwrap();
+        assert_eq!(read_raw_inode_from_disk(&f, file.ino()).sector_count, 3 * BLOCK_SECTORS);
+
+        file.remove_xattr(name).unwrap();
+        f.ext2.sync_all().unwrap();
+        let raw = read_raw_inode_from_disk(&f, file.ino());
+        assert_eq!(raw.file_acl, 0);
+        assert_eq!(raw.sector_count, 2 * BLOCK_SECTORS);
+    }
+}

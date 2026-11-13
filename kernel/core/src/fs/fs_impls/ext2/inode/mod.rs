@@ -592,8 +592,13 @@ impl InodeInner {
 }
 
 impl InodePayload {
+    /// On disk, `i_blocks` also counts the external xattr block. The payload
+    /// tracks data sectors only; `raw_block_ptrs` adds the xattr block back.
     fn new(inode_desc: &Dirty<InodeDesc>, fs: Weak<Ext2>) -> Self {
-        let raw_block_ptrs = RawBlockPtrs::new(inode_desc.sector_count, inode_desc.block_ptrs);
+        let data_sectors = inode_desc
+            .sector_count
+            .saturating_sub(Self::xattr_sectors(inode_desc.file_acl));
+        let raw_block_ptrs = RawBlockPtrs::new(data_sectors, inode_desc.block_ptrs);
         match inode_desc.type_ {
             InodeType::File | InodeType::Dir => {
                 Self::new_data_backed(inode_desc.size as usize, raw_block_ptrs, fs)
@@ -663,17 +668,20 @@ impl InodePayload {
     }
 
     fn raw_block_ptrs(&self, file_acl: u32) -> RawBlockPtrs {
+        let xattr_sectors = Self::xattr_sectors(file_acl);
         match self {
-            Self::DataBacked { block_manager, .. } => block_manager.raw_block_ptrs(),
-            Self::FastSymlink { target } => {
-                RawBlockPtrs::new(Self::xattr_sectors(file_acl), target.block_ptrs())
+            Self::DataBacked { block_manager, .. } => {
+                let mut raw_block_ptrs = block_manager.raw_block_ptrs();
+                raw_block_ptrs.sector_count = raw_block_ptrs.sector_count.saturating_add(xattr_sectors);
+                raw_block_ptrs
             }
+            Self::FastSymlink { target } => RawBlockPtrs::new(xattr_sectors, target.block_ptrs()),
             Self::Device { device_id } => {
-                let mut raw_block_ptrs = RawBlockPtrs::new(0, [0; RAW_BLOCK_PTRS_LEN]);
+                let mut raw_block_ptrs = RawBlockPtrs::new(xattr_sectors, [0; RAW_BLOCK_PTRS_LEN]);
                 raw_block_ptrs.write_device_id(*device_id);
                 raw_block_ptrs
             }
-            Self::NoPayload => RawBlockPtrs::new(0, [0; RAW_BLOCK_PTRS_LEN]),
+            Self::NoPayload => RawBlockPtrs::new(xattr_sectors, [0; RAW_BLOCK_PTRS_LEN]),
         }
     }
 }
