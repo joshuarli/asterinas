@@ -6,6 +6,7 @@ use core::{
 };
 
 use aster_bigtcp::{
+    diagnostic::TcpDiagnosticIdentity,
     socket::RawTcpOption,
     wire::{IpAddress, IpEndpoint, Ipv6Address},
 };
@@ -114,6 +115,7 @@ impl InitStream {
         option: &RawTcpOption,
         can_reuse: bool,
         observer: StreamObserver,
+        diagnostic: Arc<TcpDiagnosticIdentity>,
     ) -> Result<ConnectingStream, (Error, Self)> {
         debug_assert!(
             self.is_connect_done,
@@ -189,7 +191,7 @@ impl InitStream {
             ));
         }
 
-        ConnectingStream::new(bound_port, remote_endpoint, option, observer).map_err(
+        ConnectingStream::new(bound_port, remote_endpoint, option, observer, diagnostic).map_err(
             |(err, bound_port)| {
                 if err.error() == Errno::ECONNREFUSED {
                     (err, InitStream::new_refused(bound_port))
@@ -224,6 +226,7 @@ impl InitStream {
         backlog: usize,
         option: &RawTcpOption,
         observer: StreamObserver,
+        diagnostic: Arc<TcpDiagnosticIdentity>,
     ) -> Result<ListenStream, (Error, Self)> {
         if !self.is_connect_done {
             // See the comments of `is_connect_done`.
@@ -247,7 +250,7 @@ impl InitStream {
             ));
         };
 
-        match ListenStream::new(bound_port, backlog, option, observer) {
+        match ListenStream::new(bound_port, backlog, option, observer, diagnostic) {
             Ok(listen_stream) => Ok(listen_stream),
             Err((bound_port, error)) => Err((error, Self::new_bound(bound_port))),
         }

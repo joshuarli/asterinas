@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
+    diagnostic::TcpDiagnosticIdentity,
     errors::tcp::{IoError, RecvError, ResetError, SendError},
     socket::{NeedIfacePoll, RawTcpSetOption},
     wire::IpEndpoint,
@@ -35,6 +36,10 @@ pub(super) struct ConnectedStream {
 }
 
 impl ConnectedStream {
+    pub(super) fn diagnostic_identity(&self) -> Arc<TcpDiagnosticIdentity> {
+        self.tcp_conn.diagnostic_identity()
+    }
+
     pub(super) fn new(
         tcp_conn: TcpConnection,
         remote_endpoint: IpEndpoint,

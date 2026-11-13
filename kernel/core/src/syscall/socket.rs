@@ -6,7 +6,7 @@ use crate::{
     net::socket::{
         ip::{DatagramSocket, IpAddressFamily, IpPacketSocket, StreamSocket},
         netlink::{
-            NetlinkGenericSocket, NetlinkRouteSocket, NetlinkUeventSocket, StandardNetlinkProtocol,
+            NetlinkGenericSocket, NetlinkRouteSocket, NetlinkSockDiagSocket, NetlinkUeventSocket, StandardNetlinkProtocol,
             is_valid_protocol,
         },
         packet::PacketSocket,
@@ -79,6 +79,9 @@ pub(super) fn sys_socket(
             match netlink_family {
                 Ok(StandardNetlinkProtocol::ROUTE) => {
                     NetlinkRouteSocket::new(is_nonblocking, sock_type) as Arc<dyn FileLike>
+                }
+                Ok(StandardNetlinkProtocol::SOCK_DIAG) => {
+                    NetlinkSockDiagSocket::new(is_nonblocking, sock_type) as Arc<dyn FileLike>
                 }
                 Ok(StandardNetlinkProtocol::GENERIC) => {
                     NetlinkGenericSocket::new(is_nonblocking, sock_type) as Arc<dyn FileLike>

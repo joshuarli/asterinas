@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
+    diagnostic::{TcpAddressFamily, TcpDiagnosticIdentity},
     socket::{NeedIfacePoll, RawTcpOption, RawTcpSetOption},
     time::Duration,
     wire::IpEndpoint,
@@ -24,13 +25,14 @@ use super::{
     options::{IpOptionSet, Mtu, SetIpLevelOption},
 };
 use crate::{
+    process::posix_thread::AsPosixThread,
     events::IoEvents,
     fs::file::{FileCommon, FileLike},
     net::{
         iface::Iface,
         route::lookup_output_route,
         socket::{
-            Socket, new_socket_common,
+            Socket, new_udp_socket_common,
             options::{
                 Error as SocketError, SocketMark, SocketOption,
                 macros::{sock_option_mut, sock_option_ref},
@@ -69,6 +71,7 @@ pub(crate) struct StreamSocket {
 
     pollee: Pollee,
     common: FileCommon,
+    diagnostic: Arc<TcpDiagnosticIdentity>,
 }
 
 enum State {
@@ -112,13 +115,20 @@ impl OptionSet {
 impl StreamSocket {
     pub(crate) fn new(is_nonblocking: bool, family: IpAddressFamily) -> Arc<Self> {
         let init_stream = InitStream::new();
+        let credentials = current_thread!().as_posix_thread().unwrap().credentials();
+        let (common, owner) = new_udp_socket_common(is_nonblocking, credentials.fsuid(), credentials.fsgid());
+        let diagnostic = TcpDiagnosticIdentity::new(owner, common.path().inode().ino(), match family {
+            IpAddressFamily::IPv4 => TcpAddressFamily::Ipv4,
+            IpAddressFamily::IPv6 => TcpAddressFamily::Ipv6,
+        });
         Arc::new(Self {
             state: RwLock::new(Takeable::new(State::Init(init_stream))),
             family,
             options: RwLock::new(OptionSet::new()),
             timeouts: SocketTimeouts::new(),
             pollee: Pollee::new(),
-            common: new_socket_common(is_nonblocking),
+            common,
+            diagnostic,
         })
     }
 
@@ -161,6 +171,10 @@ impl StreamSocket {
             options
         });
 
+        let credentials = current_thread!().as_posix_thread().unwrap().credentials();
+        let (common, owner) = new_udp_socket_common(is_nonblocking, credentials.fsuid(), credentials.fsgid());
+        let diagnostic = connected_stream.diagnostic_identity();
+        diagnostic.attach(owner, common.path().inode().ino());
         let pollee = Pollee::new();
         connected_stream.init_observer(StreamObserver::new(pollee.clone()));
 
@@ -170,7 +184,8 @@ impl StreamSocket {
             options: RwLock::new(options),
             timeouts: listener_timeouts.clone(),
             pollee,
-            common: new_socket_common(is_nonblocking),
+            common,
+            diagnostic,
         })
     }
 
@@ -276,6 +291,7 @@ impl StreamSocket {
                 &raw_option,
                 options.socket.reuse_addr(),
                 StreamObserver::new(self.pollee.clone()),
+                self.diagnostic.clone(),
             ) {
                 Ok(connecting_stream) => {
                     let iface_to_poll = connecting_stream.iface().clone();
@@ -534,6 +550,7 @@ impl Socket for StreamSocket {
                 backlog,
                 &raw_option,
                 StreamObserver::new(self.pollee.clone()),
+                self.diagnostic.clone(),
             ) {
                 Ok(listen_stream) => listen_stream,
                 Err((err, init_stream)) => {
@@ -1045,6 +1062,7 @@ impl SetIpLevelOption for State {
 
 impl Drop for StreamSocket {
     fn drop(&mut self) {
+        self.diagnostic.detach();
         let state = self.state.get_mut().take();
 
         let conn = match state {

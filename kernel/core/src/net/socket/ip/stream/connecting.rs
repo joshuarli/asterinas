@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
+    diagnostic::TcpDiagnosticIdentity,
     errors::tcp::ConnectError,
     socket::{ConnectState, RawTcpOption, RawTcpSetOption},
     wire::IpEndpoint,
@@ -30,9 +31,10 @@ impl ConnectingStream {
         remote_endpoint: IpEndpoint,
         option: &RawTcpOption,
         observer: StreamObserver,
+        diagnostic: Arc<TcpDiagnosticIdentity>,
     ) -> Result<Self, (Error, BoundTcpPort)> {
         let tcp_conn =
-            match TcpConnection::new_connect(bound_port, remote_endpoint, option, observer) {
+            match TcpConnection::new_connect(bound_port, remote_endpoint, option, observer, diagnostic) {
                 Ok(tcp_conn) => tcp_conn,
                 Err((bound_port, ConnectError::AddressInUse)) => {
                     return Err((

@@ -26,6 +26,7 @@ use super::{
 };
 use crate::{
     define_boolean_value,
+    diagnostic::{TcpDiagnosticIdentity, TcpSocketSnapshot},
     errors::tcp::{ConnectError, IoError, RecvError, ResetError, SendError},
     ext::Ext,
     iface::{BoundTcpPort, PacketSlice, PathMtuRoute, PollKey, PollableIfaceMut},
@@ -42,6 +43,7 @@ pub type TcpConnection<E> = Socket<TcpConnectionInner<E>, E>;
 /// States needed by [`TcpConnectionBg`].
 pub struct TcpConnectionInner<E: Ext> {
     socket: SpinLock<RawTcpSocketExt<E>, BottomHalfDisabled>,
+    diagnostic: Arc<TcpDiagnosticIdentity>,
     poll_key: PollKey,
     connection_key: ConnectionKey,
     mark_route: AtomicU64,
@@ -54,6 +56,7 @@ pub struct RawTcpSocketExt<E: Ext> {
     has_connected: bool,
     /// Indicates if the receiving side of this socket is shut down by the user.
     is_recv_shut: bool,
+    is_send_shut: bool,
     reset_error: Option<ResetError>,
 }
 
@@ -224,6 +227,7 @@ impl<E: Ext> TcpConnectionInner<E> {
         listener: Option<Arc<TcpListenerBg<E>>>,
         weak_self: &Weak<TcpConnectionBg<E>>,
         mark: u32,
+        diagnostic: Arc<TcpDiagnosticIdentity>,
     ) -> Self {
         let connection_key = {
             // Since the socket is connected, the following unwrap can never fail
@@ -239,11 +243,13 @@ impl<E: Ext> TcpConnectionInner<E> {
             listener,
             has_connected: false,
             is_recv_shut: false,
+            is_send_shut: false,
             reset_error: None,
         };
 
         TcpConnectionInner {
             socket: SpinLock::new(socket_ext),
+            diagnostic,
             poll_key,
             connection_key,
             mark_route: AtomicU64::new(u64::from(mark)),
@@ -292,7 +298,29 @@ pub enum ConnectState {
     Refused,
 }
 
+impl<E: Ext> TcpConnectionBg<E> {
+    pub(crate) fn diagnostic_snapshot(&self) -> TcpSocketSnapshot {
+        let (state, read_queue, write_queue, shutdown) = {
+            let socket = self.inner.lock();
+            (socket.state(), socket.recv_queue().min(u32::MAX as usize) as u32,
+             socket.send_queue().min(u32::MAX as usize) as u32,
+             u8::from(socket.is_recv_shut || matches!(socket.state(),
+                 State::CloseWait | State::LastAck | State::Closing | State::TimeWait))
+                 | (u8::from(socket.is_send_shut) << 1))
+        };
+        let (cookie, inode, uid) = self.inner.diagnostic.values();
+        TcpSocketSnapshot { family: self.inner.diagnostic.family(), local: self.inner.connection_key.local_endpoint(),
+            remote: self.inner.connection_key.remote_endpoint(), state, read_queue, write_queue,
+            cookie, inode, uid, shutdown }
+    }
+}
+
 impl<E: Ext> TcpConnection<E> {
+    /// Returns the identity retained by this connection.
+    pub fn diagnostic_identity(&self) -> Arc<TcpDiagnosticIdentity> {
+        self.0.inner.diagnostic.clone()
+    }
+
     /// Connects to a remote endpoint.
     ///
     /// Polling the iface is _always_ required after this method succeeds.
@@ -301,6 +329,7 @@ impl<E: Ext> TcpConnection<E> {
         remote_endpoint: IpEndpoint,
         option: &RawTcpOption,
         observer: E::TcpEventObserver,
+        diagnostic: Arc<TcpDiagnosticIdentity>,
     ) -> Result<Self, (BoundTcpPort<E>, ConnectError)> {
         let iface = bound.iface().clone();
 
@@ -335,7 +364,7 @@ impl<E: Ext> TcpConnection<E> {
         };
 
         let connection =
-            Self::new_cyclic(bound, |weak| TcpConnectionInner::new(socket, None, weak, option.mark));
+            Self::new_cyclic(bound, |weak| TcpConnectionInner::new(socket, None, weak, option.mark, diagnostic));
         interface.update_next_poll_at_ms(&connection.0, PollAt::Now);
         connection.init_observer(observer);
 
@@ -563,6 +592,7 @@ impl<E: Ext> TcpConnection<E> {
             return false;
         }
 
+        socket.is_send_shut = true;
         socket.close();
 
         let poll_at = socket.poll_at(iface.context_mut());
@@ -599,6 +629,7 @@ impl<E: Ext> TcpConnection<E> {
         let mut socket = self.0.inner.lock();
 
         socket.is_recv_shut = true;
+        socket.is_send_shut = true;
 
         if socket.recv_queue() != 0 {
             // If there is unread data, reset the connection immediately.

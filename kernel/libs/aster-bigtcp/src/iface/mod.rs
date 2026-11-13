@@ -19,7 +19,7 @@ mod wire;
 const IFNAMESIZE: usize = 16;
 pub type InterfaceName = aster_util::fixed_str::FixedCStr<IFNAMESIZE>;
 
-pub use common::{BoundPort, BoundTcpPort, InterfaceFlags, InterfaceType};
+pub use common::{BoundPort, BoundTcpPort, IfaceCommon, InterfaceFlags, InterfaceType};
 pub(crate) use common::UdpFailure;
 pub use iface::{Iface, PathMtu, PathMtuRoute};
 pub use ip_tap::IpTap;

@@ -45,6 +45,7 @@ mod message;
 mod options;
 mod receiver;
 mod route;
+mod sock_diag;
 mod table;
 
 pub(crate) use addr::{GroupIdSet, NetlinkSocketAddr};
@@ -53,6 +54,7 @@ pub(crate) use kobject_uevent::{NetlinkUeventSocket, broadcast_add_uevent, broad
 pub(crate) use options::{AddMembership, DropMembership};
 pub(super) use receiver::NETLINK_DEFAULT_BUF_SIZE;
 pub(crate) use route::NetlinkRouteSocket;
+pub(crate) use sock_diag::NetlinkSockDiagSocket;
 pub(in crate::net) use route::{NetworkEvent, RequestOrigin, publish_network_events};
 pub(crate) use table::{StandardNetlinkProtocol, is_valid_protocol};
 

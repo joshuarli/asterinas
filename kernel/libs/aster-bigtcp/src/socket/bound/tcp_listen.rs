@@ -16,6 +16,7 @@ use super::{
     tcp_conn::{TcpConnection, TcpConnectionBg, TcpConnectionInner, TcpProcessResult},
 };
 use crate::{
+    diagnostic::{TcpDiagnosticIdentity, TcpSocketSnapshot, TcpState},
     errors::tcp::ListenError,
     ext::Ext,
     iface::{BindPortConfig, BoundTcpPort, PacketSlice, PollableIfaceMut},
@@ -40,14 +41,16 @@ pub struct TcpListenerInner<E: Ext> {
     pub(super) backlog: SpinLock<TcpBacklog<E>, BottomHalfDisabled>,
     listener_key: ListenerKey,
     mark: AtomicU32,
+    diagnostic: Arc<TcpDiagnosticIdentity>,
 }
 
 impl<E: Ext> TcpListenerInner<E> {
-    fn new(backlog: TcpBacklog<E>, listener_key: ListenerKey, mark: u32) -> Self {
+    fn new(backlog: TcpBacklog<E>, listener_key: ListenerKey, mark: u32, diagnostic: Arc<TcpDiagnosticIdentity>) -> Self {
         Self {
             backlog: SpinLock::new(backlog),
             listener_key,
             mark: AtomicU32::new(mark),
+            diagnostic,
         }
     }
 }
@@ -68,6 +71,22 @@ impl<E: Ext> Inner<E> for TcpListenerInner<E> {
 pub(crate) type TcpListenerBg<E> = SocketBg<TcpListenerInner<E>, E>;
 
 impl<E: Ext> TcpListenerBg<E> {
+    pub(crate) fn diagnostic_snapshot(&self) -> TcpSocketSnapshot {
+        let (read_queue, write_queue) = {
+            let backlog = self.inner.backlog.lock();
+            (backlog.connected.len().min(u32::MAX as usize) as u32,
+             backlog.max_conn.min(u32::MAX as usize) as u32)
+        };
+        let (cookie, inode, uid) = self.inner.diagnostic.values();
+        let local = self.bound.endpoint();
+        let remote = IpEndpoint::new(match local.addr {
+            smoltcp::wire::IpAddress::Ipv4(_) => core::net::Ipv4Addr::UNSPECIFIED.into(),
+            smoltcp::wire::IpAddress::Ipv6(_) => core::net::Ipv6Addr::UNSPECIFIED.into(),
+        }, 0);
+        TcpSocketSnapshot { family: self.inner.diagnostic.family(), local, remote, state: TcpState::Listen, read_queue, write_queue,
+            cookie, inode, uid, shutdown: 0 }
+    }
+
     pub(crate) fn mark(&self) -> u32 { self.inner.mark.load(Ordering::Acquire) }
 }
 
@@ -81,6 +100,7 @@ impl<E: Ext> TcpListener<E> {
         max_conn: usize,
         option: &RawTcpOption,
         observer: E::TcpEventObserver,
+        diagnostic: Arc<TcpDiagnosticIdentity>,
     ) -> Result<Self, (BoundTcpPort<E>, ListenError)> {
         let local_endpoint = bound.endpoint();
 
@@ -113,7 +133,7 @@ impl<E: Ext> TcpListener<E> {
                 connected: Vec::new(),
             };
 
-            TcpListenerInner::new(backlog, listener_key, option.mark)
+            TcpListenerInner::new(backlog, listener_key, option.mark, diagnostic)
         };
 
         let listener = Self::new(bound, inner);
@@ -259,6 +279,7 @@ impl<E: Ext> TcpListenerBg<E> {
                     Some(self.clone()),
                     weak,
                     self.inner.mark.load(Ordering::Acquire),
+                    self.inner.diagnostic.child(),
                 )
             },
         );

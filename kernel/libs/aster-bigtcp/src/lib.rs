@@ -30,6 +30,7 @@ macro_rules! __log_prefix {
 
 pub mod boolean_value;
 pub mod device;
+pub mod diagnostic;
 pub mod errors;
 pub mod ext;
 pub mod iface;

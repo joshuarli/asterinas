@@ -84,6 +84,10 @@ impl ConnectionKey {
         self.hash
     }
 
+    pub(crate) const fn local_endpoint(&self) -> IpEndpoint {
+        IpEndpoint::new(self.local_addr, self.local_port)
+    }
+
     pub(crate) const fn remote_endpoint(&self) -> IpEndpoint {
         IpEndpoint::new(self.remote_addr, self.remote_port)
     }
@@ -193,6 +197,16 @@ impl<E: Ext> SocketTable<E> {
             listener_buckets,
             connection_buckets,
         }
+    }
+
+    pub(crate) fn tcp_snapshots(&self) -> Vec<crate::diagnostic::TcpSocketSnapshot> {
+        self.listener_buckets.iter()
+            .flat_map(|bucket| bucket.listeners.iter())
+            .map(|listener| listener.diagnostic_snapshot())
+            .chain(self.connection_buckets.iter()
+                .flat_map(|bucket| bucket.connections.iter())
+                .map(|connection| connection.diagnostic_snapshot()))
+            .collect()
     }
 
     /// Inserts a TCP listener into the table.

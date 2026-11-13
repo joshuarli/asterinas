@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
+    diagnostic::TcpDiagnosticIdentity,
     errors::tcp::ListenError,
     socket::{RawTcpOption, RawTcpSetOption},
     wire::IpEndpoint,
@@ -23,11 +24,12 @@ impl ListenStream {
         backlog: usize,
         option: &RawTcpOption,
         observer: StreamObserver,
+        diagnostic: Arc<TcpDiagnosticIdentity>,
     ) -> Result<Self, (BoundTcpPort, Error)> {
         const SOMAXCONN: usize = 4096;
         let max_conn = SOMAXCONN.min(backlog);
 
-        match TcpListener::new_listen(bound_port, max_conn, option, observer) {
+        match TcpListener::new_listen(bound_port, max_conn, option, observer, diagnostic) {
             Ok(tcp_listener) => Ok(Self { tcp_listener }),
             Err((bound_port, ListenError::AddressInUse)) => Err((
                 bound_port,
