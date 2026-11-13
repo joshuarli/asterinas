@@ -180,12 +180,9 @@ mod test {
         assert_eq!(VmoOptions::new_anon(PAGE_SIZE).kind, PageKind::FileCache);
         assert_eq!(VmoOptions::new_shared(PAGE_SIZE).kind, PageKind::Shared);
         let before = resident_page_counts();
-        let mut cache = PageCache::new_shared(PAGE_SIZE).unwrap();
-        let page = cache.as_vmo().commit_on_anonymous(0).unwrap();
+        let page = CachePage::alloc_zero(PageKind::Shared).unwrap();
         assert_eq!(resident_page_counts(), (before.0, before.1 + 1));
         let clone = page.clone();
-        cache.resize(0, PAGE_SIZE).unwrap();
-        drop(cache);
         drop(page);
         assert_eq!(resident_page_counts(), (before.0, before.1 + 1));
         drop(clone);
@@ -199,6 +196,16 @@ mod test {
         drop(anonymous);
         assert!(committed_pages_if_continuous(VmoFlags::CONTIGUOUS, 0, PageKind::Shared).is_err());
         assert_eq!(resident_page_counts(), before);
+
+        let mut cache = PageCache::new_shared(PAGE_SIZE).unwrap();
+        let retained = cache.as_vmo().commit_on_anonymous(0).unwrap();
+        cache.resize(0, PAGE_SIZE).unwrap();
+        drop(cache);
+        assert_eq!(resident_page_counts(), (before.0, before.1 + 1));
+        let mut byte = [0xff];
+        retained.read(0, &mut VmWriter::from(byte.as_mut_slice()).to_fallible()).unwrap();
+        assert_eq!(byte, [0]);
+        drop(retained);
     }
 
     #[ktest]
