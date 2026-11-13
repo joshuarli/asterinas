@@ -44,6 +44,18 @@ static void create_children(gid_t group, mode_t directory_mode, int tmpfile, int
 		assert(getgroups(1, &supplementary) == 1);
 	int may_keep_setgid = (getuid() == 0 && root_has_fsetid) || group == getgid() ||
 		(group_count == 1 && supplementary == group);
+	for (int group_only = 0; group_only < 2; group_only++) {
+		const char *name = group_only ? "group-readable" : "other-readable";
+		int belongs = getgid() == 1001 || (group_count == 1 && supplementary == 1001);
+		errno = 0;
+		fd = open(name, O_RDONLY);
+		if (getuid() == 0 || (group_only ? belongs : !belongs)) {
+			assert(fd >= 0 && close(fd) == 0);
+		} else {
+			assert(fd == -1 && errno == EACCES);
+		}
+		assert(unlink(name) == 0);
+	}
 	umask(0027);
 	fd = open("file", O_CREAT | O_EXCL | O_RDWR, 0666);
 	assert(fd >= 0 && close(fd) == 0);
@@ -144,6 +156,15 @@ int main(int argc, char **argv)
 			assert(foreign >= 0 && fchmod(foreign, 0666) == 0);
 			assert(fchown(foreign, 2000, 1001) == 0);
 			assert(close(foreign) == 0 && close(directory) == 0);
+			directory = open(path, O_RDONLY | O_DIRECTORY);
+			assert(directory >= 0);
+			for (int group_only = 0; group_only < 2; group_only++) {
+				const char *name = group_only ? "group-readable" : "other-readable";
+				int file = openat(directory, name, O_CREAT | O_EXCL | O_RDWR, 0600);
+				assert(file >= 0 && fchown(file, 2000, 1001) == 0);
+				assert(fchmod(file, group_only ? 0040 : 0004) == 0 && close(file) == 0);
+			}
+			assert(close(directory) == 0);
 			pid_t child = fork();
 			assert(child >= 0);
 			if (child == 0) {
