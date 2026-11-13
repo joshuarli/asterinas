@@ -128,6 +128,10 @@ impl aster_block::BlockDevice for BlockDevice {
         self.queue.enqueue(bio)
     }
 
+    fn io_stats(&self) -> Option<aster_block::stats::IoStatsSnapshot> {
+        Some(self.queue.io_stats())
+    }
+
     fn metadata(&self) -> BlockDeviceMeta {
         BlockDeviceMeta {
             max_nr_segments_per_bio: self.queue.max_nr_segments_per_bio(),
@@ -274,10 +278,7 @@ impl DeviceInner {
             match RespStatus::try_from(resp.status) {
                 Ok(RespStatus::Ok) => {}
                 _ => {
-                    // Completes the bio request with an error
-                    complete_request.bio_request.into_bios().for_each(|bio| {
-                        bio.complete(BioStatus::IoError);
-                    });
+                    complete_request.bio_request.complete(BioStatus::IoError);
                     continue;
                 }
             };
@@ -296,10 +297,7 @@ impl DeviceInner {
                     });
             }
 
-            // Completes the bio request
-            complete_request.bio_request.into_bios().for_each(|bio| {
-                bio.complete(BioStatus::Complete);
-            });
+            complete_request.bio_request.complete(BioStatus::Complete);
         }
     }
 
@@ -450,9 +448,7 @@ impl DeviceInner {
     /// This will be ignored if the device doesn't support the `VIRTIO_BLK_F_FLUSH` feature.
     fn flush(&self, bio_request: BioRequest) {
         if !self.features.contains(BlockFeatures::FLUSH) {
-            bio_request.into_bios().for_each(|bio| {
-                bio.complete(BioStatus::Complete);
-            });
+            bio_request.complete(BioStatus::Complete);
             return;
         }
 

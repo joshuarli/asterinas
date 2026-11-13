@@ -46,6 +46,7 @@ mod impl_block_device;
 mod partition;
 mod prelude;
 pub mod request_queue;
+pub mod stats;
 
 use ::device_id::DeviceId;
 use component::{ComponentInitError, init_component};
@@ -73,6 +74,11 @@ pub const DEVICE_MINORS: u32 = 16;
 pub trait BlockDevice: Send + Sync + Any + Debug {
     /// Enqueues a new `SubmittedBio` to the block device.
     fn enqueue(&self, bio: SubmittedBio) -> Result<(), BioEnqueueError>;
+
+    /// Returns request statistics, or `None` when this device does not provide them.
+    fn io_stats(&self) -> Option<stats::IoStatsSnapshot> {
+        None
+    }
 
     /// Returns the metadata of the block device.
     fn metadata(&self) -> BlockDeviceMeta;

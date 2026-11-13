@@ -11,6 +11,7 @@ use template::{
 use self::{
     cmdline::CmdLineFileOps,
     cpuinfo::CpuInfoFileOps,
+    diskstats::DiskStatsFileOps,
     loadavg::LoadAvgFileOps,
     meminfo::MemInfoFileOps,
     mounts::MountsSymOps,
@@ -20,6 +21,7 @@ use self::{
     thread_self::ThreadSelfSymOps,
     uptime::UptimeFileOps,
     version::VersionFileOps,
+    vmstat::VmStatFileOps,
 };
 use crate::{
     fs::{
@@ -42,6 +44,7 @@ use crate::{
 
 mod cmdline;
 mod cpuinfo;
+mod diskstats;
 mod filesystems;
 mod loadavg;
 mod meminfo;
@@ -54,6 +57,7 @@ mod template;
 mod thread_self;
 mod uptime;
 mod version;
+mod vmstat;
 
 pub(super) fn init() {
     crate::fs::vfs::registry::register(&ProcFsType).unwrap();
@@ -153,6 +157,7 @@ impl RootDirOps {
     const STATIC_ENTRIES: &'static [StaticEntry] = &[
         ("cmdline", InodeType::File, CmdLineFileOps::new_inode),
         ("cpuinfo", InodeType::File, CpuInfoFileOps::new_inode),
+        ("diskstats", InodeType::File, DiskStatsFileOps::new_inode),
         (
             "filesystems",
             InodeType::File,
@@ -171,6 +176,7 @@ impl RootDirOps {
         ),
         ("uptime", InodeType::File, UptimeFileOps::new_inode),
         ("version", InodeType::File, VersionFileOps::new_inode),
+        ("vmstat", InodeType::File, VmStatFileOps::new_inode),
     ];
 }
 

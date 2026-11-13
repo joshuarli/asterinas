@@ -260,12 +260,18 @@ struct PartitionNode {
     device: Arc<dyn BlockDevice>,
     number: u32,
     info: PartitionInfo,
+    stats: Arc<crate::stats::IoStats>,
 }
 
 impl BlockDevice for PartitionNode {
     fn enqueue(&self, mut bio: SubmittedBio) -> Result<(), BioEnqueueError> {
         bio.set_sid_offset(self.info.start_sector());
+        bio.partition_stats = Some(self.stats.clone());
         self.device.enqueue(bio)
+    }
+
+    fn io_stats(&self) -> Option<crate::stats::IoStatsSnapshot> {
+        Some(self.stats.snapshot())
     }
 
     fn metadata(&self) -> BlockDeviceMeta {
@@ -341,6 +347,7 @@ impl PartitionNode {
             device,
             number,
             info,
+            stats: Arc::new(crate::stats::IoStats::new()),
         }
     }
 }

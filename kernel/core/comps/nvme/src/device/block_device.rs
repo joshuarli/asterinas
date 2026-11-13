@@ -120,6 +120,10 @@ impl aster_block::BlockDevice for NvmeBlockDevice {
         self.queue.enqueue(bio)
     }
 
+    fn io_stats(&self) -> Option<aster_block::stats::IoStatsSnapshot> {
+        Some(self.queue.io_stats())
+    }
+
     fn metadata(&self) -> BlockDeviceMeta {
         const { assert!(LBA_SIZE == SECTOR_SIZE) };
         let sectors = self.device.namespace.nsze;
@@ -191,9 +195,7 @@ impl InFlightRequest {
             bio_request.take()
         };
         if let Some(bio_request) = bio_request {
-            bio_request.into_bios().for_each(|bio| {
-                bio.complete(status);
-            });
+            bio_request.complete(status);
         }
     }
 }
@@ -380,9 +382,7 @@ impl NvmeDeviceInner {
             } else {
                 BioStatus::Complete
             };
-            bio_request.into_bios().for_each(|bio| {
-                bio.complete(status);
-            });
+            bio_request.complete(status);
             return;
         }
 

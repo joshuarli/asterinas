@@ -3,7 +3,7 @@
 use ostd::sync::{Mutex, WaitQueue};
 
 use super::{
-    bio::{BioEnqueueError, BioType, SubmittedBio},
+    bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio},
     id::Sid,
 };
 use crate::prelude::*;
@@ -21,6 +21,7 @@ pub struct BioRequestSingleQueue {
     num_requests: AtomicUsize,
     wait_queue: WaitQueue,
     max_nr_segments_per_bio: usize,
+    stats: Arc<crate::stats::IoStats>,
 }
 
 impl BioRequestSingleQueue {
@@ -36,7 +37,13 @@ impl BioRequestSingleQueue {
             num_requests: AtomicUsize::new(0),
             wait_queue: WaitQueue::new(),
             max_nr_segments_per_bio,
+            stats: Arc::new(crate::stats::IoStats::new()),
         }
+    }
+
+    /// Returns a snapshot of this queue’s request accounting.
+    pub fn io_stats(&self) -> crate::stats::IoStatsSnapshot {
+        self.stats.snapshot()
     }
 
     /// Returns the upper limit for the number of segments per bio.
@@ -70,7 +77,7 @@ impl BioRequestSingleQueue {
             return Ok(());
         }
 
-        let new_request = BioRequest::from(bio);
+        let new_request = BioRequest::new(bio, &self.stats);
         queue.push_front(new_request);
         self.inc_num_requests();
         drop(queue);
@@ -152,6 +159,7 @@ pub struct BioRequest {
     num_segments: usize,
     /// The submitted bios
     bios: VecDeque<SubmittedBio>,
+    records: Vec<crate::stats::IoRecord>,
 }
 
 impl BioRequest {
@@ -170,9 +178,11 @@ impl BioRequest {
         self.bios.iter()
     }
 
-    /// Returns an iterator that consumes and yields the `SubmittedBio`s.
-    pub fn into_bios(self) -> impl Iterator<Item = SubmittedBio> {
-        self.bios.into_iter()
+    /// Completes request accounting and all its bios with the supplied status.
+    pub fn complete(self, status: BioStatus) {
+        assert!(status != BioStatus::Init && status != BioStatus::Submit);
+        for record in self.records { record.complete(); }
+        for bio in self.bios { bio.complete(status); }
     }
 
     /// Returns the number of sectors of this request.
@@ -209,6 +219,15 @@ impl BioRequest {
     pub fn merge_bio(&mut self, rq_bio: SubmittedBio) {
         assert!(self.can_merge(&rq_bio));
 
+        let sectors = rq_bio.sid_range().end.to_raw() - rq_bio.sid_range().start.to_raw();
+        if let Some(disk) = self.records.first_mut() { disk.merge(sectors); }
+        if let Some(stats) = &rq_bio.partition_stats {
+            if let Some(record) = self.records.iter_mut().skip(1).find(|record| record.belongs_to(stats)) {
+                record.merge(sectors);
+            } else if let Some(record) = stats.start(rq_bio.type_(), sectors) {
+                self.records.push(record);
+            }
+        }
         let rq_bio_nr_segments = rq_bio.segments().len();
         let sid_offset = rq_bio.sid_offset();
 
@@ -224,14 +243,20 @@ impl BioRequest {
     }
 }
 
-impl From<SubmittedBio> for BioRequest {
-    fn from(bio: SubmittedBio) -> Self {
+impl BioRequest {
+    fn new(bio: SubmittedBio, stats: &Arc<crate::stats::IoStats>) -> Self {
+        let sectors = bio.sid_range().end.to_raw() - bio.sid_range().start.to_raw();
+        let mut records = Vec::new();
+        if let Some(record) = stats.start(bio.type_(), sectors) { records.push(record); }
+        if let Some(partition) = &bio.partition_stats
+            && let Some(record) = partition.start(bio.type_(), sectors) { records.push(record); }
         let mut sid_range = bio.sid_range().clone();
         sid_range.start = sid_range.start + bio.sid_offset();
         sid_range.end = sid_range.end + bio.sid_offset();
 
         Self {
             type_: bio.type_(),
+            records,
             sid_range,
             num_segments: bio.segments().len(),
             bios: {
@@ -240,5 +265,102 @@ impl From<SubmittedBio> for BioRequest {
                 bios
             },
         }
+    }
+}
+
+#[cfg(ktest)]
+mod tests {
+    use ::device_id::DeviceId;
+    use io_util::batch::IoBatch;
+    use ostd::prelude::ktest;
+
+    use super::*;
+    use crate::{
+        BlockDevice, BlockDeviceMeta,
+        bio::{Bio, BioDirection, BioSegment},
+    };
+
+    #[derive(Debug)]
+    struct TestDevice(BioRequestSingleQueue);
+
+    impl BlockDevice for TestDevice {
+        fn enqueue(&self, bio: SubmittedBio) -> Result<(), BioEnqueueError> {
+            self.0.enqueue(bio)
+        }
+        fn metadata(&self) -> BlockDeviceMeta { BlockDeviceMeta::default() }
+        fn name(&self) -> &str { "test" }
+        fn id(&self) -> DeviceId { DeviceId::null() }
+    }
+
+    #[ktest]
+    fn merged_front_bios_complete_once_even_on_error() {
+        let device = TestDevice(BioRequestSingleQueue::new());
+        let mut batch = IoBatch::new();
+        for sector in [8, 0] {
+            let segment = BioSegment::alloc(1, BioDirection::ToDevice);
+            Bio::new(BioType::Write, Sid::new(sector), vec![segment], None)
+                .submit(&device, &mut batch).unwrap();
+        }
+        let active = device.0.io_stats();
+        assert_eq!(active.in_flight, 1);
+        assert_eq!(active.writes_merged, 1);
+        device.0.dequeue().complete(BioStatus::IoError);
+        let done = device.0.io_stats();
+        assert_eq!(done.in_flight, 0);
+        assert_eq!(done.writes, 1);
+        assert_eq!(done.sectors_written, 16);
+    }
+
+    #[ktest]
+    fn rejected_bio_does_not_start_a_request() {
+        let device = TestDevice(BioRequestSingleQueue::with_max_nr_segments_per_bio(0));
+        let mut batch = IoBatch::new();
+        let segment = BioSegment::alloc(1, BioDirection::ToDevice);
+        let result = Bio::new(BioType::Write, Sid::new(0), vec![segment], None)
+            .submit(&device, &mut batch);
+        assert_eq!(result, Err(BioEnqueueError::TooBig));
+        let stats = device.0.io_stats();
+        assert_eq!(stats.in_flight, 0);
+        assert_eq!(stats.writes, 0);
+    }
+
+    #[derive(Debug)]
+    struct TestPartition {
+        disk: Arc<TestDevice>,
+        stats: Arc<crate::stats::IoStats>,
+    }
+
+    impl BlockDevice for TestPartition {
+        fn enqueue(&self, mut bio: SubmittedBio) -> Result<(), BioEnqueueError> {
+            bio.partition_stats = Some(self.stats.clone());
+            self.disk.enqueue(bio)
+        }
+        fn metadata(&self) -> BlockDeviceMeta { BlockDeviceMeta::default() }
+        fn name(&self) -> &str { "partition" }
+        fn id(&self) -> DeviceId { DeviceId::null() }
+    }
+
+    #[ktest]
+    fn one_merged_disk_request_keeps_each_partitions_sector_counts() {
+        let disk = Arc::new(TestDevice(BioRequestSingleQueue::new()));
+        let first = TestPartition { disk: disk.clone(), stats: Arc::new(crate::stats::IoStats::new()) };
+        let second = TestPartition { disk: disk.clone(), stats: Arc::new(crate::stats::IoStats::new()) };
+        let mut batch = IoBatch::new();
+        for (partition, sector) in [(&first, 0), (&second, 8), (&first, 16)] {
+            let segment = BioSegment::alloc(1, BioDirection::FromDevice);
+            Bio::new(BioType::Read, Sid::new(sector), vec![segment], None)
+                .submit(partition, &mut batch).unwrap();
+        }
+        assert_eq!(disk.0.io_stats().in_flight, 1);
+        assert_eq!(first.stats.snapshot().in_flight, 1);
+        assert_eq!(second.stats.snapshot().in_flight, 1);
+        disk.0.dequeue().complete(BioStatus::Complete);
+        let disk_stats = disk.0.io_stats();
+        let first_stats = first.stats.snapshot();
+        let second_stats = second.stats.snapshot();
+        assert_eq!((disk_stats.reads, disk_stats.reads_merged, disk_stats.sectors_read), (1, 2, 24));
+        assert_eq!((first_stats.reads, first_stats.reads_merged, first_stats.sectors_read), (1, 1, 16));
+        assert_eq!((second_stats.reads, second_stats.reads_merged, second_stats.sectors_read), (1, 0, 8));
+        assert_eq!(first_stats.in_flight + second_stats.in_flight + disk_stats.in_flight, 0);
     }
 }

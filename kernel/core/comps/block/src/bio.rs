@@ -127,10 +127,16 @@ impl Bio {
         );
         assert!(result.is_ok());
 
+        crate::stats::account_submission(
+            metadata.type_(),
+            metadata.sid_range.end.to_raw() - metadata.sid_range.start.to_raw(),
+        );
+
         let waiter_metadata = metadata.clone();
         let submitted_bio = SubmittedBio {
             metadata,
             sid_offset: 0,
+            partition_stats: None,
             complete_fn,
             segments,
         };
@@ -201,6 +207,7 @@ impl From<BioEnqueueError> for Error {
 pub struct SubmittedBio {
     metadata: Arc<BioMetadata>,
     sid_offset: u64,
+    pub(crate) partition_stats: Option<Arc<crate::stats::IoStats>>,
     complete_fn: Option<BioCompleteFn>,
     segments: Vec<BioSegment>,
 }
