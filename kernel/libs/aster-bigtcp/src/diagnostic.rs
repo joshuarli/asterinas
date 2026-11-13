@@ -18,6 +18,13 @@ pub enum TcpAddressFamily {
     Ipv6,
 }
 
+static TCP_TABLE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the generation of the TCP transport inventory.
+pub fn tcp_table_generation() -> u64 { TCP_TABLE_GENERATION.load(Ordering::Acquire) }
+
+pub(crate) fn tcp_table_changed() { TCP_TABLE_GENERATION.fetch_add(1, Ordering::Release); }
+
 static NEXT_COOKIE: AtomicU64 = AtomicU64::new(1);
 
 /// Identity retained by a TCP transport after its file is closed.

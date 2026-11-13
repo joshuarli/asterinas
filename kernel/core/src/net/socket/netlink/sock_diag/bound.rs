@@ -46,7 +46,7 @@ impl datagram_common::Bound for BoundNetlink<SockDiagMessage> {
         queue.dequeue_if(|response, len| {
             let copied = len.min(writer.sum_lens());
             response.write_to(writer)?;
-            Ok((flags.receive_behavior().will_consume_data(),
+            Ok((flags.receive_behavior().will_consume_data() && response.advance(),
                 (RecvOutput::new_for_packet(flags, copied, len), NetlinkSocketAddr::new_unspecified())))
         })
     }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
-    diagnostic::{TcpAddressFamily, TcpSocketSnapshot, TcpState},
+    diagnostic::{TcpAddressFamily, TcpSocketSnapshot, TcpState, tcp_table_generation},
     wire::IpAddress,
 };
 
@@ -25,7 +25,7 @@ const AF_INET6: u8 = 10;
 const IPPROTO_TCP: u8 = 6;
 const REQUEST_SIZE: usize = 56;
 
-struct Query {
+pub(super) struct Query {
     family: u8,
     protocol: u8,
     states: u32,
@@ -141,7 +141,7 @@ fn header(bytes: &mut Vec<u8>, kind: u16, flags: u16, seq: u32, port: u32) {
 fn send(port: PortNum, mut bytes: Vec<u8>) -> Result<()> {
     let len = bytes.len() as u32;
     bytes[..4].copy_from_slice(&len.to_ne_bytes());
-    NetlinkSockDiagProtocol::unicast(port, SockDiagMessage(bytes))
+    NetlinkSockDiagProtocol::unicast(port, SockDiagMessage::Single(bytes))
 }
 
 fn done(request: &CMsgSegHdr, port: PortNum, error: Option<Errno>) -> Result<()> {
@@ -167,7 +167,7 @@ fn error(request: &CMsgSegHdr, payload: &[u8], port: PortNum, error: Option<Errn
     send(port, bytes)
 }
 
-fn reply(request: &CMsgSegHdr, port: PortNum, socket: &TcpSocketSnapshot, dump: bool) -> Result<()> {
+fn reply(request: &CMsgSegHdr, port: PortNum, socket: &TcpSocketSnapshot, dump: bool) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(96);
     header(&mut bytes, SOCK_DIAG_BY_FAMILY, if dump { MULTI } else { 0 }, request.seq, port);
     bytes.extend_from_slice(&[family(socket.family), state(socket.state), 0, 0]);
@@ -186,7 +186,8 @@ fn reply(request: &CMsgSegHdr, port: PortNum, socket: &TcpSocketSnapshot, dump: 
     put_u16(&mut bytes, 5);
     put_u16(&mut bytes, 8);
     bytes.extend_from_slice(&[socket.shutdown, 0, 0, 0]);
-    send(port, bytes)
+    bytes[..4].copy_from_slice(&96u32.to_ne_bytes());
+    bytes
 }
 
 pub(super) fn handle(request: &CMsgSegHdr, payload: &[u8], port: PortNum) -> Result<()> {
@@ -204,17 +205,77 @@ pub(super) fn handle(request: &CMsgSegHdr, payload: &[u8], port: PortNum) -> Res
     if query.protocol != IPPROTO_TCP {
         return if dump { done(request, port, Some(Errno::ENOENT)) } else { error(request, payload, port, Some(Errno::ENOENT)) };
     }
+    if dump {
+        let mut cursor = DumpCursor {
+            query, request: *request, port, iface: 0, offset: 0,
+            generation: tcp_table_generation(), finished: false,
+        };
+        let bytes = cursor.packet();
+        return NetlinkSockDiagProtocol::unicast(port, SockDiagMessage::Dump(Mutex::new(super::message::Dump {
+            bytes, cursor,
+        })));
+    }
     for iface in iter_all_ifaces() {
-        for socket in iface.common().tcp_snapshots() {
-            if !query.matches(&socket, dump) { continue; }
-            if !dump && query.cookie != u64::MAX && query.cookie != socket.cookie {
-                return error(request, payload, port, Some(Errno::ENOENT));
-            }
-            reply(request, port, &socket, dump)?;
-            if !dump {
+        let mut offset = 0;
+        loop {
+            let page = iface.common().tcp_snapshots(offset, 128);
+            let count = page.len();
+            for socket in page {
+                if !query.matches(&socket, false) { continue; }
+                if query.cookie != u64::MAX && query.cookie != socket.cookie {
+                    return error(request, payload, port, Some(Errno::ENOENT));
+                }
+                send(port, reply(request, port, &socket, false))?;
                 return if request.flags & ACK != 0 { error(request, payload, port, None) } else { Ok(()) };
+            }
+            if count < 128 { break; }
+            offset += count;
+        }
+    }
+    error(request, payload, port, Some(Errno::ENOENT))
+}
+
+pub(super) const DUMP_PACKET_SIZE: usize = 16384;
+
+pub(super) struct DumpCursor {
+    query: Query,
+    request: CMsgSegHdr,
+    port: PortNum,
+    iface: usize,
+    offset: usize,
+    generation: u64,
+    pub(super) finished: bool,
+}
+
+impl DumpCursor {
+    pub(super) fn packet(&mut self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(DUMP_PACKET_SIZE);
+        if self.query.states == 0 { self.iface = iter_all_ifaces().len(); }
+        loop {
+            let Some(iface) = iter_all_ifaces().nth(self.iface) else {
+                let mut end = Vec::with_capacity(20);
+                let flags = MULTI | if self.generation == tcp_table_generation() { 0 } else { 0x10 };
+                header(&mut end, 3, flags, self.request.seq, self.port);
+                put_u32(&mut end, 0);
+                end[..4].copy_from_slice(&20u32.to_ne_bytes());
+                bytes.extend_from_slice(&end);
+                self.finished = true;
+                return bytes;
+            };
+            let room = (DUMP_PACKET_SIZE - bytes.len() - 20) / 96;
+            if room == 0 { return bytes; }
+            let page = iface.common().tcp_snapshots(self.offset, room.min(128));
+            let count = page.len();
+            self.offset += count;
+            if count < room.min(128) {
+                self.iface += 1;
+                self.offset = 0;
+            }
+            for socket in page {
+                if self.query.matches(&socket, true) {
+                    bytes.extend_from_slice(&reply(&self.request, self.port, &socket, true));
+                }
             }
         }
     }
-    if dump { done(request, port, None) } else { error(request, payload, port, Some(Errno::ENOENT)) }
 }

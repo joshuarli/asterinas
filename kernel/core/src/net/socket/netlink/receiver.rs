@@ -46,6 +46,9 @@ impl<Message> MessageQueue<Message> {
 pub(crate) trait QueueableMessage {
     /// Counts and returns the length of the message.
     fn total_len(&self) -> usize;
+
+    /// Returns the reserved queue capacity, including space for a paged reply.
+    fn queue_len(&self) -> usize { self.total_len() }
 }
 
 impl<Message: QueueableMessage> MessageQueue<Message> {
@@ -69,10 +72,11 @@ impl<Message: QueueableMessage> MessageQueue<Message> {
         };
 
         let length = message.total_len();
+        let reserved = message.queue_len();
         let (should_pop, result) = f(message, length)?;
         if should_pop {
             self.messages.pop_front().unwrap();
-            self.total_length -= length;
+            self.total_length -= reserved;
         }
 
         Ok(result)
@@ -81,7 +85,7 @@ impl<Message: QueueableMessage> MessageQueue<Message> {
     /// Tries to enqueue a new message. Returns `false` if the buffer is full.
     #[must_use]
     pub(self) fn enqueue(&mut self, message: Message) -> bool {
-        let length = message.total_len();
+        let length = message.queue_len();
 
         // Currently, we don't support sending netlink messages between user spaces, so only the
         // kernel can enqueue new messages. If the kernel fails to enqueue a new message, `ENOBUFS`

@@ -183,6 +183,11 @@ const CONNECTION_BUCKET_MASK: u32 = CONNECTION_BUCKET_COUNT - 1;
 const_assert!(LISTENER_BUCKET_COUNT.is_power_of_two());
 const_assert!(CONNECTION_BUCKET_COUNT.is_power_of_two());
 
+enum EitherTcpSocket<'a, E: Ext> {
+    Listener(&'a Arc<TcpListenerBg<E>>),
+    Connection(&'a Arc<TcpConnectionBg<E>>),
+}
+
 impl<E: Ext> SocketTable<E> {
     pub(crate) fn new() -> Self {
         let listener_buckets = (0..LISTENER_BUCKET_COUNT)
@@ -199,13 +204,18 @@ impl<E: Ext> SocketTable<E> {
         }
     }
 
-    pub(crate) fn tcp_snapshots(&self) -> Vec<crate::diagnostic::TcpSocketSnapshot> {
+    pub(crate) fn tcp_snapshots(&self, offset: usize, limit: usize) -> Vec<crate::diagnostic::TcpSocketSnapshot> {
         self.listener_buckets.iter()
             .flat_map(|bucket| bucket.listeners.iter())
-            .map(|listener| listener.diagnostic_snapshot())
+            .map(EitherTcpSocket::Listener)
             .chain(self.connection_buckets.iter()
                 .flat_map(|bucket| bucket.connections.iter())
-                .map(|connection| connection.diagnostic_snapshot()))
+                .map(EitherTcpSocket::Connection))
+            .skip(offset).take(limit)
+            .map(|socket| match socket {
+                EitherTcpSocket::Listener(listener) => listener.diagnostic_snapshot(),
+                EitherTcpSocket::Connection(connection) => connection.diagnostic_snapshot(),
+            })
             .collect()
     }
 
@@ -234,6 +244,7 @@ impl<E: Ext> SocketTable<E> {
         }
 
         bucket.listeners.push(listener);
+        crate::diagnostic::tcp_table_changed();
         Ok(())
     }
 
@@ -258,6 +269,7 @@ impl<E: Ext> SocketTable<E> {
         }
 
         bucket.connections.push(connection);
+        crate::diagnostic::tcp_table_changed();
         Ok(())
     }
 
@@ -301,7 +313,9 @@ impl<E: Ext> SocketTable<E> {
             .listeners
             .iter()
             .position(|tcp_listener| tcp_listener.listener_key() == key)?;
-        Some(bucket.listeners.swap_remove(index))
+        let listener = bucket.listeners.swap_remove(index);
+        crate::diagnostic::tcp_table_changed();
+        Some(listener)
     }
 
     pub(crate) fn remove_dead_tcp_connection(&mut self, key: &ConnectionKey) {
@@ -317,6 +331,7 @@ impl<E: Ext> SocketTable<E> {
             .position(|tcp_connection| tcp_connection.connection_key() == key)
             .unwrap();
         let connection = bucket.connections.swap_remove(index);
+        crate::diagnostic::tcp_table_changed();
         debug_assert!(
             !connection.poll_key().is_active(),
             "there should be no need to poll a dead TCP connection",

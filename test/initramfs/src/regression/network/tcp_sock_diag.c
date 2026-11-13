@@ -30,10 +30,17 @@ struct response {
     int error;
 };
 
+struct inventory {
+    const uint16_t *ports;
+    unsigned char *seen;
+    unsigned size;
+    unsigned duplicates;
+};
+
 static int request(unsigned family, unsigned protocol, unsigned states,
                    unsigned flags, const struct inet_diag_sockid *identity,
                    unsigned payload_length, unsigned attribute,
-                   struct response *result) {
+                   struct response *result, struct inventory *inventory) {
     int status = -1;
     int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
     struct {
@@ -72,9 +79,16 @@ static int request(unsigned family, unsigned protocol, unsigned states,
         socklen_t sender_length = sizeof(sender);
         REQUIRE(poll(&wait, 1, 2000) == 1);
         REQUIRE((wait.revents & POLLIN) != 0);
+        unsigned char peek[32], repeated[32];
+        if (inventory && round == 0) {
+            REQUIRE(recv(fd, peek, sizeof(peek), MSG_PEEK) == (ssize_t)sizeof(peek));
+            REQUIRE(recv(fd, repeated, sizeof(repeated), MSG_PEEK) == (ssize_t)sizeof(repeated));
+            REQUIRE(memcmp(peek, repeated, sizeof(peek)) == 0);
+        }
         ssize_t length = recvfrom(fd, buffer, sizeof(buffer), 0,
                                   (void *)&sender, &sender_length);
         REQUIRE(length >= (ssize_t)sizeof(struct nlmsghdr));
+        if (inventory && round == 0) REQUIRE(memcmp(buffer, peek, sizeof(peek)) == 0);
         REQUIRE(sender_length == sizeof(sender));
         REQUIRE(sender.nl_family == AF_NETLINK && sender.nl_pid == 0);
         for (struct nlmsghdr *header = (void *)buffer; NLMSG_OK(header, length);
@@ -85,6 +99,14 @@ static int request(unsigned family, unsigned protocol, unsigned states,
                 REQUIRE(!(flags & NLM_F_DUMP) || (header->nlmsg_flags & NLM_F_MULTI));
                 memcpy(&result->socket, NLMSG_DATA(header), sizeof(result->socket));
                 result->count++;
+                if (inventory) {
+                    for (unsigned index = 0; index < inventory->size; index++) {
+                        if (inventory->ports[index] == result->socket.id.idiag_sport) {
+                            if (inventory->seen[index]) inventory->duplicates++;
+                            inventory->seen[index] = 1;
+                        }
+                    }
+                }
                 if (!(flags & (NLM_F_DUMP | NLM_F_ACK))) {
                     status = 0;
                     goto cleanup;
@@ -121,7 +143,7 @@ cleanup:
 static int query(unsigned family, unsigned states, unsigned flags,
                  const struct inet_diag_sockid *identity, struct response *result) {
     return request(family, IPPROTO_TCP, states, flags, identity,
-                   sizeof(struct inet_diag_req_v2), 0, result);
+                   sizeof(struct inet_diag_req_v2), 0, result, NULL);
 }
 
 static int same_cookie(const struct inet_diag_sockid *first,
@@ -189,18 +211,18 @@ static int exercise(unsigned family) {
         REQUIRE(fchown(listener, 0, (gid_t)-1) == 0);
     }
     REQUIRE(request(family, 253, ~0U, NLM_F_DUMP | NLM_F_ACK, &selector,
-                    sizeof(struct inet_diag_req_v2), 0, &response) == 0);
+                    sizeof(struct inet_diag_req_v2), 0, &response, NULL) == 0);
     REQUIRE(response.count == 0 && response.done == 1 && response.error == -ENOENT);
     REQUIRE(request(AF_UNSPEC, IPPROTO_TCP, ~0U, NLM_F_DUMP | NLM_F_ACK, &selector,
-                    sizeof(struct inet_diag_req_v2), 0, &response) == 0);
+                    sizeof(struct inet_diag_req_v2), 0, &response, NULL) == 0);
     REQUIRE(response.count == 0 && response.done == 0 && response.error == -ENOENT);
-    REQUIRE(request(family, IPPROTO_TCP, ~0U, NLM_F_ACK, &selector, 2, 0, &response) == 0);
+    REQUIRE(request(family, IPPROTO_TCP, ~0U, NLM_F_ACK, &selector, 2, 0, &response, NULL) == 0);
     REQUIRE(response.count == 0 && response.done == 0 && response.error == -EINVAL);
     REQUIRE(request(family, IPPROTO_TCP, 1U << 10, NLM_F_DUMP, &selector,
-                    sizeof(struct inet_diag_req_v2), 99, &response) == 0);
+                    sizeof(struct inet_diag_req_v2), 99, &response, NULL) == 0);
     REQUIRE(response.count == 1 && response.done == 1 && response.error == 0);
     REQUIRE(request(family, IPPROTO_TCP, ~0U, NLM_F_DUMP, &selector,
-                    sizeof(struct inet_diag_req_v2), INET_DIAG_REQ_BYTECODE, &response) == 0);
+                    sizeof(struct inet_diag_req_v2), INET_DIAG_REQ_BYTECODE, &response, NULL) == 0);
     REQUIRE(response.count == 0 && response.done == 0 && response.error == -EINVAL);
     client = socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0);
     REQUIRE(client >= 0);
@@ -266,6 +288,82 @@ cleanup:
     return status;
 }
 
+static int large_dump(void) {
+    enum { count = 700 };
+    int status = -1;
+    int listeners[count];
+    uint16_t ports[count];
+    unsigned char seen[count];
+    for (unsigned index = 0; index < count; index++) listeners[index] = -1;
+    memset(seen, 0, sizeof(seen));
+    for (unsigned index = 0; index < count; index++) {
+        struct sockaddr_in local = {
+            .sin_family = AF_INET,
+            .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+        };
+        socklen_t length = sizeof(local);
+        listeners[index] = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        REQUIRE(listeners[index] >= 0);
+        REQUIRE(bind(listeners[index], (void *)&local, sizeof(local)) == 0);
+        REQUIRE(listen(listeners[index], 1) == 0);
+        REQUIRE(getsockname(listeners[index], (void *)&local, &length) == 0);
+        ports[index] = local.sin_port;
+    }
+    struct inventory inventory = {.ports = ports, .seen = seen, .size = count};
+    struct response response;
+    REQUIRE(request(AF_INET, IPPROTO_TCP, 1U << 10, NLM_F_DUMP, NULL,
+                    sizeof(struct inet_diag_req_v2), 0, &response, &inventory) == 0);
+    REQUIRE(response.done == 1 && response.error == 0 && response.count >= count);
+    REQUIRE(inventory.duplicates == 0);
+    for (unsigned index = 0; index < count; index++) REQUIRE(seen[index] == 1);
+    status = 0;
+cleanup:
+    for (unsigned index = 0; index < count; index++) {
+        if (listeners[index] >= 0 && close(listeners[index])) status = -1;
+    }
+    if (status == 0) puts("TCP diagnostic paged dump preserves 700 owned listeners and peek state");
+    return status;
+}
+
+static int repeated_dumps(void) {
+    int status = -1;
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
+    REQUIRE(fd >= 0);
+    for (unsigned index = 0; index < 8; index++) {
+        struct {
+            struct nlmsghdr header;
+            struct inet_diag_req_v2 query;
+        } message = {
+            .header = {
+                .nlmsg_len = NLMSG_LENGTH(sizeof(struct inet_diag_req_v2)),
+                .nlmsg_type = SOCK_DIAG_BY_FAMILY,
+                .nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP,
+                .nlmsg_seq = index + 1,
+            },
+            .query = {.sdiag_family = AF_INET, .sdiag_protocol = IPPROTO_TCP},
+        };
+        struct sockaddr_nl kernel = {.nl_family = AF_NETLINK};
+        REQUIRE(sendto(fd, &message, sizeof(message), 0,
+                       (void *)&kernel, sizeof(kernel)) == (ssize_t)sizeof(message));
+        struct pollfd wait = {.fd = fd, .events = POLLIN};
+        REQUIRE(poll(&wait, 1, 2000) == 1 && (wait.revents & POLLIN));
+        unsigned char buffer[128];
+        ssize_t length = recv(fd, buffer, sizeof(buffer), 0);
+        REQUIRE(length >= (ssize_t)NLMSG_LENGTH(sizeof(int)));
+        const struct nlmsghdr *header = (void *)buffer;
+        REQUIRE(header->nlmsg_len == (unsigned)length);
+        REQUIRE(header->nlmsg_type == NLMSG_DONE && header->nlmsg_seq == index + 1);
+        int error;
+        memcpy(&error, NLMSG_DATA(header), sizeof(error));
+        REQUIRE(error == 0);
+    }
+    status = 0;
+cleanup:
+    if (fd >= 0 && close(fd)) status = -1;
+    if (status == 0) puts("TCP diagnostic completed dumps release their receive capacity");
+    return status;
+}
+
 int main(void) {
-    return exercise(AF_INET) || exercise(AF_INET6) ? 1 : 0;
+    return exercise(AF_INET) || exercise(AF_INET6) || large_dump() || repeated_dumps() ? 1 : 0;
 }

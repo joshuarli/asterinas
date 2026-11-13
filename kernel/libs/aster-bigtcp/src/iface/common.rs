@@ -158,8 +158,8 @@ impl From<IpAddress> for NormalizedAddress {
 
 impl<E: Ext> IfaceCommon<E> {
     /// Returns snapshots of the TCP transports on this interface.
-    pub fn tcp_snapshots(&self) -> Vec<crate::diagnostic::TcpSocketSnapshot> {
-        self.sockets.lock().tcp_snapshots()
+    pub fn tcp_snapshots(&self, offset: usize, limit: usize) -> Vec<crate::diagnostic::TcpSocketSnapshot> {
+        self.sockets.lock().tcp_snapshots(offset, limit)
     }
 
     pub(super) fn new(
