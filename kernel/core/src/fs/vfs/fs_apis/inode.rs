@@ -800,19 +800,22 @@ pub(in crate::fs) fn strip_unprivileged_setgid(
     let Some(thread) = task.as_posix_thread() else {
         return mode;
     };
+    if !may_retain_setgid(thread, group) {
+        mode.remove(InodeMode::S_ISGID);
+    }
+    mode
+}
+
+pub(in crate::fs) fn may_retain_setgid(thread: &PosixThread, group: Gid) -> bool {
     let member = {
         let credentials = thread.credentials();
         credentials.fsgid() == group || credentials.groups().contains(&group)
     };
-    if member || lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+    member || lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
         UserNamespace::get_init_singleton().as_ref(),
         thread,
         CapSet::FSETID,
-    )).is_ok() {
-        return mode;
-    }
-    mode.remove(InodeMode::S_ISGID);
-    mode
+    )).is_ok()
 }
 
 fn has_dac_override_capability(task: &CurrentTask, posix_thread: &PosixThread) -> bool {

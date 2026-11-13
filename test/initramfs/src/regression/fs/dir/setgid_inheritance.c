@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
@@ -47,6 +48,12 @@ static void create_children(gid_t group, mode_t directory_mode, int tmpfile, int
 	fd = open("file", O_CREAT | O_EXCL | O_RDWR, 0666);
 	assert(fd >= 0 && close(fd) == 0);
 	check_metadata("file", group, 0640);
+	fd = open("file", O_PATH);
+	assert(fd >= 0);
+	errno = 0;
+	assert(fchmod(fd, 0600) == -1 && errno == EBADF);
+	assert(close(fd) == 0);
+	check_metadata("file", group, 0640);
 	fd = open("requested-setgid", O_CREAT | O_EXCL | O_RDWR, 02777);
 	assert(fd >= 0 && close(fd) == 0);
 	check_metadata("requested-setgid", group,
@@ -54,10 +61,19 @@ static void create_children(gid_t group, mode_t directory_mode, int tmpfile, int
 	fd = open("requested-setgid-noexec", O_CREAT | O_EXCL | O_RDWR, 02666);
 	assert(fd >= 0 && close(fd) == 0);
 	check_metadata("requested-setgid-noexec", group, 02640);
+	assert(chmod("requested-setgid", 02777) == 0);
+	check_metadata("requested-setgid", group, may_keep_setgid ? 02777 : 0777);
+	fd = open("requested-setgid", O_RDONLY);
+	assert(fd >= 0 && fchmod(fd, 02666) == 0 && close(fd) == 0);
+	check_metadata("requested-setgid", group, may_keep_setgid ? 02666 : 0666);
+	assert(fchmodat(AT_FDCWD, "requested-setgid-noexec", 02777, 0) == 0);
+	check_metadata("requested-setgid-noexec", group, may_keep_setgid ? 02777 : 0777);
 	assert(mkdir("directory", 0777) == 0);
 	check_metadata("directory", group, directory_mode);
 	assert(mkdir("directory/nested", 0777) == 0);
 	check_metadata("directory/nested", group, directory_mode);
+	assert(chmod("directory", 02777) == 0);
+	check_metadata("directory", group, may_keep_setgid ? 02777 : 0777);
 	assert(symlink("target", "link") == 0);
 	check_metadata("link", group, 0777);
 	assert(mkfifo("fifo", 0666) == 0);
@@ -82,6 +98,21 @@ static void create_children(gid_t group, mode_t directory_mode, int tmpfile, int
 		assert((metadata.st_mode & 07777) == 0640 && metadata.st_nlink == 0);
 		assert(close(fd) == 0);
 	}
+	fd = open("foreign", O_RDONLY);
+	assert(fd >= 0);
+	for (int route = 0; route < 3; route++) {
+		errno = 0;
+		int changed = route == 0 ? chmod("foreign", 0600) :
+			route == 1 ? fchmod(fd, 0600) : fchmodat(AT_FDCWD, "foreign", 0600, 0);
+		if (getuid() != 0)
+			assert(changed == -1 && errno == EPERM);
+		else
+			assert(changed == 0 && chmod("foreign", 0666) == 0);
+		struct stat metadata;
+		assert(fstat(fd, &metadata) == 0);
+		assert(metadata.st_uid == 2000 && (metadata.st_mode & 07777) == 0666);
+	}
+	assert(close(fd) == 0 && unlink("foreign") == 0);
 	assert(unlink("file") == 0 && unlink("fifo") == 0);
 	assert(unlink("requested-setgid") == 0);
 	assert(unlink("requested-setgid-noexec") == 0);
@@ -107,6 +138,12 @@ int main(int argc, char **argv)
 			assert(mkdir(path, 0700) == 0);
 			assert(chown(path, 1000, 1001) == 0);
 			assert(chmod(path, inherited ? 02777 : 0777) == 0);
+			int directory = open(path, O_RDONLY | O_DIRECTORY);
+			assert(directory >= 0);
+			int foreign = openat(directory, "foreign", O_CREAT | O_EXCL | O_RDWR, 0666);
+			assert(foreign >= 0 && fchmod(foreign, 0666) == 0);
+			assert(fchown(foreign, 2000, 1001) == 0);
+			assert(close(foreign) == 0 && close(directory) == 0);
 			pid_t child = fork();
 			assert(child >= 0);
 			if (child == 0) {

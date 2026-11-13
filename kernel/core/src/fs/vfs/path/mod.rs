@@ -28,7 +28,7 @@ use crate::{
         pseudofs::NsInode,
         vfs::{
             file_system::{FileSystem, FsFlags},
-            inode::{HardLinkability, Inode, Metadata, MknodType, RenameMode},
+            inode::{HardLinkability, Inode, Metadata, MknodType, RenameMode, may_retain_setgid},
             inode_ext::InodeExt,
             registry::FsAndRoot,
             xattr::{self, XattrName, XattrNamespace, XattrSetFlags},
@@ -894,8 +894,22 @@ impl Path {
         list_writer: &mut VmWriter,
     ) -> Result<usize>;
 
-    pub(crate) fn set_mode(&self, mode: InodeMode) -> Result<()> {
-        self.inode().set_mode(&self.dentry, mode)
+    pub(crate) fn chmod(&self, mut mode: InodeMode, thread: &PosixThread) -> Result<()> {
+        self.check_mount_writable()?;
+        let inode = self.inode();
+        let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+        let metadata = inode.metadata()?;
+        if thread.credentials().fsuid() != metadata.uid {
+            lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+                UserNamespace::get_init_singleton().as_ref(),
+                thread,
+                CapSet::FOWNER,
+            ))?;
+        }
+        if mode.has_set_gid() && !may_retain_setgid(thread, metadata.gid) {
+            mode.remove(InodeMode::S_ISGID);
+        }
+        inode.set_mode(&self.dentry, mode)
     }
 
     pub(crate) fn chown(

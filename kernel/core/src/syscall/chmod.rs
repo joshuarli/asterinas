@@ -5,7 +5,7 @@ use crate::{
     fs,
     fs::{
         file::{
-            InodeMode,
+            InodeMode, StatusFlags,
             file_table::{RawFileDesc, get_file_fast},
         },
         utils::PATH_MAX,
@@ -19,7 +19,10 @@ pub(super) fn sys_fchmod(raw_fd: RawFileDesc, mode: u16, ctx: &Context) -> Resul
 
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
     let file = get_file_fast!(&mut file_table, raw_fd.try_into()?);
-    file.path().set_mode(InodeMode::from_bits_truncate(mode))?;
+    if file.status_flags().contains(StatusFlags::O_PATH) {
+        return_errno!(Errno::EBADF);
+    }
+    file.path().chmod(InodeMode::from_bits_truncate(mode), ctx.posix_thread)?;
     fs::vfs::notify::on_attr_change(file.path());
     Ok(SyscallReturn::Return(0))
 }
@@ -80,7 +83,7 @@ fn do_fchmodat(
         }
     };
 
-    path.set_mode(InodeMode::from_bits_truncate(mode))?;
+    path.chmod(InodeMode::from_bits_truncate(mode), ctx.posix_thread)?;
     fs::vfs::notify::on_attr_change(&path);
     Ok(SyscallReturn::Return(0))
 }
