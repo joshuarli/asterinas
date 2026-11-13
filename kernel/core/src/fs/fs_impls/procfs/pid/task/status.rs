@@ -10,7 +10,10 @@ use crate::{
         vfs::inode::Inode,
     },
     prelude::*,
-    process::posix_thread::{AsPosixThread, SleepingState},
+    process::{
+        posix_thread::{AsPosixThread, SleepingState},
+        signal::{sig_action::SigAction, sig_mask::SigMask},
+    },
     thread::Thread,
     vm::vmar::RssType,
 };
@@ -172,6 +175,24 @@ impl ProcFileOps for StatusFileOps {
             "Threads:\t{}",
             process.tasks().lock().as_slice().len()
         )?;
+
+        let (ignored, caught) = {
+            let dispositions = process.sig_dispositions().lock();
+            let dispositions = dispositions.lock();
+            let mut ignored = SigMask::default();
+            let mut caught = SigMask::default();
+            for (number, action) in dispositions.iter() {
+                match action {
+                    SigAction::Dfl => {}
+                    SigAction::Ign => ignored += number,
+                    SigAction::User { .. } => caught += number,
+                }
+            }
+            (ignored, caught)
+        };
+        writeln!(printer, "SigBlk:\t{:016x}", posix_thread.sig_mask())?;
+        writeln!(printer, "SigIgn:\t{:016x}", ignored)?;
+        writeln!(printer, "SigCgt:\t{:016x}", caught)?;
 
         writeln!(
             printer,
