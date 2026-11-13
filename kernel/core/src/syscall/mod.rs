@@ -186,6 +186,7 @@ mod statfs;
 mod statx;
 mod symlink;
 mod sync;
+mod syslog;
 mod sysinfo;
 mod tgkill;
 mod time;

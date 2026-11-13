@@ -188,7 +188,7 @@ enum PrctlCmd {
     PR_SET_NAME(Vaddr),
     PR_GET_NAME(Vaddr),
     PR_CAPBSET_READ(CapSet),
-    PR_CAPBSET_DROP(CapSet),
+    PR_CAPBSET_DROP(u64),
     PR_GET_SECUREBITS,
     PR_SET_SECUREBITS(SecureBits),
     PR_SET_TIMERSLACK(u64),
@@ -237,7 +237,7 @@ impl PrctlCmd {
             PR_SET_NAME => Ok(PrctlCmd::PR_SET_NAME(arg2 as _)),
             PR_GET_NAME => Ok(PrctlCmd::PR_GET_NAME(arg2 as _)),
             PR_CAPBSET_READ => Ok(PrctlCmd::PR_CAPBSET_READ(parse_capability(arg2)?)),
-            PR_CAPBSET_DROP => Ok(PrctlCmd::PR_CAPBSET_DROP(parse_capability(arg2)?)),
+            PR_CAPBSET_DROP => Ok(PrctlCmd::PR_CAPBSET_DROP(arg2)),
             PR_GET_SECUREBITS => Ok(PrctlCmd::PR_GET_SECUREBITS),
             PR_SET_SECUREBITS => {
                 let securebits = u16::try_from(arg2).map_err(|_| {
