@@ -2,7 +2,7 @@
 
 use alloc::{
     boxed::Box,
-    collections::BinaryHeap,
+    collections::BTreeMap,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -74,7 +74,7 @@ impl TimerGuard<'_> {
         let new_timer_callback = Arc::new(TimerCallback::new(expired_time, timer_weak));
 
         if let Some(timer_callback) = self.inner.timer_callback.upgrade() {
-            timer_callback.cancel();
+            self.timer.timer_manager.cancel(&timer_callback);
         }
 
         self.inner.timer_callback = Arc::downgrade(&new_timer_callback);
@@ -86,7 +86,7 @@ impl TimerGuard<'_> {
     /// Once cancelled, the current `TimerCallback` will not be triggered again.
     pub(crate) fn cancel(&self) {
         if let Some(timer_callback) = self.inner.timer_callback.upgrade() {
-            timer_callback.cancel();
+            self.timer.timer_manager.cancel(&timer_callback);
         }
     }
 
@@ -150,6 +150,15 @@ impl Timer {
     }
 }
 
+impl Drop for Timer {
+    fn drop(&mut self) {
+        let timer_callback = self.inner.disable_irq().lock().timer_callback.upgrade();
+        if let Some(timer_callback) = timer_callback {
+            self.timer_manager.cancel(&timer_callback);
+        }
+    }
+}
+
 /// `TimerManager` is used to create timers and manage their expiries. It holds a clock and can
 /// create [`Timer`]s based on this clock.
 ///
@@ -157,15 +166,18 @@ impl Timer {
 /// will be actually dropped after all the created timers have been dropped.
 pub(crate) struct TimerManager {
     clock: Arc<dyn Clock>,
-    timer_callbacks: SpinLock<BinaryHeap<Arc<TimerCallback>>>,
+    timer_callbacks: SpinLock<BTreeMap<TimerKey, Arc<TimerCallback>>>,
 }
+
+/// The expiry time of a callback, made unique by the callback's address while it is queued.
+type TimerKey = (Duration, usize);
 
 impl TimerManager {
     /// Creates a `TimerManager` instance from a clock.
     pub(crate) fn new(clock: Arc<dyn Clock>) -> Arc<Self> {
         Arc::new(Self {
             clock,
-            timer_callbacks: SpinLock::new(BinaryHeap::new()),
+            timer_callbacks: SpinLock::new(BTreeMap::new()),
         })
     }
 
@@ -189,7 +201,17 @@ impl TimerManager {
         self.timer_callbacks
             .disable_irq()
             .lock()
-            .push(timer_callback);
+            .insert(timer_callback.key(), timer_callback);
+    }
+
+    /// Cancels the callback and removes it from the queue so that it does not outlive the wait
+    /// that armed it.
+    fn cancel(&self, timer_callback: &TimerCallback) {
+        timer_callback.cancel();
+        self.timer_callbacks
+            .disable_irq()
+            .lock()
+            .remove(&timer_callback.key());
     }
 
     /// Checks and processes the managed timers.
@@ -204,14 +226,13 @@ impl TimerManager {
 
             let mut callbacks = Vec::new();
             let current_time = self.clock.read_time();
-            while let Some(t) = timeout_list.peek() {
-                if t.is_cancelled() {
-                    // Just ignore the cancelled callback
-                    timeout_list.pop();
-                } else if t.expired_time <= current_time {
-                    callbacks.push(timeout_list.pop().unwrap());
-                } else {
+            while let Some(entry) = timeout_list.first_entry() {
+                if entry.key().0 > current_time {
                     break;
+                }
+                let t = entry.remove();
+                if !t.is_cancelled() {
+                    callbacks.push(t);
                 }
             }
             callbacks
@@ -254,6 +275,10 @@ impl TimerCallback {
         self.is_cancelled.store(true, Ordering::Release);
     }
 
+    fn key(&self) -> TimerKey {
+        (self.expired_time, self as *const Self as usize)
+    }
+
     // Returns whether the `TimerCallback` is cancelled.
     fn is_cancelled(&self) -> bool {
         self.is_cancelled.load(Ordering::Acquire)
@@ -279,28 +304,5 @@ impl TimerCallback {
         // Pass the `timer_guard` guard to the callback, allowing it to prevent race conditions.
         // The callback may choose to use the guard or drop it if not needed.
         (timer.registered_callback)(timer_guard);
-    }
-}
-
-impl PartialEq for TimerCallback {
-    fn eq(&self, other: &Self) -> bool {
-        self.expired_time == other.expired_time
-    }
-}
-
-impl Eq for TimerCallback {}
-
-impl PartialOrd for TimerCallback {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for TimerCallback {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        // We want `TimerCallback`s to be processed in ascending order of `expired_time`,
-        // and the in-order management of `TimerCallback`s currently relies on a maximum heap,
-        // so we need the reverse instruction here.
-        self.expired_time.cmp(&other.expired_time).reverse()
     }
 }

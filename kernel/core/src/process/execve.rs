@@ -15,7 +15,7 @@ use crate::{
     fs::{file::Permission, vfs::path::{Path, PerMountFlags}},
     prelude::*,
     process::{
-        ContextUnshareAdminApi, Credentials, Process,
+        ContextUnshareAdminApi, Credentials, Process, ResourceType,
         credentials::{ExecCred, FileCapabilities},
         pid_table,
         posix_thread::{
@@ -41,13 +41,21 @@ pub(crate) fn do_execve(
     ctx: &Context,
     user_context: &mut UserContext,
 ) -> Result<()> {
-    // FIXME: A malicious user could cause a kernel panic by exhausting available memory.
-    // Currently, the implementation reads up to `MAX_NR_STRING_ARGS` arguments, each up to
-    // `MAX_LEN_STRING_ARG` in length, without first verifying the total combined size.
-    // To prevent excessive memory allocation, a preliminary check should sum the lengths
-    // of all strings to enforce a sensible overall limit.
-    let argv = read_cstring_vec(argv_ptr_ptr, MAX_NR_STRING_ARGS, MAX_LEN_STRING_ARG, ctx)?;
-    let envp = read_cstring_vec(envp_ptr_ptr, MAX_NR_STRING_ARGS, MAX_LEN_STRING_ARG, ctx)?;
+    let mut remaining_bytes = max_arg_bytes(ctx);
+    let argv = read_cstring_vec(
+        argv_ptr_ptr,
+        MAX_NR_STRING_ARGS,
+        MAX_LEN_STRING_ARG,
+        &mut remaining_bytes,
+        ctx,
+    )?;
+    let envp = read_cstring_vec(
+        envp_ptr_ptr,
+        MAX_NR_STRING_ARGS,
+        MAX_LEN_STRING_ARG,
+        &mut remaining_bytes,
+        ctx,
+    )?;
 
     let fs_ref = ctx.thread_local.borrow_fs();
     let path_resolver = fs_ref.resolver().read();
@@ -115,10 +123,27 @@ pub(crate) fn do_execve(
     res
 }
 
+/// Returns the number of bytes that the argument and environment strings and their pointers may
+/// occupy together.
+///
+/// Reference: `bprm_stack_limits` in Linux `fs/exec.c`.
+fn max_arg_bytes(ctx: &Context) -> usize {
+    const STACK_LIMIT_CAP: u64 = 8 * 1024 * 1024 / 4 * 3;
+    const ARG_MAX: u64 = 128 * 1024;
+
+    let stack_limit = ctx
+        .process
+        .resource_limits()
+        .get_rlimit(ResourceType::RLIMIT_STACK)
+        .get_cur();
+    STACK_LIMIT_CAP.min(stack_limit / 4).max(ARG_MAX) as usize
+}
+
 fn read_cstring_vec(
     array_ptr: Vaddr,
     max_string_number: usize,
     max_string_len: usize,
+    remaining_bytes: &mut usize,
     ctx: &Context,
 ) -> Result<Vec<CString>> {
     // On Linux, argv pointer and envp pointer can be specified as NULL.
@@ -147,6 +172,11 @@ fn read_cstring_vec(
                     err
                 }
             })?;
+
+        let string_bytes = cstring.as_bytes_with_nul().len() + size_of::<usize>();
+        *remaining_bytes = remaining_bytes.checked_sub(string_bytes).ok_or_else(|| {
+            Error::with_message(Errno::E2BIG, "the arguments and environment are too large")
+        })?;
         res.push(cstring);
     }
 
