@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::borrow::Cow;
-use core::time::Duration;
 
 use aster_systree::{
     SysAttr, SysBranchNode, SysNode, SysNodeId, SysNodeType, SysObj, SysStr, SysSymlink,
@@ -22,7 +21,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
-    time::clocks::RealTimeCoarseClock,
+    time::FileTime,
     vm::page_cache::Vmo,
 };
 
@@ -71,7 +70,7 @@ pub(in crate::fs) trait SysTreeInodeTy: Send + Sync + 'static {
     }
 
     fn new_metadata(ino: u64, type_: InodeType, sb: &SuperBlock) -> Metadata {
-        let now = RealTimeCoarseClock::get().read_time();
+        let now = FileTime::now();
         Metadata {
             ino,
             size: 0,
@@ -433,23 +432,23 @@ impl<KInode: SysTreeInodeTy + Send + Sync + 'static> Inode for KInode {
         Ok(())
     }
 
-    default fn atime(&self) -> Duration {
+    default fn atime(&self) -> FileTime {
         self.metadata().last_access_at
     }
 
-    default fn set_atime(&self, _self_dentry: &VfsDentry, _time: Duration) {}
+    default fn set_atime(&self, _self_dentry: &VfsDentry, _time: FileTime) {}
 
-    default fn mtime(&self) -> Duration {
+    default fn mtime(&self) -> FileTime {
         self.metadata().last_modify_at
     }
 
-    default fn set_mtime(&self, _self_dentry: &VfsDentry, _time: Duration) {}
+    default fn set_mtime(&self, _self_dentry: &VfsDentry, _time: FileTime) {}
 
-    default fn ctime(&self) -> Duration {
+    default fn ctime(&self) -> FileTime {
         self.metadata().last_meta_change_at
     }
 
-    default fn set_ctime(&self, _self_dentry: &VfsDentry, _time: Duration) {}
+    default fn set_ctime(&self, _self_dentry: &VfsDentry, _time: FileTime) {}
 
     default fn owner(&self) -> Result<Uid> {
         Ok(self.metadata().uid)

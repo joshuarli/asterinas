@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::time::Duration;
-
 use ostd::mm::VmIo;
 
 use super::{SyscallReturn, constants::MAX_FILENAME_LEN};
@@ -15,7 +13,7 @@ use crate::{
         vfs::path::{AT_FDCWD, EmptyPathStr, FsPath, Path},
     },
     prelude::*,
-    time::{clocks::RealTimeCoarseClock, timespec_t, timeval_t},
+    time::{FileTime, timespec_t, timeval_t},
 };
 
 /// The 'sys_utimensat' system call sets the access and modification times of a file.
@@ -141,25 +139,25 @@ fn vfs_utimes(path: &Path, times: Option<TimeSpecPair>, ctx: &Context) -> Result
             if !times.atime.is_valid() || !times.mtime.is_valid() {
                 return_errno_with_message!(Errno::EINVAL, "invalid time")
             }
-            let now = RealTimeCoarseClock::get().read_time();
+            let now = FileTime::now();
             let atime = if times.atime.is_utime_omit() {
                 path.atime()
             } else if times.atime.is_utime_now() {
                 now
             } else {
-                Duration::try_from(times.atime)?
+                FileTime::try_from(times.atime)?
             };
             let mtime = if times.mtime.is_utime_omit() {
                 path.mtime()
             } else if times.mtime.is_utime_now() {
                 now
             } else {
-                Duration::try_from(times.mtime)?
+                FileTime::try_from(times.mtime)?
             };
             (atime, mtime, now)
         }
         None => {
-            let now = RealTimeCoarseClock::get().read_time();
+            let now = FileTime::now();
             (now, now, now)
         }
     };
@@ -236,10 +234,8 @@ fn do_futimesat(
         let (autime, mutime) = read_time_from_user::<timeval_t>(timeval_ptr, ctx)?;
         if autime.usec >= 1000000
             || autime.usec < 0
-            || autime.sec < 0
             || mutime.usec >= 1000000
             || mutime.usec < 0
-            || mutime.sec < 0
         {
             return_errno_with_message!(Errno::EINVAL, "invalid time");
         }

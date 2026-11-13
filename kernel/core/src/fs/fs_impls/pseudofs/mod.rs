@@ -20,10 +20,7 @@
 //! As such, this module provides [`AnonDeviceId`] to acquire and recycle
 //! anonymous device IDs.
 
-use core::{
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
-    time::Duration,
-};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub(crate) use allocator::AnonDeviceId;
 pub(crate) use anon_inodefs::AnonInodeFs;
@@ -50,7 +47,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
-    time::clocks::RealTimeCoarseClock,
+    time::FileTime,
 };
 
 mod allocator;
@@ -210,7 +207,7 @@ impl PseudoInode {
         fs: Weak<NaivePseudoFs>,
         dev_id: DeviceId,
     ) -> Self {
-        let now = now();
+        let now = FileTime::now();
         let type_ = InodeType::from(type_);
 
         let metadata = Metadata {
@@ -312,7 +309,7 @@ impl Inode for PseudoInode {
 
         let mut meta = self.metadata.lock();
         meta.mode = mode;
-        meta.last_meta_change_at = now();
+        meta.last_meta_change_at = FileTime::now();
         Ok(())
     }
 
@@ -326,7 +323,7 @@ impl Inode for PseudoInode {
         if let Some(owner) = &self.tracked_owner {
             owner.store(uid.into(), Ordering::Release);
         }
-        meta.last_meta_change_at = now();
+        meta.last_meta_change_at = FileTime::now();
         Ok(())
     }
 
@@ -337,31 +334,31 @@ impl Inode for PseudoInode {
     fn set_group(&self, _self_dentry: &Dentry, gid: Gid) -> Result<()> {
         let mut meta = self.metadata.lock();
         meta.gid = gid;
-        meta.last_meta_change_at = now();
+        meta.last_meta_change_at = FileTime::now();
         Ok(())
     }
 
-    fn atime(&self) -> Duration {
+    fn atime(&self) -> FileTime {
         self.metadata.lock().last_access_at
     }
 
-    fn set_atime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_atime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.metadata.lock().last_access_at = time;
     }
 
-    fn mtime(&self) -> Duration {
+    fn mtime(&self) -> FileTime {
         self.metadata.lock().last_modify_at
     }
 
-    fn set_mtime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_mtime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.metadata.lock().last_modify_at = time;
     }
 
-    fn ctime(&self) -> Duration {
+    fn ctime(&self) -> FileTime {
         self.metadata.lock().last_meta_change_at
     }
 
-    fn set_ctime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_ctime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.metadata.lock().last_meta_change_at = time;
     }
 
@@ -380,8 +377,4 @@ impl Inode for PseudoInode {
     fn fs(&self) -> Arc<dyn FileSystem> {
         self.fs.upgrade().unwrap()
     }
-}
-
-fn now() -> Duration {
-    RealTimeCoarseClock::get().read_time()
 }

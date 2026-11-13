@@ -7,6 +7,8 @@
 //! - `IsPowerOf` — a trait for testing whether a number is a power of
 //!   another (used by sparse-superblock backup-group selection).
 //! - `now` — a convenience function that reads the real-time coarse clock.
+//! - `ext2_secs_to_time`, `time_to_ext2_secs` — convert between kernel file
+//!   timestamps and signed 32-bit ext2 seconds.
 //! - `duration_to_ext2_secs` — converts kernel durations to clamped ext2
 //!   timestamp seconds.
 
@@ -104,8 +106,21 @@ impl<T: Debug> Debug for Dirty<T> {
 }
 
 /// Returns the current time.
-pub(super) fn now() -> Duration {
-    crate::time::clocks::RealTimeCoarseClock::get().read_time()
+pub(super) fn now() -> FileTime {
+    FileTime::now()
+}
+
+/// Converts an ext2 on-disk signed 32-bit seconds field to a timestamp.
+pub(super) fn ext2_secs_to_time(raw: u32) -> FileTime {
+    FileTime::new(i64::from(raw as i32), 0)
+}
+
+/// Converts a timestamp to the on-disk signed 32-bit seconds field.
+///
+/// Seconds outside the `i32` range are clamped to the nearest limit, as in Linux.
+/// Cached inodes keep the full timestamp until they are written back.
+pub(super) fn time_to_ext2_secs(time: FileTime) -> u32 {
+    time.sec().clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32 as u32
 }
 
 /// Converts a `Duration` to a 32-bit ext2 timestamp, clamping to `u32::MAX`.

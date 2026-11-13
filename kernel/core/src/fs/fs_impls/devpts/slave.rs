@@ -3,8 +3,6 @@
 #![expect(dead_code)]
 #![expect(unused_variables)]
 
-use core::time::Duration;
-
 use super::{BLOCK_SIZE, DevPts, FIRST_SLAVE_INO};
 use crate::{
     device::{Device, PtySlave},
@@ -18,6 +16,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
+    time::FileTime,
 };
 
 /// Same major number with Linux, the minor number is the index of slave.
@@ -124,27 +123,27 @@ impl Inode for PtySlaveInode {
         Ok(())
     }
 
-    fn atime(&self) -> Duration {
+    fn atime(&self) -> FileTime {
         self.metadata.read().last_access_at
     }
 
-    fn set_atime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_atime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.metadata.write().last_access_at = time;
     }
 
-    fn mtime(&self) -> Duration {
+    fn mtime(&self) -> FileTime {
         self.metadata.read().last_modify_at
     }
 
-    fn set_mtime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_mtime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.metadata.write().last_modify_at = time;
     }
 
-    fn ctime(&self) -> Duration {
+    fn ctime(&self) -> FileTime {
         self.metadata.read().last_meta_change_at
     }
 
-    fn set_ctime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_ctime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.metadata.write().last_meta_change_at = time;
     }
 

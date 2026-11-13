@@ -2,8 +2,6 @@
 
 #![short_vis_path::add(procfs)]
 
-use core::time::Duration;
-
 use inherit_methods_macro::inherit_methods;
 
 use super::Common;
@@ -20,6 +18,7 @@ use crate::{
     prelude::*,
     process::{Gid, Uid},
     thread::Thread,
+    time::FileTime,
 };
 
 pub(in procfs) struct ProcFile<F: ProcFileOps> {
@@ -82,12 +81,12 @@ impl<F: ProcFileOps + 'static> Inode for ProcFile<F> {
     fn set_owner(&self, self_dentry: &Dentry, uid: Uid) -> Result<()>;
     fn group(&self) -> Result<Gid>;
     fn set_group(&self, self_dentry: &Dentry, gid: Gid) -> Result<()>;
-    fn atime(&self) -> Duration;
-    fn set_atime(&self, self_dentry: &Dentry, time: Duration);
-    fn mtime(&self) -> Duration;
-    fn set_mtime(&self, self_dentry: &Dentry, time: Duration);
-    fn ctime(&self) -> Duration;
-    fn set_ctime(&self, self_dentry: &Dentry, time: Duration);
+    fn atime(&self) -> FileTime;
+    fn set_atime(&self, self_dentry: &Dentry, time: FileTime);
+    fn mtime(&self) -> FileTime;
+    fn set_mtime(&self, self_dentry: &Dentry, time: FileTime);
+    fn ctime(&self) -> FileTime;
+    fn set_ctime(&self, self_dentry: &Dentry, time: FileTime);
     fn fs(&self) -> Arc<dyn FileSystem>;
 
     fn metadata(&self) -> Result<Metadata> {

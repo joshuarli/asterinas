@@ -3,7 +3,6 @@
 #![expect(unused_variables)]
 
 use alloc::boxed::ThinBox;
-use core::time::Duration;
 
 use device_id::DeviceId;
 use ostd::task::{CurrentTask, Task};
@@ -31,7 +30,7 @@ use crate::{
         posix_thread::{AsPosixThread, PosixThread},
     },
     security::lsm::hooks as lsm_hooks,
-    time::clocks::RealTimeCoarseClock,
+    time::FileTime,
     vm::page_cache::Vmo,
 };
 
@@ -71,12 +70,12 @@ pub(crate) struct Metadata {
     /// The timestamp of the last access to the inode's data.
     ///
     /// Corresponds to `st_atime`.
-    pub last_access_at: Duration,
+    pub last_access_at: FileTime,
 
     /// The timestamp of the last modification to the inode's content.
     ///
     /// Corresponds to `st_mtime`.
-    pub last_modify_at: Duration,
+    pub last_modify_at: FileTime,
 
     /// The timestamp of the last change to the inode's metadata.
     ///
@@ -84,7 +83,7 @@ pub(crate) struct Metadata {
     /// not just when the inode content is modified.
     ///
     /// Corresponds to `st_ctime`.
-    pub last_meta_change_at: Duration,
+    pub last_meta_change_at: FileTime,
 
     /// The type of the inode (e.g., regular file, directory, symlink).
     ///
@@ -132,7 +131,7 @@ pub(crate) struct Metadata {
     /// `None`.
     ///
     /// Corresponds to `stx_btime`.
-    pub birth_at: Option<Duration>,
+    pub birth_at: Option<FileTime>,
 }
 
 /// Describes whether an inode may get new hard links.
@@ -155,7 +154,7 @@ impl Metadata {
         blk_size: usize,
         container_dev_id: DeviceId,
     ) -> Self {
-        let now = RealTimeCoarseClock::get().read_time();
+        let now = FileTime::now();
         Self {
             ino,
             size: 2,
@@ -181,7 +180,7 @@ impl Metadata {
         blk_size: usize,
         container_dev_id: DeviceId,
     ) -> Self {
-        let now = RealTimeCoarseClock::get().read_time();
+        let now = FileTime::now();
         Self {
             ino,
             size: 0,
@@ -207,7 +206,7 @@ impl Metadata {
         blk_size: usize,
         container_dev_id: DeviceId,
     ) -> Self {
-        let now = RealTimeCoarseClock::get().read_time();
+        let now = FileTime::now();
         Self {
             ino,
             size: 0,
@@ -234,7 +233,7 @@ impl Metadata {
         device: &dyn Device,
         container_dev_id: DeviceId,
     ) -> Self {
-        let now = RealTimeCoarseClock::get().read_time();
+        let now = FileTime::now();
         Self {
             ino,
             size: 0,
@@ -418,22 +417,22 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
     fn set_group(&self, self_dentry: &Dentry, gid: Gid) -> Result<()>;
 
     /// Returns the inode's access time.
-    fn atime(&self) -> Duration;
+    fn atime(&self) -> FileTime;
 
     /// Sets the inode's access time.
-    fn set_atime(&self, self_dentry: &Dentry, time: Duration);
+    fn set_atime(&self, self_dentry: &Dentry, time: FileTime);
 
     /// Returns the inode's modification time.
-    fn mtime(&self) -> Duration;
+    fn mtime(&self) -> FileTime;
 
     /// Sets the inode's modification time.
-    fn set_mtime(&self, self_dentry: &Dentry, time: Duration);
+    fn set_mtime(&self, self_dentry: &Dentry, time: FileTime);
 
     /// Returns the inode's metadata-change time.
-    fn ctime(&self) -> Duration;
+    fn ctime(&self) -> FileTime;
 
     /// Sets the inode's metadata-change time.
-    fn set_ctime(&self, self_dentry: &Dentry, time: Duration);
+    fn set_ctime(&self, self_dentry: &Dentry, time: FileTime);
 
     /// Returns the inode's page cache, if it has one.
     fn page_cache(&self) -> Option<Arc<Vmo>> {

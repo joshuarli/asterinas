@@ -196,7 +196,9 @@ impl Ext2 {
             writable,
             initial_state,
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
-            next_generation: AtomicU32::new(utils::duration_to_ext2_secs(utils::now())),
+            next_generation: AtomicU32::new(utils::duration_to_ext2_secs(
+                utils::now().to_duration_saturating(),
+            )),
             self_ref: weak_self.clone(),
         });
 
@@ -213,7 +215,7 @@ impl Ext2 {
             let mut sb = self.super_block.write();
             sb.mark_unclean();
             sb.inc_mnt_count();
-            sb.set_mtime(utils::now());
+            sb.set_mtime(utils::now().to_duration_saturating());
         }
         self.sync_metadata()?;
         self.flush_device()
@@ -227,7 +229,7 @@ impl Ext2 {
         {
             let mut sb = self.super_block.write();
             sb.set_state(self.initial_state);
-            sb.set_wtime(utils::now());
+            sb.set_wtime(utils::now().to_duration_saturating());
         }
         self.sync_all()?;
         self.flush_device()
@@ -693,7 +695,7 @@ impl Ext2 {
         }
         sb_guard.set_free_blocks_count(total_free_blocks);
         sb_guard.set_free_inodes_count(total_free_inodes);
-        sb_guard.set_wtime(utils::now());
+        sb_guard.set_wtime(utils::now().to_duration_saturating());
 
         let mut raw_sb = RawSuperBlock::from(&**sb_guard);
         self.write_sb_and_group_descs(
