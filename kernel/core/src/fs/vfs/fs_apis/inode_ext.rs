@@ -64,7 +64,7 @@ pub(crate) trait InodeExt {
     fn fs_lock_context(&self) -> Option<&FsLockContext>;
 }
 
-impl InodeExt for dyn Inode {
+impl<T: Inode + ?Sized> InodeExt for T {
     fn fs_event_publisher_or_init(&self) -> &FsEventPublisher {
         self.extension()
             .group1()

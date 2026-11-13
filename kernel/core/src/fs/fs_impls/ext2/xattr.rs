@@ -187,7 +187,16 @@ impl Xattr {
 
     /// Parses a VFS [`XattrName`] into the ext2 `(name_index, name_suffix)` pair.
     fn parse_target_name(name: XattrName) -> Result<(XattrNameIndex, Vec<u8>)> {
-        let name_index = XattrNameIndex::from(name.namespace());
+        let name_index = match name.namespace() {
+            XattrNamespace::User => XattrNameIndex::User,
+            XattrNamespace::Trusted => XattrNameIndex::Trusted,
+            XattrNamespace::Security => XattrNameIndex::Security,
+            XattrNamespace::System => match name.full_name() {
+                "system.posix_acl_access" => XattrNameIndex::PosixAclAccess,
+                "system.posix_acl_default" => XattrNameIndex::PosixAclDefault,
+                _ => return_errno!(Errno::EOPNOTSUPP),
+            },
+        };
         let stripped_name = name_index.strip_prefix(name.full_name())?;
         if stripped_name.len() > u8::MAX as usize {
             return_errno_with_message!(Errno::ERANGE, "xattr name is too long");
@@ -251,6 +260,19 @@ impl XattrCache {
             return_errno_with_message!(Errno::ENODATA, "the target xattr does not exist");
         }
 
+        let retained_size: usize = self.entries.iter().enumerate()
+            .filter(|(idx, _)| Some(*idx) != found_idx)
+            .map(|(_, entry)| xattr_entry_len(entry.name.len()) + xattr_value_size(entry.value.len()))
+            .sum();
+        let required = XATTR_HEADER_SIZE + XATTR_TERMINATOR_SIZE + retained_size
+            + xattr_entry_len(target_name.len()) + xattr_value_size(value.len());
+        if required > BLOCK_SIZE {
+            return_errno_with_message!(Errno::ENOSPC, "insufficient xattr block space");
+        }
+        if self.bid == 0 {
+            self.alloc_block()?;
+        }
+
         if let Some(idx) = found_idx {
             self.entries[idx].value = value;
         } else {
@@ -264,9 +286,6 @@ impl XattrCache {
             );
         }
 
-        if self.bid == 0 {
-            self.alloc_block()?;
-        }
         self.dirty = true;
         Ok(())
     }
@@ -303,25 +322,14 @@ impl XattrCache {
         let Some(found_idx) = found_idx else {
             return_errno_with_message!(Errno::ENODATA, "the target xattr does not exist");
         };
-        self.entries.remove(found_idx);
-
-        if self.entries.is_empty() {
-            self.free_and_invalidate()?;
-            return Ok(());
+        if self.entries.len() == 1 {
+            return self.free_and_invalidate();
         }
-
+        self.entries.remove(found_idx);
         self.dirty = true;
         Ok(())
     }
 
-    // TODO: The VFS `Inode::list_xattr` trait passes a single namespace,
-    // but `sys_listxattr` only queries one namespace (Trusted for root,
-    // User otherwise), which is wrong — Linux returns all visible
-    // namespaces.  As a workaround we replicate the old ext2 behavior:
-    // when the caller passes User, list only user.* entries; otherwise
-    // list all entries (matching root visibility in Linux).  The proper
-    // fix is to enumerate all visible namespaces in the syscall layer
-    // (see `kernel/core/src/syscall/listxattr.rs`).
     fn list_entries(
         &mut self,
         namespace: XattrNamespace,
@@ -336,6 +344,7 @@ impl XattrCache {
         for entry in &self.entries {
             if namespace == XattrNamespace::User
                 && entry.name_index.namespace() != XattrNamespace::User
+                && !matches!(entry.name_index, XattrNameIndex::PosixAclAccess | XattrNameIndex::PosixAclDefault)
             {
                 continue;
             }
@@ -423,11 +432,10 @@ impl XattrCache {
             let sb = fs.super_block();
             sb.group_first_block_no(inode.block_group_idx())
         };
+        let block_buf = Self::alloc_block_buffer()?;
         let range = fs.alloc_blocks(1, goal)?;
         self.bid = range.start;
-        if self.block_buf.is_none() {
-            self.block_buf = Some(Self::alloc_block_buffer()?);
-        }
+        self.block_buf = Some(block_buf);
         Ok(())
     }
 
@@ -525,15 +533,7 @@ impl XattrCache {
             entry_cursor += entry_padded_size;
         }
 
-        let terminator = XattrEntry {
-            name_len: 0,
-            name_index: 0,
-            value_offset: 0,
-            value_block: 0,
-            value_len: 0,
-            hash: 0,
-        };
-        block.write_val(entry_cursor, &terminator)?;
+        block.write_val(entry_cursor, &0u32)?;
 
         Ok(())
     }
@@ -659,27 +659,13 @@ enum XattrNameIndex {
     Security = 6,
 }
 
-impl From<XattrNamespace> for XattrNameIndex {
-    fn from(namespace: XattrNamespace) -> Self {
-        match namespace {
-            XattrNamespace::User => Self::User,
-            XattrNamespace::Trusted => Self::Trusted,
-            XattrNamespace::Security => Self::Security,
-            XattrNamespace::System => {
-                // TODO: POSIX ACL xattrs are not implemented yet.
-                Self::PosixAclAccess
-            }
-        }
-    }
-}
-
 impl XattrNameIndex {
     /// Returns the namespace prefix string (e.g. `"user."`).
     pub(super) fn prefix(self) -> &'static str {
         match self {
             Self::User => "user.",
-            Self::PosixAclAccess => "system.posix_acl_access.",
-            Self::PosixAclDefault => "system.posix_acl_default.",
+            Self::PosixAclAccess => "system.posix_acl_access",
+            Self::PosixAclDefault => "system.posix_acl_default",
             Self::Trusted => "trusted.",
             Self::Lustre => "lustre.",
             Self::Security => "security.",

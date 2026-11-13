@@ -3,7 +3,7 @@
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
-        vfs::path::Dentry,
+        vfs::{inode_ext::InodeExt, path::Dentry},
     },
     prelude::*,
     process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::AsPosixThread},
@@ -34,6 +34,7 @@ pub(in crate::fs) fn clear_file_priv(dentry: &Dentry) -> Result<()> {
 
 fn clear_set_id_bits(dentry: &Dentry) -> Result<()> {
     let inode = dentry.inode().as_ref();
+    let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
     let mut mode = inode.mode()?;
     if !mode.intersects(InodeMode::S_ISUID | InodeMode::S_ISGID) {
         return Ok(());

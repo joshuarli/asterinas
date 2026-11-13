@@ -31,6 +31,8 @@ use crate::{
             },
             path::{Dentry, is_dot_bytes, is_dot_or_dotdot_bytes, is_dotdot_bytes},
             registry::{FsCreationCtx, FsProperties, FsType},
+            posix_acl::{self, AccessAclUpdate, PosixAcl},
+            inode_ext::InodeExt,
             xattr::{XattrName, XattrNamespace, XattrSetFlags},
         },
     },
@@ -1233,6 +1235,29 @@ impl Inode for RamInode {
         Ok(())
     }
 
+    fn access_acl(&self) -> Result<Option<PosixAcl>> {
+        posix_acl::read_stored_acl(self)
+    }
+
+    fn update_access_acl(&self, _self_dentry: &Dentry, update: AccessAclUpdate) -> Result<()> {
+        RamXattr::check_file_type_for_xattr(self.typ)?;
+        let name = XattrName::try_from_full_name(posix_acl::ACCESS).unwrap();
+        if let Some(value) = update.value() {
+            let mut reader = VmReader::from(value).to_fallible();
+            self.xattr.set(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE)?;
+        } else {
+            match self.xattr.remove(name) {
+                Ok(()) => {},
+                Err(error) if error.error() == Errno::ENODATA => {},
+                Err(error) => return Err(error),
+            }
+        }
+        let mut metadata = self.metadata.lock();
+        metadata.mode = update.mode();
+        metadata.set_ctime(now());
+        Ok(())
+    }
+
     fn owner(&self) -> Result<Uid> {
         Ok(self.metadata.lock().uid)
     }
@@ -1698,6 +1723,14 @@ impl Inode for RamInode {
         value_reader: &mut VmReader,
         flags: XattrSetFlags,
     ) -> Result<()> {
+        if name.full_name() == posix_acl::DEFAULT {
+            return_errno!(Errno::EOPNOTSUPP);
+        }
+        if name.full_name() == posix_acl::ACCESS {
+            let acl = posix_acl::read_user_acl(value_reader)?;
+            let _ownership = self.fs_lock_context_or_init().ownership_lock().lock();
+            return self.update_access_acl(_self_dentry, AccessAclUpdate::set(acl, self.mode()?));
+        }
         RamXattr::check_file_type_for_xattr(self.typ)?;
         self.xattr.set(name, value_reader, flags)
     }

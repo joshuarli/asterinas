@@ -12,6 +12,7 @@ SUBDIRS := \
 	mount \
 	openat2 \
 	overlayfs \
+	posix_acl \
 	procfs \
 	pseudofs \
 	rename \

@@ -6,7 +6,7 @@ use spin::Once;
 use crate::{
     fs::{
         file::InodeType,
-        vfs::xattr::{XattrName, XattrNamespace, XattrSetFlags},
+        vfs::{posix_acl, xattr::{XattrName, XattrNamespace, XattrSetFlags}},
     },
     prelude::*,
 };
@@ -127,6 +127,8 @@ impl RamXattr {
         // Include the null byte following each name
         let list_actual_len = if namespace.is_user() {
             xattr.user_name_len + xattr.user_name_count
+                + xattr.map.keys().filter(|name| posix_acl::is_acl(&name.full_name))
+                    .map(|name| name.full_name.len() + 1).sum::<usize>()
         } else {
             xattr.total_name_len + xattr.total_name_count
         };
@@ -139,7 +141,7 @@ impl RamXattr {
         }
 
         for (name, _) in &xattr.map {
-            if namespace.is_user() && !name.namespace.is_user() {
+            if namespace.is_user() && !name.namespace.is_user() && !posix_acl::is_acl(&name.full_name) {
                 continue;
             }
 

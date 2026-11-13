@@ -30,6 +30,7 @@ use crate::{
             file_system::{FileSystem, FsFlags},
             inode::{HardLinkability, Inode, Metadata, MknodType, RenameMode, may_retain_setgid},
             inode_ext::InodeExt,
+            posix_acl::{self, AccessAclUpdate},
             registry::FsAndRoot,
             xattr::{self, XattrName, XattrNamespace, XattrSetFlags},
         },
@@ -909,6 +910,9 @@ impl Path {
         if mode.has_set_gid() && !may_retain_setgid(thread, metadata.gid) {
             mode.remove(InodeMode::S_ISGID);
         }
+        if let Some(acl) = inode.access_acl()? {
+            return inode.update_access_acl(&self.dentry, AccessAclUpdate::chmod(acl, mode));
+        }
         inode.set_mode(&self.dentry, mode)
     }
 
@@ -982,6 +986,21 @@ impl Path {
         ctx: &Context,
     ) -> Result<()> {
         let inode = self.inode();
+        if name.full_name() == posix_acl::DEFAULT {
+            return_errno!(Errno::EOPNOTSUPP);
+        }
+        if name.full_name() == posix_acl::ACCESS {
+            let acl = posix_acl::read_user_acl(value_reader)?;
+            self.check_mount_writable()?;
+            let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+            let metadata = capable_modify_acl(inode.as_ref(), ctx)?;
+            let has_acl = acl.is_some();
+            let mut update = AccessAclUpdate::set(acl, metadata.mode);
+            if has_acl && !may_retain_setgid(ctx.posix_thread, metadata.gid) {
+                update.clear_setgid();
+            }
+            return inode.update_access_acl(&self.dentry, update);
+        }
         if name.full_name() == xattr::SECURITY_CAPABILITY_XATTR_NAME {
             capable_modify_file_cap(inode.as_ref(), ctx)?;
         } else {
@@ -993,13 +1012,37 @@ impl Path {
     /// Gets an xattr of the file.
     pub(crate) fn get_xattr(&self, name: XattrName, value_writer: &mut VmWriter) -> Result<usize> {
         let inode = self.inode();
-        inode.check_permission(Permission::MAY_READ)?;
+        if name.full_name() == posix_acl::ACCESS {
+            let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+            let acl = inode.access_acl()?.ok_or_else(|| Error::new(Errno::ENODATA))?;
+            let value = acl.encode();
+            if value_writer.avail() == 0 {
+                return Ok(value.len());
+            }
+            if value_writer.avail() < value.len() {
+                return_errno!(Errno::ERANGE);
+            }
+            VmReader::from(value.as_slice()).read_fallible(value_writer)?;
+            return Ok(value.len());
+        }
+        if !posix_acl::is_acl(name.full_name()) {
+            inode.check_permission(Permission::MAY_READ)?;
+        }
         inode.get_xattr(name, value_writer)
     }
 
     /// Removes an xattr of the file.
     pub(crate) fn remove_xattr(&self, name: XattrName, ctx: &Context) -> Result<()> {
         let inode = self.inode();
+        if name.full_name() == posix_acl::DEFAULT {
+            return_errno!(Errno::EOPNOTSUPP);
+        }
+        if name.full_name() == posix_acl::ACCESS {
+            self.check_mount_writable()?;
+            let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+            let metadata = capable_modify_acl(inode.as_ref(), ctx)?;
+            return inode.update_access_acl(&self.dentry, AccessAclUpdate::set(None, metadata.mode));
+        }
         if name.full_name() == xattr::SECURITY_CAPABILITY_XATTR_NAME {
             capable_modify_file_cap(inode.as_ref(), ctx)?;
         } else {
@@ -1007,6 +1050,18 @@ impl Path {
         }
         inode.remove_xattr(&self.dentry, name)
     }
+}
+
+fn capable_modify_acl(inode: &dyn Inode, ctx: &Context) -> Result<Metadata> {
+    let metadata = inode.metadata()?;
+    if ctx.posix_thread.credentials().fsuid() != metadata.uid {
+        lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+            ctx.thread_local.borrow_user_ns().as_ref(),
+            ctx.posix_thread,
+            CapSet::FOWNER,
+        ))?;
+    }
+    Ok(metadata)
 }
 
 fn capable_modify_file_cap(inode: &dyn Inode, ctx: &Context) -> Result<()> {

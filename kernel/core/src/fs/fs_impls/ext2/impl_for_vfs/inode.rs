@@ -25,6 +25,7 @@ use crate::{
                 SymbolicLink,
             },
             path::Dentry,
+            posix_acl::{self, AccessAclUpdate, PosixAcl},
             xattr::{XattrName, XattrNamespace, XattrSetFlags},
         },
     },
@@ -100,6 +101,14 @@ impl Inode for Ext2Inode {
 
     fn set_mode(&self, _self_dentry: &Dentry, mode: InodeMode) -> Result<()> {
         self.set_mode(mode)
+    }
+
+    fn access_acl(&self) -> Result<Option<PosixAcl>> {
+        self.read_acl(XattrName::try_from_full_name(posix_acl::ACCESS).unwrap())
+    }
+
+    fn update_access_acl(&self, _self_dentry: &Dentry, update: AccessAclUpdate) -> Result<()> {
+        self.update_access_acl(update)
     }
 
     fn owner(&self) -> Result<Uid> {

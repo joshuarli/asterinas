@@ -11,6 +11,8 @@ use spin::Once;
 
 use super::{
     file_system::FileSystem,
+    inode_ext::InodeExt,
+    posix_acl::{AccessAclUpdate, PosixAcl},
     xattr::{XattrName, XattrNamespace, XattrSetFlags},
 };
 use crate::{
@@ -718,6 +720,16 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
         Err(Error::new(Errno::EOPNOTSUPP))
     }
 
+    /// Reads the access ACL while the caller holds the inode ownership lock.
+    fn access_acl(&self) -> Result<Option<PosixAcl>> {
+        Ok(None)
+    }
+
+    /// Updates access ACL storage and mode while the caller holds the ownership lock.
+    fn update_access_acl(&self, self_dentry: &Dentry, update: AccessAclUpdate) -> Result<()> {
+        Err(Error::new(Errno::EOPNOTSUPP))
+    }
+
     /// Used to check for read/write/execute permissions on a file.
     ///
     /// Similar to Linux, using "fsuid" here allows setting filesystem permissions
@@ -761,6 +773,23 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
             }
         }
 
+        if !perm.intersects(Permission::MAY_READ | Permission::MAY_WRITE | Permission::MAY_EXEC) {
+            return Ok(());
+        }
+        let _ownership = (metadata.uid != creds.fsuid())
+            .then(|| self.fs_lock_context_or_init().ownership_lock().lock());
+        let metadata = if _ownership.is_some() { self.metadata()? } else { metadata };
+        let mode = metadata.mode;
+        if metadata.uid != creds.fsuid() {
+            if let Some(acl) = self.access_acl()? {
+                let wanted = (perm.bits() & 7) as u8;
+                let allowed = acl.permits(creds.fsuid(), metadata.uid, metadata.gid,
+                    |gid| gid == creds.fsgid() || creds.groups().contains(&gid), wanted);
+                return if allowed { Ok(()) } else {
+                    Err(Error::with_message(Errno::EACCES, "POSIX ACL permission check failed"))
+                };
+            }
+        }
         if metadata.uid == creds.fsuid() {
             if (perm.may_read() && !mode.is_owner_readable())
                 || (perm.may_write() && !mode.is_owner_writable())

@@ -7,6 +7,7 @@
 pub(crate) mod file_system;
 pub mod inode;
 pub(crate) mod inode_ext;
+pub(crate) mod posix_acl;
 pub(crate) mod registry;
 pub(crate) mod xattr;
 

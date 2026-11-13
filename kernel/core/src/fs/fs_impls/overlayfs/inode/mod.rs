@@ -72,7 +72,7 @@ use self::{
 };
 use crate::{
     fs::{
-        file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, StatusFlags, SyncMode},
+        file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, Permission, StatusFlags, SyncMode},
         fs_impls::overlayfs::{fs::OverlayFs, real::RealObject},
         vfs::{
             file_system::FileSystem,
@@ -81,6 +81,8 @@ use crate::{
                 SymbolicLink,
             },
             path::Dentry,
+            inode_ext::InodeExt,
+            posix_acl::{AccessAclUpdate, PosixAcl},
             xattr::{XattrName, XattrNamespace, XattrSetFlags},
         },
     },
@@ -385,6 +387,24 @@ impl Inode for OverlayInode {
 
     fn set_mode(&self, self_dentry: &Dentry, mode: InodeMode) -> Result<()> {
         self.set_mode_impl(self_dentry, mode)
+    }
+
+    fn access_acl(&self) -> Result<Option<PosixAcl>> {
+        let real = self.real_object();
+        let inode = real.real_inode();
+        let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+        inode.access_acl()
+    }
+
+    fn update_access_acl(&self, self_dentry: &Dentry, update: AccessAclUpdate) -> Result<()> {
+        let upper = self.writable_real_object(self_dentry)?;
+        let inode = upper.real_inode();
+        let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+        inode.update_access_acl(upper.dentry(), update)
+    }
+
+    fn check_permission(&self, permission: Permission) -> Result<()> {
+        self.real_object().real_inode().check_permission(permission)
     }
 
     fn set_owner(&self, self_dentry: &Dentry, uid: Uid) -> Result<()> {

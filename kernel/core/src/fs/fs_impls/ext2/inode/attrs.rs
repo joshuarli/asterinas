@@ -17,6 +17,8 @@ use crate::{
         file::InodeMode,
         vfs::{
             inode::Metadata,
+            inode_ext::InodeExt,
+            posix_acl::{self, AccessAclUpdate, PosixAcl},
             xattr::{XattrName, XattrNamespace, XattrSetFlags},
         },
     },
@@ -161,6 +163,19 @@ impl Inode {
         name: XattrName,
         value_writer: &mut VmWriter,
     ) -> Result<usize> {
+        if posix_acl::is_acl(name.full_name()) {
+            let _ownership = self.fs_lock_context_or_init().ownership_lock().lock();
+            let acl = self.read_acl(name)?.ok_or_else(|| Error::new(Errno::ENODATA))?;
+            let value = acl.encode();
+            if value_writer.avail() == 0 {
+                return Ok(value.len());
+            }
+            if value_writer.avail() < value.len() {
+                return_errno!(Errno::ERANGE);
+            }
+            VmReader::from(value.as_slice()).read_fallible(value_writer)?;
+            return Ok(value.len());
+        }
         let xattr = self.xattr.as_ref().ok_or_else(|| {
             Error::with_message(Errno::ENODATA, "xattr not supported on this inode type")
         })?;
@@ -186,6 +201,14 @@ impl Inode {
         value_reader: &mut VmReader,
         flags: XattrSetFlags,
     ) -> Result<()> {
+        if name.full_name() == posix_acl::DEFAULT {
+            return_errno!(Errno::EOPNOTSUPP);
+        }
+        if name.full_name() == posix_acl::ACCESS {
+            let acl = posix_acl::read_user_acl(value_reader)?;
+            let _ownership = self.fs_lock_context_or_init().ownership_lock().lock();
+            return self.update_access_acl(AccessAclUpdate::set(acl, self.mode()));
+        }
         let xattr = self.xattr.as_ref().ok_or_else(|| {
             Error::with_message(Errno::EPERM, "xattr not supported on this inode type")
         })?;
@@ -194,6 +217,49 @@ impl Inode {
 
         let mut inner = self.inner.write();
         inner.set_file_acl(new_bid);
+        inner.set_ctime(utils::now());
+        Ok(())
+    }
+
+    /// The caller holds the inode ownership lock.
+    pub(in ext2) fn read_acl(&self, name: XattrName) -> Result<Option<PosixAcl>> {
+        let Some(xattr) = self.xattr.as_ref() else { return Ok(None) };
+        let mut empty = [];
+        let mut query = VmWriter::from(empty.as_mut_slice()).to_fallible();
+        let length = match xattr.get_xattr(name, &mut query) {
+            Ok(length) => length,
+            Err(error) if error.error() == Errno::ENODATA => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if length > BLOCK_SIZE {
+            return_errno!(Errno::EIO);
+        }
+        let mut value = vec![0; length];
+        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
+        if xattr.get_xattr(name, &mut writer)? != length {
+            return_errno!(Errno::EIO);
+        }
+        decode_disk_acl(&value)
+    }
+
+    pub(in ext2) fn update_access_acl(&self, update: AccessAclUpdate) -> Result<()> {
+        let xattr = self.xattr.as_ref().ok_or_else(|| Error::new(Errno::EOPNOTSUPP))?;
+        let name = XattrName::try_from_full_name(posix_acl::ACCESS).unwrap();
+        if let Some(value) = update.value() {
+            let value = encode_disk_acl(value);
+            let mut reader = VmReader::from(value.as_slice()).to_fallible();
+            xattr.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE)?;
+        } else {
+            match xattr.remove_xattr(name) {
+                Ok(()) => {},
+                Err(error) if error.error() == Errno::ENODATA => {},
+                Err(error) => return Err(error),
+            }
+        }
+        let new_bid = xattr.bid();
+        let mut inner = self.inner.write();
+        inner.set_file_acl(new_bid);
+        inner.set_mode(update.mode());
         inner.set_ctime(utils::now());
         Ok(())
     }
@@ -211,4 +277,39 @@ impl Inode {
         inner.set_ctime(utils::now());
         Ok(())
     }
+}
+
+fn encode_disk_acl(wire: &[u8]) -> Vec<u8> {
+    let mut disk = Vec::with_capacity(wire.len());
+    disk.extend_from_slice(&1u32.to_le_bytes());
+    for entry in wire[4..].chunks_exact(8) {
+        let tag = u16::from_le_bytes(entry[..2].try_into().unwrap());
+        disk.extend_from_slice(&entry[..if matches!(tag, 2 | 8) { 8 } else { 4 }]);
+    }
+    disk
+}
+
+fn decode_disk_acl(disk: &[u8]) -> Result<Option<PosixAcl>> {
+    if disk.len() < 4 || u32::from_le_bytes(disk[..4].try_into().unwrap()) != 1 {
+        return_errno_with_message!(Errno::EIO, "invalid ext2 ACL header");
+    }
+    let mut wire = Vec::with_capacity(disk.len() * 2);
+    wire.extend_from_slice(&2u32.to_le_bytes());
+    let mut offset = 4;
+    while offset < disk.len() {
+        let entry = disk.get(offset..offset + 4).ok_or_else(|| Error::new(Errno::EIO))?;
+        let tag = u16::from_le_bytes(entry[..2].try_into().unwrap());
+        wire.extend_from_slice(entry);
+        offset += 4;
+        match tag {
+            1 | 4 | 16 | 32 => wire.extend_from_slice(&u32::MAX.to_le_bytes()),
+            2 | 8 => {
+                wire.extend_from_slice(disk.get(offset..offset + 4)
+                    .ok_or_else(|| Error::new(Errno::EIO))?);
+                offset += 4;
+            }
+            _ => return_errno!(Errno::EIO),
+        }
+    }
+    PosixAcl::decode(&wire).map_err(|_| Error::with_message(Errno::EIO, "invalid ext2 ACL entries"))
 }
