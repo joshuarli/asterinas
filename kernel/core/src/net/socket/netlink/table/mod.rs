@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     net::socket::netlink::{
-        addr::UNSPECIFIED_PORT, kobject_uevent::UeventMessage, receiver::MessageReceiver,
+        addr::UNSPECIFIED_PORT, generic::GenericMessage, kobject_uevent::UeventMessage, receiver::MessageReceiver,
         route::RtnlMessage,
     },
     prelude::*,
@@ -24,6 +24,7 @@ static NETLINK_SOCKET_TABLE: Once<NetlinkSocketTable> = Once::new();
 /// All bound netlink sockets.
 struct NetlinkSocketTable {
     route: RwMutex<ProtocolSocketTable<RtnlMessage>>,
+    generic: RwMutex<ProtocolSocketTable<GenericMessage>>,
     uevent: RwMutex<ProtocolSocketTable<UeventMessage>>,
 }
 
@@ -31,6 +32,7 @@ impl NetlinkSocketTable {
     fn new() -> Self {
         Self {
             route: RwMutex::new(ProtocolSocketTable::new()),
+            generic: RwMutex::new(ProtocolSocketTable::new()),
             uevent: RwMutex::new(ProtocolSocketTable::new()),
         }
     }
@@ -73,6 +75,16 @@ impl SupportedNetlinkProtocol for NetlinkRouteProtocol {
 
     fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>> {
         &NETLINK_SOCKET_TABLE.get().unwrap().route
+    }
+}
+
+pub(crate) enum NetlinkGenericProtocol {}
+
+impl SupportedNetlinkProtocol for NetlinkGenericProtocol {
+    type Message = GenericMessage;
+
+    fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>> {
+        &NETLINK_SOCKET_TABLE.get().unwrap().generic
     }
 }
 
