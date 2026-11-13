@@ -678,6 +678,17 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
         }
     }
 
+    /// Returns the first data byte at or after `offset`, or `ENXIO` if none exists.
+    fn seek_data(&self, _offset: usize) -> Result<usize> {
+        return_errno_with_message!(Errno::EINVAL, "data seeking is not supported");
+    }
+
+    /// Returns the first hole at or after `offset`, including the implicit hole at EOF.
+    /// An offset at or beyond EOF fails with `ENXIO`.
+    fn seek_hole(&self, _offset: usize) -> Result<usize> {
+        return_errno_with_message!(Errno::EINVAL, "hole seeking is not supported");
+    }
+
     /// Gets the extension of this inode.
     fn extension(&self) -> &Extension;
 

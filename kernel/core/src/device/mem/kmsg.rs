@@ -221,6 +221,12 @@ impl PerOpenFileOps for KmsgFile {
                     "the ring has no current position to seek from",
                 )));
             }
+            SeekFrom::Data(_) | SeekFrom::Hole(_) => {
+                return Some(Err(Error::with_message(
+                    Errno::EINVAL,
+                    "the ring has no data or hole extents",
+                )));
+            }
             SeekFrom::Start(_) | SeekFrom::End(_) | SeekFrom::Current(_) => {
                 return Some(Err(Error::with_message(
                     Errno::ESPIPE,

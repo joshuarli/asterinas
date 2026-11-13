@@ -484,6 +484,16 @@ impl FileLike for InodeHandle {
         if !inode.type_().is_seekable() {
             return_errno_with_message!(Errno::ESPIPE, "seek is not supported");
         }
+        if matches!(pos, SeekFrom::Data(_) | SeekFrom::Hole(_)) {
+            let mut offset = self.offset.lock();
+            let next = match pos {
+                SeekFrom::Data(start) => inode.seek_data(start)?,
+                SeekFrom::Hole(start) => inode.seek_hole(start)?,
+                _ => unreachable!(),
+            };
+            *offset = next;
+            return Ok(next);
+        }
         do_seek_util(&self.offset, pos, inode.seek_end())
     }
 
@@ -596,6 +606,8 @@ pub enum SeekFrom {
     Start(usize),
     End(isize),
     Current(isize),
+    Data(usize),
+    Hole(usize),
 }
 
 /// File operations for one opened file description.
@@ -683,6 +695,9 @@ fn do_seek_util(offset: &Mutex<usize>, pos: SeekFrom, end: Option<usize>) -> Res
             }
         }
         SeekFrom::Current(diff) => offset.wrapping_add_signed(diff),
+        SeekFrom::Data(_) | SeekFrom::Hole(_) => {
+            return_errno_with_message!(Errno::EINVAL, "extent seeking is not supported");
+        }
     };
 
     // Invariant: `*offset <= isize::MAX as usize`.

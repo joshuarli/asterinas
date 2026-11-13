@@ -70,6 +70,14 @@ impl Inode for Ext2Inode {
         self.file_size()
     }
 
+    fn seek_data(&self, offset: usize) -> Result<usize> {
+        self.seek_data(offset)
+    }
+
+    fn seek_hole(&self, offset: usize) -> Result<usize> {
+        self.seek_hole(offset)
+    }
+
     fn resize(&self, _self_dentry: &Dentry, new_size: usize) -> Result<()> {
         self.resize(new_size)
     }

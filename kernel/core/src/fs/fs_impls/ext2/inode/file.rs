@@ -17,7 +17,57 @@ use crate::fs::{
     vfs::inode::FallocMode,
 };
 
+enum ExtentKind {
+    Data,
+    Hole,
+}
+
 impl Inode {
+    pub(in ext2) fn seek_data(&self, offset: usize) -> Result<usize> {
+        self.seek_extent(offset, ExtentKind::Data)
+    }
+
+    pub(in ext2) fn seek_hole(&self, offset: usize) -> Result<usize> {
+        self.seek_extent(offset, ExtentKind::Hole)
+    }
+
+    fn seek_extent(&self, offset: usize, kind: ExtentKind) -> Result<usize> {
+        if self.type_ != InodeType::File {
+            return_errno_with_message!(Errno::EINVAL, "extent seeking requires a regular file");
+        }
+        let inner = self.inner.read();
+        let size = inner.file_size();
+        if offset >= size {
+            return_errno_with_message!(Errno::ENXIO, "no extent at or after the offset");
+        }
+        let first = (offset / BLOCK_SIZE) as Iblock;
+        let end = size.div_ceil(BLOCK_SIZE) as Iblock;
+        let mut ranges = inner.block_manager()?.iter_io_ranges(first..end);
+        let mut logical = first as usize * BLOCK_SIZE;
+        while let Some(range) = ranges.next()? {
+            match range {
+                IoRange::Mapped(blocks) => {
+                    if matches!(kind, ExtentKind::Data) {
+                        return Ok(offset.max(logical));
+                    }
+                    logical += blocks.len() * BLOCK_SIZE;
+                }
+                IoRange::Hole(blocks) => {
+                    if matches!(kind, ExtentKind::Hole) {
+                        return Ok(offset.max(logical));
+                    }
+                    logical = blocks.end as usize * BLOCK_SIZE;
+                }
+            }
+        }
+        match kind {
+            ExtentKind::Hole => Ok(size),
+            ExtentKind::Data => {
+                return_errno_with_message!(Errno::ENXIO, "no data at or after the offset")
+            }
+        }
+    }
+
     /// Reads file data at `offset` through the page cache.
     pub(in ext2) fn read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
         if self.type_ == InodeType::Dir {
