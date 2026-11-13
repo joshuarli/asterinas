@@ -51,6 +51,7 @@ pub(crate) struct PosixThreadBuilder {
     user_ns: Option<Arc<UserNamespace>>,
     ns_proxy: Option<Arc<NsProxy>>,
     default_timer_slack_ns: u64,
+    io_priority: u32,
 }
 
 impl PosixThreadBuilder {
@@ -82,6 +83,7 @@ impl PosixThreadBuilder {
             user_ns: None,
             ns_proxy: None,
             default_timer_slack_ns: 50_000, // 50 usec default slack
+            io_priority: 0,
         }
     }
 
@@ -153,6 +155,11 @@ impl PosixThreadBuilder {
         self
     }
 
+    pub(crate) fn io_priority(mut self, io_priority: u32) -> Self {
+        self.io_priority = io_priority;
+        self
+    }
+
     pub(crate) fn scheduling(mut self, (policy, user): (SchedPolicy, UserSchedAttr)) -> Self {
         self.sched_policy = policy;
         self.sched_user = user;
@@ -180,6 +187,7 @@ impl PosixThreadBuilder {
             user_ns,
             ns_proxy,
             default_timer_slack_ns,
+            io_priority,
         } = self;
 
         let file_table = file_table.unwrap_or_else(FileTable::new);
@@ -211,7 +219,7 @@ impl PosixThreadBuilder {
                     prof_clock,
                     virtual_timer_manager,
                     prof_timer_manager,
-                    io_priority: AtomicU32::new(0),
+                    io_priority: AtomicU32::new(io_priority),
                     ns_proxy: Mutex::new(Some(ns_proxy.clone())),
                     timer_slack_ns: AtomicU64::new(default_timer_slack_ns),
                     default_timer_slack_ns: AtomicU64::new(default_timer_slack_ns),

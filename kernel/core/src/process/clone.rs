@@ -458,7 +458,8 @@ fn clone_child_task(
         .fpu_context(child_fpu_context)
         .user_ns(child_user_ns)
         .ns_proxy(child_ns_proxy)
-        .default_timer_slack_ns(default_timer_slack_ns);
+        .default_timer_slack_ns(default_timer_slack_ns)
+        .io_priority(posix_thread.io_priority().load(Ordering::Relaxed));
         #[cfg(target_arch = "x86_64")]
         {
             thread_builder = thread_builder.fs_base(child_fs_base).gs_base(child_gs_base);
@@ -595,6 +596,7 @@ fn clone_child_process(
             .user_ns(child_user_ns.clone())
             .ns_proxy(child_ns_proxy)
             .default_timer_slack_ns(default_timer_slack_ns)
+            .io_priority(ctx.posix_thread.io_priority().load(Ordering::Relaxed))
         };
         #[cfg(target_arch = "x86_64")]
         {

@@ -23,3 +23,5 @@ SUBDIRS += \
 endif
 
 include ../common/Makefile
+
+$(OBJ_OUTPUT_DIR)/thread_priority: C_FLAGS += -pthread
