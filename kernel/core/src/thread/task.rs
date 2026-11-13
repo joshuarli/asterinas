@@ -81,8 +81,14 @@ pub(crate) fn create_new_user_task(
                     handle_exception(&ctx, user_ctx, exception)
                 }
                 ReturnReason::UserSyscall => {
-                    ctx.thread_local
-                        .set_orig_syscall_ret(Some(user_ctx.syscall_ret()));
+                    #[cfg(target_arch = "x86_64")]
+                    let orig_syscall_ret = user_ctx.syscall_num();
+                    #[cfg(not(target_arch = "x86_64"))]
+                    let orig_syscall_ret = user_ctx.syscall_ret();
+                    ctx.thread_local.set_orig_syscall_ret(Some(orig_syscall_ret));
+
+                    #[cfg(target_arch = "x86_64")]
+                    user_ctx.set_syscall_ret((-(Errno::ENOSYS as isize)) as usize);
 
                     let res = ctx.posix_thread.ptrace_may_stop_on_syscall(&ctx, user_ctx);
                     if !matches!(res, PtraceStopResult::Interrupted) {

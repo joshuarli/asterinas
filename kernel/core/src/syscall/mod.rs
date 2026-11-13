@@ -374,8 +374,8 @@ enum SyscallReturn {
 }
 
 impl SyscallArgument {
-    fn new_from_context(user_ctx: &UserContext) -> Self {
-        let syscall_number = user_ctx.syscall_num() as u64;
+    fn new_from_context(user_ctx: &UserContext, syscall_number: usize) -> Self {
+        let syscall_number = syscall_number as u64;
         let args = user_ctx.syscall_args().map(|x| x as u64);
         Self {
             syscall_number,
@@ -385,7 +385,13 @@ impl SyscallArgument {
 }
 
 pub(crate) fn handle_syscall(ctx: &Context, user_ctx: &mut UserContext) {
-    let syscall_frame = SyscallArgument::new_from_context(user_ctx);
+    #[cfg(target_arch = "x86_64")]
+    let Some(syscall_number) = ctx.thread_local.orig_syscall_ret() else {
+        return;
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let syscall_number = user_ctx.syscall_num();
+    let syscall_frame = SyscallArgument::new_from_context(user_ctx, syscall_number);
     let syscall_return = arch::syscall_dispatch(
         syscall_frame.syscall_number,
         syscall_frame.args,
