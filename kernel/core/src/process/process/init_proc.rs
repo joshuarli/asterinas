@@ -18,7 +18,6 @@ use crate::{
         rlimit::new_resource_limits_for_init,
         signal::sig_disposition::SigDispositions,
     },
-    sched::Nice,
     thread::Tid,
     vm::vmar::VmarHandle,
 };
@@ -57,7 +56,6 @@ fn create_init_process(
     let pid = allocate_posix_tid();
     let vmar = VmarHandle::new(ProcessVm::new(executable_path.clone()));
     let resource_limits = new_resource_limits_for_init();
-    let nice = Nice::default();
     let oom_score_adj = 0;
     let sig_dispositions = Arc::new(Mutex::new(SigDispositions::default()));
     let user_ns = UserNamespace::get_init_singleton().clone();
@@ -66,7 +64,6 @@ fn create_init_process(
         pid,
         vmar.clone_arc(),
         resource_limits,
-        nice,
         oom_score_adj,
         sig_dispositions,
         user_ns,

@@ -1,23 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::AtomicI8;
-
 use aster_util::ranged_integer::RangedI8;
-use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
 
-/// The process scheduling nice value.
+/// The user-visible CPU scheduling nice value.
 ///
-/// It is an integer in the range of [-20, 19]. Process with a smaller nice
+/// It is an integer in the range of [-20, 19]. A thread with a smaller nice
 /// value is more favorable in scheduling.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Nice(NiceValue);
 
 pub(crate) type NiceValue = RangedI8<-20, 19>;
-
-define_atomic_version_of_integer_like_type!(Nice, try_from = true, {
-    #[derive(Debug)]
-    pub(crate) struct AtomicNice(AtomicI8);
-});
 
 impl Nice {
     pub(crate) const MIN: Self = Nice::new(NiceValue::MIN);

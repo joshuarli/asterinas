@@ -30,7 +30,6 @@ use crate::{
         signal::{Pollee, sig_queues::SigQueues},
         status::StopWaitStatus,
     },
-    sched::{AtomicNice, Nice},
     thread::{AsThread, Thread},
     time::clocks::ProfClock,
     vm::vmar::Vmar,
@@ -111,10 +110,6 @@ pub struct Process {
     ///
     /// If this field is `None`, the process is bound to the root cgroup.
     cgroup: RcuOption<Arc<CgroupNode>>,
-    /// Scheduling priority nice value
-    /// According to POSIX.1, the nice value is a per-process attribute,
-    /// the threads in a process should share a nice value.
-    nice: AtomicNice,
     /// The adjustment value of the out-of-memory (OOM) killer score.
     // FIXME: Support OOM killer.
     oom_score_adj: AtomicI16,
@@ -230,7 +225,6 @@ impl Process {
         vmar: Arc<Vmar>,
 
         resource_limits: ResourceLimits,
-        nice: Nice,
         oom_score_adj: i16,
         sig_dispositions: Arc<Mutex<SigDispositions>>,
         user_ns: Arc<UserNamespace>,
@@ -256,7 +250,6 @@ impl Process {
                 reaped_children_stats: Mutex::new(ReapedChildrenStats::default()),
                 resource_limits,
                 cgroup: RcuOption::new(None),
-                nice: AtomicNice::new(nice),
                 oom_score_adj: AtomicI16::new(oom_score_adj),
                 is_child_subreaper: AtomicBool::new(false),
                 has_child_subreaper: AtomicBool::new(false),
@@ -312,10 +305,6 @@ impl Process {
 
     pub(crate) fn resource_limits(&self) -> &ResourceLimits {
         &self.resource_limits
-    }
-
-    pub(crate) fn nice(&self) -> &AtomicNice {
-        &self.nice
     }
 
     pub(crate) fn main_thread(&self) -> Arc<Thread> {

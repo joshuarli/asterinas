@@ -134,6 +134,77 @@ static void expect_target(struct target target, int priority)
     assert(get_priority(1, target.tid) == priority);
 }
 
+struct race_args {
+    pid_t target;
+    int nice;
+    pthread_barrier_t *barrier;
+};
+
+static void rendezvous(pthread_barrier_t *barrier)
+{
+    int result = pthread_barrier_wait(barrier);
+    assert(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+}
+
+static void *race_set_priority(void *argument)
+{
+    struct race_args *args = argument;
+    for (int round = 0; round < 128; ++round) {
+        rendezvous(args->barrier);
+        for (int change = 0; change < 64; ++change)
+            assert(setpriority(PRIO_PROCESS, args->target, args->nice) == 0);
+        rendezvous(args->barrier);
+    }
+    return NULL;
+}
+
+static void priority_race(void)
+{
+    struct target target = start_target(0, 0);
+    pthread_barrier_t barrier;
+    assert(pthread_barrier_init(&barrier, NULL, 3) == 0);
+    struct race_args args[2] = {{target.pid, 10, &barrier}, {target.pid, 19, &barrier}};
+    pthread_t workers[2];
+    for (int i = 0; i < 2; ++i)
+        assert(pthread_create(&workers[i], NULL, race_set_priority, &args[i]) == 0);
+    for (int round = 0; round < 128; ++round) {
+        rendezvous(&barrier);
+        rendezvous(&barrier);
+        struct sched_attribute actual = {0};
+        assert(syscall(SYS_sched_getattr, target.pid, &actual, sizeof(actual), 0) == 0);
+        assert(getpriority(PRIO_PROCESS, target.pid) == actual.nice);
+    }
+    for (int i = 0; i < 2; ++i)
+        assert(pthread_join(workers[i], NULL) == 0);
+    assert(pthread_barrier_destroy(&barrier) == 0);
+    stop_target(target);
+}
+
+static void priority_permissions(void)
+{
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        assert(setresuid(65534, 65534, 65534) == 0);
+        int owner = getppid();
+        errno = 0;
+        int before_nice = getpriority(PRIO_PROCESS, owner);
+        assert(errno == 0);
+        errno = 0;
+        assert(setpriority(PRIO_PROCESS, owner, 19) == -1 && errno == EPERM);
+        assert(getpriority(PRIO_PROCESS, owner) == before_nice);
+        struct sched_attribute actual = {0};
+        assert(syscall(SYS_sched_getattr, owner, &actual, sizeof(actual), 0) == 0);
+        assert(actual.nice == before_nice);
+        assert(setpriority(PRIO_PROCESS, 0, 10) == 0);
+        errno = 0;
+        assert(setpriority(PRIO_PROCESS, 0, 9) == -1 && errno == EACCES);
+        assert(getpriority(PRIO_PROCESS, 0) == 10);
+        _exit(0);
+    }
+    wait_child(child);
+}
+
 static void fallback_cases(void)
 {
     pid_t child = fork();
@@ -157,11 +228,13 @@ static void fallback_cases(void)
         assert(sched_setscheduler(0, SCHED_FIFO, &parameter) == 0);
         assert(get_priority(2, 0) == PRIO(1, 5));
         set_nice(0, 10);
+        assert(getpriority(PRIO_PROCESS, 0) == 10);
         assert(get_priority(2, 0) == PRIO(2, 6));
         assert(sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &parameter) == 0);
         assert(get_priority(2, 0) == PRIO(1, 6));
         check_reset_child(0);
-        set_nice(0, -5);
+        assert(setpriority(PRIO_PROCESS, 0, -5) == 0);
+        assert(getpriority(PRIO_PROCESS, 0) == -5);
         assert(sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &parameter) == 0);
         assert(get_priority(2, 0) == PRIO(1, 3));
         check_reset_child(0);
@@ -206,6 +279,8 @@ static void selector_cases(void)
     if (actor == 0) {
         assert(setresuid(65532, 65532, 65532) == 0);
         set_priority(1, 0, PRIO(3, 0));
+        assert(setpriority(PRIO_PROCESS, second.pid, 19) == 0);
+        assert(getpriority(PRIO_PROCESS, second.pid) == 19);
         assert(get_priority(3, 0) == PRIO(2, 6));
         long foreign_before = get_priority(1, second.pid);
         errno = 0;
@@ -239,6 +314,8 @@ static void selector_cases(void)
 int main(void)
 {
     assert(geteuid() == 0);
+    priority_permissions();
+    priority_race();
     fallback_cases();
     pid_t child = fork();
     assert(child >= 0);

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::Ordering;
-
 use super::SyscallReturn;
 use crate::{
     prelude::*,
@@ -17,7 +15,7 @@ pub(super) fn sys_get_priority(which: i32, who: u32, ctx: &Context) -> Result<Sy
     let highest_prio = {
         let mut nice = Nice::MAX.value().get();
         for process in processes.iter() {
-            let proc_nice = process.nice().load(Ordering::Relaxed).value().get();
+            let proc_nice = process.main_thread().sched_attr().user().user_nice.value().get();
             // Returns the highest priority enjoyed by the processes
             if proc_nice < nice {
                 nice = proc_nice;

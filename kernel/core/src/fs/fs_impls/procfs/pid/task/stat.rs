@@ -2,8 +2,6 @@
 
 #![short_vis_path::add(pid)]
 
-use core::sync::atomic::Ordering;
-
 use aster_util::printer::VmPrinter;
 
 use super::{super::PidDirOps, TidDirOps};
@@ -195,8 +193,7 @@ impl ProcFileOps for StatFileOps {
             )
         };
 
-        let (priority, rt_priority, policy) = sched_values(&thread);
-        let nice = process.nice().load(Ordering::Relaxed).value().get();
+        let (priority, rt_priority, policy, nice) = sched_values(&thread);
         let num_threads = process.tasks().lock().as_slice().len();
         let itrealvalue =
             user_clock_ticks(process.timer_manager().alarm_timer().lock().remain());
@@ -347,7 +344,7 @@ impl ProcFileOps for StatFileOps {
 }
 
 /// Returns the `priority`, `rt_priority`, and `policy` values for `/proc/<pid>/stat`.
-fn sched_values(thread: &Thread) -> (i32, u8, i32) {
+fn sched_values(thread: &Thread) -> (i32, u8, i32, i8) {
     const MAX_RT_PRIORITY: u8 = RealTimePriority::MAX.get();
     const RT_PRIORITY_LIMIT: u8 = MAX_RT_PRIORITY + 1;
     const NICE_TO_PRIORITY_OFFSET: i32 = 20;
@@ -379,7 +376,7 @@ fn sched_values(thread: &Thread) -> (i32, u8, i32) {
         _ => LinuxSchedPolicy::from(policy),
     };
 
-    (priority, rt_priority, linux_policy as i32)
+    (priority, rt_priority, linux_policy as i32, user.user_nice.value().get())
 }
 
 /// Returns the ignored and caught standard-signal masks for `/proc/<pid>/stat`.

@@ -5,7 +5,7 @@ mod sched_class;
 mod stats;
 
 pub(crate) use self::{
-    nice::{AtomicNice, Nice},
+    nice::Nice,
     sched_class::{
         LinuxSchedPolicy, RealTimePolicy, RealTimePriority, SchedAttr, SchedPolicy, UserFairPolicy, UserSchedAttr,
         init, init_on_each_cpu,
