@@ -123,7 +123,19 @@ struct Utimbuf {
     modtime: i64,
 }
 
-fn vfs_utimes(path: &Path, times: Option<TimeSpecPair>) -> Result<SyscallReturn> {
+fn vfs_utimes(path: &Path, times: Option<TimeSpecPair>, ctx: &Context) -> Result<SyscallReturn> {
+    if let Some(times) = &times {
+        if !times.atime.is_valid() || !times.mtime.is_valid() {
+            return_errno_with_message!(Errno::EINVAL, "invalid time");
+        }
+        if times.atime.is_utime_omit() && times.mtime.is_utime_omit() {
+            return Ok(SyscallReturn::Return(0));
+        }
+    }
+    let current_time = times.as_ref().is_none_or(|times| {
+        times.atime.is_utime_now() && times.mtime.is_utime_now()
+    });
+    path.check_set_times_permission(ctx.posix_thread, current_time)?;
     let (atime, mtime, ctime) = match times {
         Some(times) => {
             if !times.atime.is_valid() || !times.mtime.is_valid() {
@@ -209,7 +221,7 @@ fn do_utimes(
         file.path().clone()
     };
 
-    vfs_utimes(&path, times)
+    vfs_utimes(&path, times, ctx)
 }
 
 // Sets the access and modification times for a file,

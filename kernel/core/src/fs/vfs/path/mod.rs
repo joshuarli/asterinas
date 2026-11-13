@@ -895,6 +895,27 @@ impl Path {
         list_writer: &mut VmWriter,
     ) -> Result<usize>;
 
+    pub(crate) fn check_set_times_permission(&self, thread: &PosixThread, current_time: bool) -> Result<()> {
+        self.check_mount_writable()?;
+        let inode = self.inode();
+        let ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+        let is_owner = thread.credentials().fsuid() == inode.metadata()?.uid;
+        let capable = is_owner || lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+            UserNamespace::get_init_singleton().as_ref(),
+            thread,
+            CapSet::FOWNER,
+        )).is_ok();
+        drop(ownership);
+        if capable {
+            return Ok(());
+        }
+        if current_time {
+            inode.check_permission(Permission::MAY_WRITE)
+        } else {
+            return_errno_with_message!(Errno::EPERM, "setting explicit times requires ownership");
+        }
+    }
+
     pub(crate) fn chmod(&self, mut mode: InodeMode, thread: &PosixThread) -> Result<()> {
         self.check_mount_writable()?;
         let inode = self.inode();
