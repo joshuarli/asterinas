@@ -26,6 +26,12 @@ pub fn submitted_sectors() -> (u64, u64) {
     )
 }
 
+/// Returns the total submitted read and write data in KiB, respectively.
+pub fn submitted_kib() -> (u64, u64) {
+    let (read, write) = submitted_sectors();
+    (read / 2, write / 2)
+}
+
 use alloc::sync::Arc;
 use ostd::{sync::{LocalIrqDisabled, SpinLock}, timer::Jiffies};
 

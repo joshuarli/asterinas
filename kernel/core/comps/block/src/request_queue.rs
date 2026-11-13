@@ -315,6 +315,7 @@ mod tests {
     fn rejected_bio_does_not_start_a_request() {
         let device = TestDevice(BioRequestSingleQueue::with_max_nr_segments_per_bio(0));
         let mut batch = IoBatch::new();
+        let before = crate::stats::submitted_sectors();
         let segment = BioSegment::alloc(1, BioDirection::ToDevice);
         let result = Bio::new(BioType::Write, Sid::new(0), vec![segment], None)
             .submit(&device, &mut batch);
@@ -322,6 +323,22 @@ mod tests {
         let stats = device.0.io_stats();
         assert_eq!(stats.in_flight, 0);
         assert_eq!(stats.writes, 0);
+        assert_eq!(crate::stats::submitted_sectors().1 - before.1, 8);
+    }
+
+    #[ktest]
+    fn submitted_reads_and_writes_use_kib_instead_of_sectors() {
+        let device = TestDevice(BioRequestSingleQueue::new());
+        let mut batch = IoBatch::new();
+        let before = crate::stats::submitted_kib();
+        for (type_, direction) in [(BioType::Read, BioDirection::FromDevice), (BioType::Write, BioDirection::ToDevice)] {
+            let segment = BioSegment::alloc_inner(1, 0, 1024, direction);
+            Bio::new(type_, Sid::new(0), vec![segment], None).submit(&device, &mut batch).unwrap();
+        }
+        let after = crate::stats::submitted_kib();
+        assert_eq!((after.0 - before.0, after.1 - before.1), (1, 1));
+        device.0.dequeue().complete(BioStatus::Complete);
+        device.0.dequeue().complete(BioStatus::Complete);
     }
 
     #[derive(Debug)]

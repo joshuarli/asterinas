@@ -23,10 +23,10 @@ impl VmStatFileOps {
 
 impl ProcFileOps for VmStatFileOps {
     fn read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
-        let (read_sectors, write_sectors) = aster_block::stats::submitted_sectors();
+        let (read_kib, write_kib) = aster_block::stats::submitted_kib();
         let mut printer = VmPrinter::new_skip(writer, offset);
-        writeln!(printer, "pgpgin {}", read_sectors / 2)?;
-        writeln!(printer, "pgpgout {}", write_sectors / 2)?;
+        writeln!(printer, "pgpgin {}", read_kib)?;
+        writeln!(printer, "pgpgout {}", write_kib)?;
         // Asterinas does not support swap.
         writeln!(printer, "pswpin 0")?;
         writeln!(printer, "pswpout 0")?;
