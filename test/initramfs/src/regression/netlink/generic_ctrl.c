@@ -291,6 +291,51 @@ out:
     return result;
 }
 
+static int attribute_policy(int type)
+{
+    int failures = 0;
+    for (int case_id = 0; case_id < 4; case_id++) {
+        struct { struct nlmsghdr n; struct genlmsghdr g; struct nlattr a; unsigned char data[32]; } req = {0};
+        struct sockaddr_nl local = { .nl_family = AF_NETLINK }, kernel = { .nl_family = AF_NETLINK }, from;
+        socklen_t length = sizeof(local), fromlen = sizeof(from);
+        int fd = -1, result = -1;
+        char buf[256];
+        struct pollfd pfd;
+        fd = socket(AF_NETLINK, type, NETLINK_GENERIC);
+        if (fd < 0 || bind(fd, (struct sockaddr *)&local, sizeof(local)) ||
+            getsockname(fd, (struct sockaddr *)&local, &length)) goto out;
+        size_t data_len = case_id < 2 ? (size_t)(17 - case_id) : (size_t)(3 - case_id);
+        req.a.nla_type = case_id < 2 ? CTRL_ATTR_FAMILY_NAME : CTRL_ATTR_FAMILY_ID;
+        req.a.nla_len = sizeof(req.a) + data_len;
+        if (case_id < 2) {
+            memset(req.data, 'x', data_len);
+            memcpy(req.data, "nlctrl", 7);
+        } else req.data[0] = 16;
+        req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN) + NLA_ALIGN(req.a.nla_len);
+        req.n.nlmsg_type = GENL_ID_CTRL;
+        req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+        req.n.nlmsg_seq = 1000 + case_id;
+        req.g.cmd = CTRL_CMD_GETFAMILY;
+        if (sendto(fd, &req, req.n.nlmsg_len, 0, (struct sockaddr *)&kernel, sizeof(kernel)) != req.n.nlmsg_len) goto out;
+        pfd.fd = fd; pfd.events = POLLIN;
+        if (poll(&pfd, 1, 1000) != 1 || !(pfd.revents & POLLIN)) goto out;
+        ssize_t count = recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fromlen);
+        if (count < (ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr)) || from.nl_pid) goto out;
+        struct nlmsghdr *n = (struct nlmsghdr *)buf;
+        struct nlmsgerr *e = NLMSG_DATA(n);
+        if (!NLMSG_OK(n, count) || n->nlmsg_type != NLMSG_ERROR || n->nlmsg_seq != req.n.nlmsg_seq ||
+            n->nlmsg_pid != local.nl_pid || e->error != -ERANGE || e->msg.nlmsg_seq != req.n.nlmsg_seq) goto out;
+        if (!poll(&pfd, 1, 0)) result = 0;
+    out:
+        if (fd >= 0) close(fd);
+        if (result) {
+            fprintf(stderr, "generic attribute policy type=%d case=%d failed\n", type, case_id);
+            failures++;
+        }
+    }
+    return failures ? 1 : 0;
+}
+
 int main(void)
 {
     for (int type = SOCK_DGRAM; type <= SOCK_RAW; type++) {
@@ -299,7 +344,7 @@ int main(void)
             query(type, NULL, 0, EINVAL, 0, 0) || dump(type, NLM_F_DUMP) || query(type, "nlctrl", 0, 0, 0, NLM_F_ROOT) ||
             query(type, "nlctrl", 0, 0, 0, NLM_F_MATCH) || query(type, NULL, 0, EINVAL, 0, NLM_F_ROOT) ||
             query(type, "nlctrl", 0, 0, 40000, 0) || control_messages(type) || ports(type) || malformed(type, 0) ||
-            malformed(type, 1)) return 1;
+            malformed(type, 1) || attribute_policy(type)) return 1;
     }
     return 0;
 }

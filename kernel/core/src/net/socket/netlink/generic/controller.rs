@@ -111,12 +111,14 @@ fn lookup(attrs: &[u8]) -> core::result::Result<&'static Family, Errno> {
         let data = &attrs[offset + 4..offset + len];
         match kind {
             1 => {
-                if data.len() < 2 { return Err(Errno::EINVAL); }
+                if data.len() < 2 { return Err(Errno::ERANGE); }
                 id = Some(u16::from_ne_bytes([data[0], data[1]]));
             }
             2 => {
                 let Some(end) = data.iter().position(|b| *b == 0) else { return Err(Errno::EINVAL) };
                 if end > 15 { return Err(Errno::EINVAL); }
+                let string_len = data.len() - usize::from(data.last() == Some(&0));
+                if string_len > 15 { return Err(Errno::ERANGE); }
                 name = Some(&data[..end]);
             }
             _ => (),
