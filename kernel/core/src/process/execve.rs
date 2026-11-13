@@ -286,12 +286,20 @@ fn make_current_main_thread(ctx: &Context) {
 
     // The current thread is not the main thread.
 
-    // Lock order: PID table -> tracer.tracees -> tasks of process
     let mut pid_table = pid_table::pid_table_mut();
+    let old_main = ctx.process.main_thread();
+    let old_main_posix = old_main.as_posix_thread().unwrap();
     let tracer = ctx.posix_thread.tracer();
-    let mut tracer_tracees = tracer
-        .as_ref()
-        .map(|tracer| tracer.as_posix_thread().unwrap().tracees().unwrap().lock());
+    let mut tracers: Vec<_> = [tracer.clone(), old_main_posix.tracer()]
+        .into_iter()
+        .flatten()
+        .collect();
+    tracers.sort_unstable_by_key(|thread| thread.as_posix_thread().unwrap().tid());
+    tracers.dedup_by(|left, right| Arc::ptr_eq(left, right));
+    let mut tracer_tracees: Vec<_> = tracers
+        .iter()
+        .map(|thread| thread.as_posix_thread().unwrap().tracees().unwrap().lock())
+        .collect();
     let mut tasks = ctx.process.tasks().lock();
 
     assert!(tasks.has_exited_main());
@@ -302,10 +310,15 @@ fn make_current_main_thread(ctx: &Context) {
     tasks.swap_main();
     ctx.posix_thread.set_main(pid);
 
-    if let Some(tracer_tracees) = tracer_tracees.as_mut()
-        && let Some(tracee) = tracer_tracees.remove(&old_tid)
+    for tracees in &mut tracer_tracees {
+        tracees.remove(&pid);
+    }
+    old_main_posix.detach_tracer();
+    if let Some(tracer) = tracer
+        && let Some(index) = tracers.iter().position(|thread| Arc::ptr_eq(thread, &tracer))
+        && let Some(tracee) = tracer_tracees[index].remove(&old_tid)
     {
-        tracer_tracees.insert(pid, tracee);
+        tracer_tracees[index].insert(pid, tracee);
     }
 
     drop(tasks);
