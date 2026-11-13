@@ -55,6 +55,12 @@ pub(crate) struct Vmar {
     weak_self: Weak<Self>,
 }
 
+pub(crate) struct MemoryUsage {
+    pub(crate) virtual_bytes: usize,
+    pub(crate) anonymous_resident_pages: usize,
+    pub(crate) file_resident_pages: usize,
+}
+
 impl Vmar {
     /// Creates a new VMAR.
     ///
@@ -73,14 +79,20 @@ impl Vmar {
         })
     }
 
-    /// Returns the current RSS count for the given RSS type.
-    pub(crate) fn get_rss_counter(&self, rss_type: RssType) -> usize {
-        self.rss_counters[rss_type as usize].sum_all_cpus()
+    /// Returns mapped and resident memory statistics in bytes and pages.
+    pub(crate) fn memory_usage(&self) -> MemoryUsage {
+        MemoryUsage {
+            virtual_bytes: self.inner.read().total_vm,
+            anonymous_resident_pages: self.rss_counters[RssType::Anon as usize].sum_all_cpus(),
+            file_resident_pages: self.rss_counters[RssType::File as usize].sum_all_cpus(),
+        }
     }
 
-    /// Returns the total size of the mappings in bytes.
-    pub(crate) fn get_mappings_total_size(&self) -> usize {
-        self.inner.read().total_vm
+    pub(crate) fn private_writable_mapping_bytes(&self) -> usize {
+        self.inner.read().vm_mappings.iter()
+            .filter(|mapping| mapping.is_private_writable())
+            .map(|mapping| mapping.map_size())
+            .sum()
     }
 
     /// Returns the attached `VmSpace`.

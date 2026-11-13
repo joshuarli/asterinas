@@ -175,6 +175,10 @@ impl VmMapping {
         self.map_size.get()
     }
 
+    pub(super) fn is_private_writable(&self) -> bool {
+        !self.map_mode.is_shared() && self.perms.contains(VmPerms::WRITE)
+    }
+
     /// Returns the permissions of pages in the mapping.
     pub(crate) fn perms(&self) -> VmPerms {
         self.perms

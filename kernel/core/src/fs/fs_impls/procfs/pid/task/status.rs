@@ -18,7 +18,6 @@ use crate::{
         signal::{sig_action::SigAction, sig_mask::SigMask},
     },
     thread::Thread,
-    vm::vmar::RssType,
 };
 
 /// Represents the inode at `/proc/[pid]/task/[tid]/status` (and also `/proc/[pid]/status`).
@@ -161,10 +160,11 @@ impl ProcFileOps for StatusFileOps {
                 .unwrap_or(0)
         )?;
 
-        if let Some(vmar_ref) = process.lock_vmar().as_ref() {
-            let vsize = vmar_ref.get_mappings_total_size();
-            let anon = vmar_ref.get_rss_counter(RssType::Anon) * (PAGE_SIZE / 1024);
-            let file = vmar_ref.get_rss_counter(RssType::File) * (PAGE_SIZE / 1024);
+        let memory_usage = process.lock_vmar().as_ref().map(|vmar| vmar.memory_usage());
+        if let Some(usage) = memory_usage {
+            let vsize = usage.virtual_bytes / 1024;
+            let anon = usage.anonymous_resident_pages * (PAGE_SIZE / 1024);
+            let file = usage.file_resident_pages * (PAGE_SIZE / 1024);
             let rss = anon + file;
             writeln!(
                 printer,

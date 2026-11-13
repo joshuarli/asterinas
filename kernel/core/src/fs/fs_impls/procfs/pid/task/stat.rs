@@ -20,7 +20,6 @@ use crate::{
     sched::{LinuxSchedPolicy, RealTimePriority, SchedPolicy, UserFairPolicy},
     thread::Thread,
     time::user_clock_ticks,
-    vm::vmar::RssType,
 };
 
 /// Represents the inode at either `/proc/[pid]/stat` or `/proc/[pid]/task/[tid]/stat`.
@@ -213,10 +212,9 @@ impl ProcFileOps for StatFileOps {
             env_start,
             env_end,
         ) = if let Some(vmar_ref) = process.lock_vmar().as_ref() {
-            let vsize = vmar_ref.get_mappings_total_size();
-            let anon = vmar_ref.get_rss_counter(RssType::Anon);
-            let file = vmar_ref.get_rss_counter(RssType::File);
-            let rss = anon + file;
+            let usage = vmar_ref.memory_usage();
+            let vsize = usage.virtual_bytes;
+            let rss = usage.anonymous_resident_pages + usage.file_resident_pages;
             let process_vm = vmar_ref.process_vm();
             let code_range = process_vm.code_range();
             let data_range = process_vm.data_range();
