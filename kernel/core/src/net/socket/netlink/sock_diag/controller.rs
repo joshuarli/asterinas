@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
-    diagnostic::{TcpAddressFamily, TcpSocketSnapshot, TcpState, tcp_table_generation},
+    socket::{TCP_RECV_BUF_LEN, TCP_SEND_BUF_LEN, UDP_RECV_PAYLOAD_LEN, UDP_SEND_PAYLOAD_LEN},
+    diagnostic::{TcpAddressFamily, TcpSocketSnapshot, TcpState, UdpSocketSnapshot, tcp_table_generation},
     wire::IpAddress,
 };
 
 use super::message::SockDiagMessage;
 use crate::{
-    net::{iface::iter_all_ifaces, socket::netlink::{
+    net::{iface::{iter_all_ifaces, network_registry}, socket::netlink::{
         addr::PortNum,
         message::CMsgSegHdr,
         table::{NetlinkSockDiagProtocol, SupportedNetlinkProtocol},
@@ -23,11 +24,18 @@ const DUMP: u16 = 0x300;
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const ENTRY_SIZE: usize = 168;
+const EXT_MEMINFO: u8 = 1 << 0;
+const EXT_SKMEMINFO: u8 = 1 << 6;
+const TCP_CLOSE: u8 = 7;
+const TCP_LISTEN: u8 = 10;
 const REQUEST_SIZE: usize = 56;
 
 pub(super) struct Query {
     family: u8,
     protocol: u8,
+    extensions: u8,
     states: u32,
     source_port: u16,
     destination_port: u16,
@@ -66,6 +74,7 @@ impl Query {
         Ok(Self {
             family: payload[0],
             protocol: payload[1],
+            extensions: payload[2],
             states: native_u32(&payload[4..8]),
             source_port: u16::from_be_bytes([payload[8], payload[9]]),
             destination_port: u16::from_be_bytes([payload[10], payload[11]]),
@@ -76,17 +85,105 @@ impl Query {
         })
     }
 
-    fn matches(&self, socket: &TcpSocketSnapshot, dump: bool) -> bool {
-        if self.family != family(socket.family) || self.interface != 0 { return false; }
+    fn matches(&self, socket: &Entry, dump: bool) -> bool {
+        if self.family != socket.family { return false; }
+        if self.protocol == IPPROTO_TCP && self.interface != 0 { return false; }
         if dump {
-            self.states & (1 << state(socket.state)) != 0 &&
-                (self.source_port == 0 || self.source_port == socket.local.port) &&
-                (self.destination_port == 0 || self.destination_port == socket.remote.port)
+            self.states & (1 << socket.state) != 0 &&
+                (self.source_port == 0 || self.source_port == socket.local_port) &&
+                (self.destination_port == 0 || self.destination_port == socket.remote_port)
         } else {
-            self.source_port == socket.local.port && self.destination_port == socket.remote.port &&
-                self.source == address(socket.local.addr, socket.family) && self.destination == address(socket.remote.addr, socket.family)
+            self.source_port == socket.local_port && self.destination_port == socket.remote_port &&
+                self.source == socket.local && self.destination == socket.remote
         }
     }
+}
+
+struct Entry {
+    family: u8,
+    state: u8,
+    local_port: u16,
+    remote_port: u16,
+    local: [u8; 16],
+    remote: [u8; 16],
+    interface: u32,
+    cookie: u64,
+    read_queue: u32,
+    write_queue: u32,
+    uid: u32,
+    inode: u32,
+    shutdown: u8,
+    v6only: Option<bool>,
+    memory: Memory,
+}
+
+struct Memory {
+    receive_used: u32,
+    receive_capacity: u32,
+    send_used: u32,
+    send_capacity: u32,
+    send_queued: u32,
+}
+
+impl Entry {
+    fn from_tcp(socket: &TcpSocketSnapshot) -> Self {
+        let family = family(socket.family);
+        let state = state(socket.state);
+        let local = address(socket.local.addr, socket.family);
+        Self {
+            family, state,
+            local_port: socket.local.port,
+            remote_port: socket.remote.port,
+            local,
+            remote: address(socket.remote.addr, socket.family),
+            interface: 0,
+            cookie: socket.cookie,
+            read_queue: socket.read_queue,
+            write_queue: socket.write_queue,
+            uid: if matches!(socket.state, TcpState::TimeWait | TcpState::SynReceived) { 0 } else { socket.uid },
+            inode: socket.inode as u32,
+            shutdown: socket.shutdown,
+            v6only: v6only(family, state, &local),
+            memory: Memory {
+                receive_used: if socket.state == TcpState::Listen { 0 } else { socket.read_queue },
+                receive_capacity: TCP_RECV_BUF_LEN as u32,
+                send_used: if socket.state == TcpState::Listen { 0 } else { socket.write_queue },
+                send_capacity: TCP_SEND_BUF_LEN as u32,
+                send_queued: if socket.state == TcpState::Listen { 0 } else { socket.write_queue },
+            },
+        }
+    }
+
+    fn from_udp(socket: &UdpSocketSnapshot) -> Self {
+        let remote = socket.remote.filter(|remote| remote.port != 0);
+        Self {
+            family: AF_INET,
+            state: if remote.is_some() { 1 } else { TCP_CLOSE },
+            local_port: socket.local.port,
+            remote_port: remote.map_or(0, |remote| remote.port),
+            local: address(socket.local.addr, TcpAddressFamily::Ipv4),
+            remote: remote.map_or([0; 16], |remote| address(remote.addr, TcpAddressFamily::Ipv4)),
+            interface: socket.device.unwrap_or(0),
+            cookie: socket.cookie,
+            read_queue: socket.read_queue,
+            write_queue: socket.write_queue,
+            uid: socket.uid,
+            inode: socket.inode as u32,
+            shutdown: 0,
+            v6only: None,
+            memory: Memory {
+                receive_used: socket.read_queue,
+                receive_capacity: UDP_RECV_PAYLOAD_LEN as u32,
+                send_used: socket.write_queue,
+                send_capacity: UDP_SEND_PAYLOAD_LEN as u32,
+                send_queued: 0,
+            },
+        }
+    }
+}
+
+fn v6only(family: u8, state: u8, local: &[u8; 16]) -> Option<bool> {
+    (family == AF_INET6 && matches!(state, TCP_CLOSE | TCP_LISTEN)).then(|| local.iter().any(|byte| *byte != 0))
 }
 
 fn family(family: TcpAddressFamily) -> u8 {
@@ -167,26 +264,46 @@ fn error(request: &CMsgSegHdr, payload: &[u8], port: PortNum, error: Option<Errn
     send(port, bytes)
 }
 
-fn reply(request: &CMsgSegHdr, port: PortNum, socket: &TcpSocketSnapshot, dump: bool) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(96);
+fn reply(request: &CMsgSegHdr, port: PortNum, socket: &Entry, dump: bool, extensions: u8) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(ENTRY_SIZE);
     header(&mut bytes, SOCK_DIAG_BY_FAMILY, if dump { MULTI } else { 0 }, request.seq, port);
-    bytes.extend_from_slice(&[family(socket.family), state(socket.state), 0, 0]);
-    bytes.extend_from_slice(&socket.local.port.to_be_bytes());
-    bytes.extend_from_slice(&socket.remote.port.to_be_bytes());
-    bytes.extend_from_slice(&address(socket.local.addr, socket.family));
-    bytes.extend_from_slice(&address(socket.remote.addr, socket.family));
-    put_u32(&mut bytes, 0);
+    bytes.extend_from_slice(&[socket.family, socket.state, 0, 0]);
+    bytes.extend_from_slice(&socket.local_port.to_be_bytes());
+    bytes.extend_from_slice(&socket.remote_port.to_be_bytes());
+    bytes.extend_from_slice(&socket.local);
+    bytes.extend_from_slice(&socket.remote);
+    put_u32(&mut bytes, socket.interface);
     put_u32(&mut bytes, socket.cookie as u32);
     put_u32(&mut bytes, (socket.cookie >> 32) as u32);
     put_u32(&mut bytes, 0);
     put_u32(&mut bytes, socket.read_queue);
     put_u32(&mut bytes, socket.write_queue);
-    put_u32(&mut bytes, if matches!(socket.state, TcpState::TimeWait | TcpState::SynReceived) { 0 } else { socket.uid });
-    put_u32(&mut bytes, socket.inode as u32);
+    put_u32(&mut bytes, socket.uid);
+    put_u32(&mut bytes, socket.inode);
     put_u16(&mut bytes, 5);
     put_u16(&mut bytes, 8);
     bytes.extend_from_slice(&[socket.shutdown, 0, 0, 0]);
-    bytes[..4].copy_from_slice(&96u32.to_ne_bytes());
+    if let Some(only) = socket.v6only {
+        put_u16(&mut bytes, 5);
+        put_u16(&mut bytes, 11);
+        bytes.extend_from_slice(&[only as u8, 0, 0, 0]);
+    }
+    let memory = &socket.memory;
+    if extensions & EXT_MEMINFO != 0 {
+        put_u16(&mut bytes, 20);
+        put_u16(&mut bytes, 1);
+        for value in [memory.receive_used, memory.send_queued, 0, memory.send_used] { put_u32(&mut bytes, value); }
+    }
+    if extensions & EXT_SKMEMINFO != 0 {
+        put_u16(&mut bytes, 40);
+        put_u16(&mut bytes, 7);
+        for value in [memory.receive_used, memory.receive_capacity, memory.send_used, memory.send_capacity,
+                      0, memory.send_queued, 0, 0, 0] {
+            put_u32(&mut bytes, value);
+        }
+    }
+    let len = bytes.len() as u32;
+    bytes[..4].copy_from_slice(&len.to_ne_bytes());
     bytes
 }
 
@@ -202,13 +319,19 @@ pub(super) fn handle(request: &CMsgSegHdr, payload: &[u8], port: PortNum) -> Res
         Err(errno) => return error(request, payload, port, Some(errno)),
     };
     let dump = request.flags & DUMP == DUMP;
-    if query.protocol != IPPROTO_TCP {
+    if query.protocol != IPPROTO_TCP && !(dump && query.protocol == IPPROTO_UDP) {
         return if dump { done(request, port, Some(Errno::ENOENT)) } else { error(request, payload, port, Some(Errno::ENOENT)) };
     }
     if dump {
+        let udp = if query.protocol == IPPROTO_UDP && query.family == AF_INET {
+            network_registry().udp_snapshots().iter().map(Entry::from_udp)
+                .filter(|socket| query.matches(socket, true)).collect()
+        } else {
+            Vec::new()
+        };
         let mut cursor = DumpCursor {
             query, request: *request, port, iface: 0, offset: 0,
-            generation: tcp_table_generation(), finished: false,
+            generation: tcp_table_generation(), udp, finished: false,
         };
         let bytes = cursor.packet();
         return NetlinkSockDiagProtocol::unicast(port, SockDiagMessage::Dump(Mutex::new(super::message::Dump {
@@ -221,11 +344,12 @@ pub(super) fn handle(request: &CMsgSegHdr, payload: &[u8], port: PortNum) -> Res
             let page = iface.common().tcp_snapshots(offset, 128);
             let count = page.len();
             for socket in page {
+                let socket = Entry::from_tcp(&socket);
                 if !query.matches(&socket, false) { continue; }
                 if query.cookie != u64::MAX && query.cookie != socket.cookie {
                     return error(request, payload, port, Some(Errno::ENOENT));
                 }
-                send(port, reply(request, port, &socket, false))?;
+                send(port, reply(request, port, &socket, false, query.extensions))?;
                 return if request.flags & ACK != 0 { error(request, payload, port, None) } else { Ok(()) };
             }
             if count < 128 { break; }
@@ -244,12 +368,27 @@ pub(super) struct DumpCursor {
     iface: usize,
     offset: usize,
     generation: u64,
+    udp: Vec<Entry>,
     pub(super) finished: bool,
 }
 
 impl DumpCursor {
     pub(super) fn packet(&mut self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(DUMP_PACKET_SIZE);
+        if self.query.protocol == IPPROTO_UDP {
+            while let Some(socket) = self.udp.get(self.offset) {
+                if DUMP_PACKET_SIZE - bytes.len() - 20 < ENTRY_SIZE { return bytes; }
+                bytes.extend_from_slice(&reply(&self.request, self.port, socket, true, self.query.extensions));
+                self.offset += 1;
+            }
+            let mut end = Vec::with_capacity(20);
+            header(&mut end, 3, MULTI, self.request.seq, self.port);
+            put_u32(&mut end, 0);
+            end[..4].copy_from_slice(&20u32.to_ne_bytes());
+            bytes.extend_from_slice(&end);
+            self.finished = true;
+            return bytes;
+        }
         if self.query.states == 0 { self.iface = iter_all_ifaces().len(); }
         loop {
             let Some(iface) = iter_all_ifaces().nth(self.iface) else {
@@ -262,7 +401,7 @@ impl DumpCursor {
                 self.finished = true;
                 return bytes;
             };
-            let room = (DUMP_PACKET_SIZE - bytes.len() - 20) / 96;
+            let room = (DUMP_PACKET_SIZE - bytes.len() - 20) / ENTRY_SIZE;
             if room == 0 { return bytes; }
             let page = iface.common().tcp_snapshots(self.offset, room.min(128));
             let count = page.len();
@@ -272,8 +411,9 @@ impl DumpCursor {
                 self.offset = 0;
             }
             for socket in page {
+                let socket = Entry::from_tcp(&socket);
                 if self.query.matches(&socket, true) {
-                    bytes.extend_from_slice(&reply(&self.request, self.port, &socket, true));
+                    bytes.extend_from_slice(&reply(&self.request, self.port, &socket, true, self.query.extensions));
                 }
             }
         }

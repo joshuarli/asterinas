@@ -162,6 +162,18 @@ impl<E: Ext> IfaceCommon<E> {
         self.sockets.lock().tcp_snapshots(offset, limit)
     }
 
+    /// Returns counts of the TCP transports on this interface.
+    pub fn tcp_counts(&self) -> crate::diagnostic::TcpCounts {
+        self.sockets.lock().tcp_counts()
+    }
+
+    /// Returns the number of incomplete IPv4 datagrams awaiting fragments and the payload bytes
+    /// they hold.
+    pub fn ipv4_fragment_queues(&self) -> (usize, usize) {
+        let now = get_network_timestamp().total_millis();
+        self.interface.lock().reassembly_state(now)
+    }
+
     pub(super) fn new(
         name: InterfaceName,
         type_: InterfaceType,
@@ -393,6 +405,12 @@ impl<E: Ext> IfaceCommon<E> {
             protocol,
             can_reuse: AtomicBool::new(can_reuse),
         })
+    }
+
+    /// Returns whether a TCP socket bound to the wildcard address would collide with a socket
+    /// already bound to `port`.
+    pub fn tcp_wildcard_conflict(&self, port: u16, ipv6: bool, can_reuse: bool) -> bool {
+        self.used_ports.lock().wildcard_conflicts(port, ipv6, can_reuse)
     }
 
     /// Releases the port so that it can be used again.
@@ -709,6 +727,15 @@ impl PortTable {
         // to see if any can be reused instead of directly returning `None`.
 
         None
+    }
+
+    fn wildcard_conflicts(&self, port: u16, ipv6: bool, can_reuse: bool) -> bool {
+        self.used_ports.iter().any(|(key, state)| {
+            key.port == port
+                && key.protocol == PortProtocol::Tcp
+                && (ipv6 || key.addr.0.to_ipv4_mapped().is_some())
+                && !(state.can_reuse() && can_reuse)
+        })
     }
 
     fn acquire(&mut self, addr: IpAddress, port: u16, can_reuse: bool, protocol: PortProtocol) {

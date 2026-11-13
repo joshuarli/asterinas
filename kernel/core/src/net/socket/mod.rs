@@ -22,6 +22,7 @@ pub(crate) mod ip;
 pub(crate) mod netlink;
 pub(crate) mod options;
 pub(crate) mod packet;
+pub(crate) mod sockstat;
 pub(crate) mod unix;
 pub(crate) mod util;
 pub(crate) mod vsock;

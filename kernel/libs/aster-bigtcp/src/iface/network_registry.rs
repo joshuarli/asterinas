@@ -177,6 +177,11 @@ impl<E: Ext> NetworkRegistry<E> {
         self.state.lock().sockets.retain(|entry| !Weak::ptr_eq(entry, &target));
     }
 
+    /// Returns snapshots of the open UDP sockets bound in this registry.
+    pub fn udp_snapshots(&self) -> Vec<crate::diagnostic::UdpSocketSnapshot> {
+        self.sockets().iter().filter_map(|socket| socket.diagnostic_snapshot()).collect()
+    }
+
     pub(crate) fn sockets(&self) -> Vec<Arc<UdpSocketBg<E>>> {
         let mut state = self.state.lock();
         let mut sockets = Vec::new();
@@ -242,6 +247,8 @@ impl<E: Ext> UdpReservation<E> {
     }
 
     pub fn device(&self) -> Option<u32> { self.device }
+
+    pub(crate) fn owner_uid(&self) -> u32 { self.owner.load(Ordering::Acquire) }
 
     pub(crate) fn same_reuse_port_group(&self, other: &Self) -> bool {
         self.reuse_port.load(Ordering::Acquire) && other.reuse_port.load(Ordering::Acquire)

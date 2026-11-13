@@ -8,7 +8,7 @@ use aster_bigtcp::{
 
 use crate::{
     net::{
-        iface::{Iface, config},
+        iface::{Iface, config, iter_all_ifaces},
         route,
         socket::util::check_port_privilege,
     },
@@ -20,6 +20,19 @@ pub(super) fn resolve_bind_iface_and_config(
     can_reuse: bool,
 ) -> Result<(Arc<Iface>, BindPortConfig)> {
     check_port_privilege(endpoint.port)?;
+
+    if endpoint.addr.is_unspecified()
+        && endpoint.port != 0
+        && iter_all_ifaces().any(|iface| {
+            iface.common().tcp_wildcard_conflict(
+                endpoint.port,
+                matches!(endpoint.addr, IpAddress::Ipv6(_)),
+                can_reuse,
+            )
+        })
+    {
+        return_errno_with_message!(Errno::EADDRINUSE, "the port is already bound");
+    }
 
     let iface = route::lookup_local_iface(endpoint.addr)?;
 

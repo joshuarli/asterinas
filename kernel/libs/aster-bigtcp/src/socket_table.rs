@@ -219,6 +219,34 @@ impl<E: Ext> SocketTable<E> {
             .collect()
     }
 
+    pub(crate) fn tcp_counts(&self) -> crate::diagnostic::TcpCounts {
+        use crate::diagnostic::{TcpAddressFamily, TcpState};
+        let mut counts = crate::diagnostic::TcpCounts::default();
+        let listeners = self.listener_buckets.iter()
+            .flat_map(|bucket| bucket.listeners.iter())
+            .map(|listener| listener.diagnostic_snapshot());
+        let connections = self.connection_buckets.iter()
+            .flat_map(|bucket| bucket.connections.iter())
+            .map(|connection| connection.diagnostic_snapshot());
+        for socket in listeners.chain(connections) {
+            match socket.state {
+                TcpState::TimeWait => {
+                    counts.time_wait += 1;
+                    if socket.orphan { counts.orphaned_time_wait += 1; }
+                    continue;
+                }
+                TcpState::SynReceived | TcpState::Closed => continue,
+                _ => {}
+            }
+            match socket.family {
+                TcpAddressFamily::Ipv4 => counts.in_use_ipv4 += 1,
+                TcpAddressFamily::Ipv6 => counts.in_use_ipv6 += 1,
+            }
+            if socket.orphan { counts.orphaned += 1; }
+        }
+        counts
+    }
+
     /// Inserts a TCP listener into the table.
     ///
     /// If a socket with the same [`ListenerKey`] has already been inserted,

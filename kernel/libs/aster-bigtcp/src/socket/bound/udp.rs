@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{collections::VecDeque, sync::{Arc, Weak}, vec, vec::Vec};
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use aster_softirq::BottomHalfDisabled;
 use ostd::sync::SpinLock;
@@ -15,6 +15,7 @@ use smoltcp::{
 
 use super::ReceiveBehavior;
 use crate::{
+    diagnostic::{UdpSocketSnapshot, next_cookie},
     errors::udp::SendError,
     ext::Ext,
     iface::{PacketSlice, PathMtuRoute, UdpFailure, UdpReservation},
@@ -59,6 +60,8 @@ pub(crate) struct UdpSocketBg<E: Ext> {
     inner: UdpSocketInner,
     observer: E::UdpEventObserver,
     open: SpinLock<bool, BottomHalfDisabled>,
+    cookie: u64,
+    inode: AtomicU64,
 }
 
 /// States needed by [`UdpSocketBg`].
@@ -199,6 +202,22 @@ impl<E: Ext> Drop for UdpSocket<E> {
 }
 
 impl<E: Ext> UdpSocketBg<E> {
+    pub(crate) fn diagnostic_snapshot(&self) -> Option<UdpSocketSnapshot> {
+        if !*self.open.lock() { return None; }
+        let read_queue = self.inner.received.lock().payload_bytes_count();
+        let write_queue = self.inner.tx.lock().queued_bytes;
+        Some(UdpSocketSnapshot {
+            local: self.bound.receive_endpoint(),
+            remote: self.inner.errors.lock().peer,
+            device: self.bound.device(),
+            read_queue: read_queue.min(u32::MAX as usize) as u32,
+            write_queue: write_queue.min(u32::MAX as usize) as u32,
+            cookie: self.cookie,
+            inode: self.inode.load(Ordering::Acquire),
+            uid: self.bound.owner_uid(),
+        })
+    }
+
     pub(crate) fn can_process(&self, port: u16) -> bool {
         self.bound.endpoint().port == port
     }
@@ -361,6 +380,11 @@ impl<E: Ext> UdpSocketBg<E> {
 }
 
 impl<E: Ext> UdpSocket<E> {
+    /// Records the inode of the socket file for diagnostics.
+    pub fn set_inode(&self, inode: u64) {
+        self.0.inode.store(inode, Ordering::Release);
+    }
+
     pub fn set_hop_limit(&self, limit: u8) {
         self.0.inner.ttl.store(limit, Ordering::Relaxed);
     }
@@ -425,7 +449,10 @@ impl<E: Ext> UdpSocket<E> {
             failure_reporter: Once::new(),
         };
 
-        let socket = Self(Arc::new(UdpSocketBg { bound, inner, observer, open: SpinLock::new(true) }));
+        let socket = Self(Arc::new(UdpSocketBg {
+            bound, inner, observer, open: SpinLock::new(true),
+            cookie: next_cookie(), inode: AtomicU64::new(0),
+        }));
         socket.0.inner.failure_reporter.call_once(|| {
             Arc::new(UdpFailureReporter { socket: Arc::downgrade(&socket.0) })
         });
