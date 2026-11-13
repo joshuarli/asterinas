@@ -177,7 +177,10 @@ impl Xattr {
 
     /// Frees the xattr block entirely (called during inode eviction).
     pub(super) fn delete_xattr_block(&self) -> Result<()> {
-        self.cache.write().free_and_invalidate()
+        let mut cache = self.cache.write();
+        cache.load()?;
+        cache.check_exclusive_block()?;
+        cache.free_and_invalidate()
     }
 
     /// Writes the dirty xattr block back to disk.
@@ -248,6 +251,7 @@ impl XattrCache {
         flags: XattrSetFlags,
     ) -> Result<()> {
         self.load()?;
+        self.check_exclusive_block()?;
 
         let (found_idx, insert_at) =
             Self::find_entry_position(&self.entries, target_index, &target_name);
@@ -317,6 +321,7 @@ impl XattrCache {
 
     fn remove_entry(&mut self, target_index: XattrNameIndex, target_name: &[u8]) -> Result<()> {
         self.load()?;
+        self.check_exclusive_block()?;
 
         let (found_idx, _) = Self::find_entry_position(&self.entries, target_index, target_name);
         let Some(found_idx) = found_idx else {
@@ -420,6 +425,16 @@ impl XattrCache {
         let entries = Self::parse_entries_from_block(&block_buf)?;
         self.entries = entries;
         self.block_buf = Some(block_buf);
+        Ok(())
+    }
+
+    fn check_exclusive_block(&self) -> Result<()> {
+        if let Some(buffer) = &self.block_buf {
+            let header = buffer.read_val::<XattrHeader>(0)?;
+            if header.ref_count > 1 {
+                return_errno_with_message!(Errno::EOPNOTSUPP, "shared ext2 xattr block is read-only");
+            }
+        }
         Ok(())
     }
 
@@ -545,7 +560,7 @@ impl XattrCache {
 
     fn validate_header(block_buf: &USegment) -> Result<()> {
         let header = block_buf.read_val::<XattrHeader>(0)?;
-        if header.magic != XATTR_MAGIC || header.nblocks != XATTR_NBLOCKS as u32 {
+        if header.magic != XATTR_MAGIC || header.nblocks != XATTR_NBLOCKS as u32 || header.ref_count == 0 {
             return_errno_with_message!(Errno::EIO, "invalid xattr header");
         }
         Ok(())

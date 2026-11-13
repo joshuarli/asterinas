@@ -20,6 +20,8 @@ use crate::{
         fs_impls::overlayfs::real::RealObject,
         vfs::{
             inode::Inode,
+            inode_ext::InodeExt,
+            posix_acl,
             path::Dentry,
             xattr::{
                 XATTR_LIST_MAX_LEN, XATTR_NAME_MAX_LEN, XattrName, XattrNamespace, XattrSetFlags,
@@ -258,6 +260,18 @@ impl OverlayInode {
         temp: &WorkdirTemp,
         tolerate_errors: bool,
     ) -> Result<()> {
+        let acl = {
+            let inode = source.real_inode();
+            let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+            inode.access_acl()?
+        };
+        if let Some(acl) = acl {
+            let value = acl.encode();
+            let name = XattrName::try_from_full_name(posix_acl::ACCESS).unwrap();
+            let mut reader = VmReader::from(value.as_slice()).to_fallible();
+            temp.inode().set_xattr(temp.dentry(), name, &mut reader,
+                XattrSetFlags::CREATE_OR_REPLACE)?;
+        }
         for namespace in [
             XattrNamespace::User,
             XattrNamespace::Trusted,

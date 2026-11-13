@@ -209,6 +209,7 @@ impl Inode {
             let _ownership = self.fs_lock_context_or_init().ownership_lock().lock();
             return self.update_access_acl(AccessAclUpdate::set(acl, self.mode()));
         }
+        let _ownership = self.fs_lock_context_or_init().ownership_lock().lock();
         let xattr = self.xattr.as_ref().ok_or_else(|| {
             Error::with_message(Errno::EPERM, "xattr not supported on this inode type")
         })?;
@@ -266,6 +267,7 @@ impl Inode {
 
     /// Removes one extended attribute.
     pub(in ext2) fn remove_xattr(&self, name: XattrName) -> Result<()> {
+        let _ownership = self.fs_lock_context_or_init().ownership_lock().lock();
         let xattr = self.xattr.as_ref().ok_or_else(|| {
             Error::with_message(Errno::EPERM, "xattr not supported on this inode type")
         })?;
