@@ -5,12 +5,23 @@ use aster_rights_proc::require;
 use ostd::sync::{PreemptDisabled, RwLockReadGuard, RwLockWriteGuard};
 
 use super::{
-    Credentials, ExecCred, FileCapabilities, Gid, SecureBits, Uid, capabilities::CapSet,
+    CredentialIdentity, Credentials, ExecCred, FileCapabilities, Gid, SecureBits, Uid, capabilities::CapSet,
     credentials_::Credentials_,
 };
 use crate::prelude::*;
 
 impl<R: TRights> Credentials<R> {
+    #[require(R > Read)]
+    pub(crate) fn identity(&self) -> CredentialIdentity {
+        CredentialIdentity {
+            effective_user: self.euid(),
+            effective_group: self.egid(),
+            filesystem_user: self.fsuid(),
+            filesystem_group: self.fsgid(),
+            permitted: self.permitted_capset(),
+        }
+    }
+
     /// Creates a root `Credentials`.
     ///
     /// This method can only be used when creating the init process.

@@ -4,7 +4,11 @@
 //!
 //! An alien thread is one outside the current thread's thread group (the process).
 
-use crate::{prelude::*, process::posix_thread::PosixThread, security::lsm::hooks as lsm_hooks};
+use crate::{
+    prelude::*,
+    process::{credentials::capabilities::CapSet, posix_thread::PosixThread, process_vm::ProcessVmarGuard},
+    security::lsm::hooks as lsm_hooks,
+};
 
 impl PosixThread {
     /// Checks whether `accessor` may access resources of `self`.
@@ -16,12 +20,21 @@ impl PosixThread {
         &self,
         accessor: &PosixThread,
         mode: AlienAccessMode,
+        vmar_guard: &ProcessVmarGuard,
     ) -> Result<()> {
         if Weak::ptr_eq(accessor.weak_process(), self.weak_process()) {
             return Ok(());
         }
 
-        lsm_hooks::on_alien_access(lsm_hooks::AlienAccessContext::new(accessor, self, mode))
+        lsm_hooks::on_alien_access(lsm_hooks::AlienAccessContext::new(accessor, self, mode))?;
+        if vmar_guard.as_ref().is_some_and(|vmar| !vmar.process_vm().is_dumpable()) {
+            let process = self.process();
+            let user_ns = process.user_ns().lock();
+            lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+                user_ns.as_ref(), accessor, CapSet::SYS_PTRACE,
+            ))?;
+        }
+        Ok(())
     }
 }
 

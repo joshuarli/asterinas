@@ -35,11 +35,13 @@ pub(super) fn sys_pidfd_getfd(
         .process_opt()
         .ok_or_else(|| Error::with_message(Errno::ESRCH, "the target process has been reaped"))?;
 
+    let vmar_guard = process.lock_vmar();
+
     process
         .main_thread()
         .as_posix_thread()
         .unwrap()
-        .check_alien_access_from(ctx.posix_thread, AlienAccessMode::ATTACH_WITH_REAL_CREDS)?;
+        .check_alien_access_from(ctx.posix_thread, AlienAccessMode::ATTACH_WITH_REAL_CREDS, &vmar_guard)?;
 
     let main_thread = process.main_thread();
 

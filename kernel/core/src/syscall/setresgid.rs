@@ -32,8 +32,7 @@ pub(super) fn sys_setresgid(
 
     debug!("rgid = {:?}, egid = {:?}, sgid = {:?}", rgid, egid, sgid);
 
-    let credentials = ctx.credentials_mut();
-    credentials.set_resgid(rgid, egid, sgid)?;
+    ctx.update_identity(|credentials| credentials.set_resgid(rgid, egid, sgid))?;
 
     Ok(SyscallReturn::Return(0))
 }

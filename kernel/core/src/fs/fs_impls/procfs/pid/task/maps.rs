@@ -54,6 +54,7 @@ impl ProcFileOpsByHandle for MapsFileOps {
             .check_alien_access_from(
                 current_thread!().as_posix_thread().unwrap(),
                 AlienAccessMode::READ_WITH_FS_CREDS,
+                &vmar_guard,
             )
             .map_err(|_| Error::with_message(Errno::EACCES, "alien access is denied"))?;
 

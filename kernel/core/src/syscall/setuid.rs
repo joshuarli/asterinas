@@ -14,8 +14,7 @@ pub(super) fn sys_setuid(uid: i32, ctx: &Context) -> Result<SyscallReturn> {
     let uid = Uid::new(uid.cast_unsigned());
     debug!("uid = {:?}", uid);
 
-    let credentials = ctx.credentials_mut();
-    credentials.set_uid(uid)?;
+    ctx.update_identity(|credentials| credentials.set_uid(uid))?;
 
     Ok(SyscallReturn::Return(0))
 }

@@ -14,8 +14,7 @@ pub(super) fn sys_setgid(gid: i32, ctx: &Context) -> Result<SyscallReturn> {
     let gid = Gid::new(gid.cast_unsigned());
     debug!("gid = {:?}", gid);
 
-    let credentials = ctx.credentials_mut();
-    credentials.set_gid(gid)?;
+    ctx.update_identity(|credentials| credentials.set_gid(gid))?;
 
     Ok(SyscallReturn::Return(0))
 }

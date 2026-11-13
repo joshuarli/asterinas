@@ -21,8 +21,7 @@ pub(super) fn sys_setregid(rgid: i32, egid: i32, ctx: &Context) -> Result<Syscal
 
     debug!("rgid = {:?}, egid = {:?}", rgid, egid);
 
-    let credentials = ctx.credentials_mut();
-    credentials.set_regid(rgid, egid)?;
+    ctx.update_identity(|credentials| credentials.set_regid(rgid, egid))?;
 
     Ok(SyscallReturn::Return(0))
 }

@@ -21,8 +21,7 @@ pub(super) fn sys_setreuid(ruid: i32, euid: i32, ctx: &Context) -> Result<Syscal
 
     debug!("ruid = {:?}, euid = {:?}", ruid, euid);
 
-    let credentials = ctx.credentials_mut();
-    credentials.set_reuid(ruid, euid)?;
+    ctx.update_identity(|credentials| credentials.set_reuid(ruid, euid))?;
 
     Ok(SyscallReturn::Return(0))
 }

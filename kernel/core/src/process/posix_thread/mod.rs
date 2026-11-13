@@ -364,6 +364,8 @@ pub(crate) trait ContextPthreadAdminApi {
 
     /// Gets the read-write credentials of the current thread.
     fn credentials_mut(&self) -> Credentials<ReadWriteOp>;
+
+    fn update_identity<T>(&self, update: impl FnOnce(&Credentials<ReadWriteOp>) -> T) -> T;
 }
 
 impl ContextPthreadAdminApi for Context<'_> {
@@ -388,6 +390,18 @@ impl ContextPthreadAdminApi for Context<'_> {
 
     fn credentials_mut(&self) -> Credentials<ReadWriteOp> {
         self.posix_thread.credentials.dup().restrict()
+    }
+
+    fn update_identity<T>(&self, update: impl FnOnce(&Credentials<ReadWriteOp>) -> T) -> T {
+        let vmar_guard = self.process.lock_vmar();
+        let credentials = self.credentials_mut();
+        let previous = credentials.identity();
+        let result = update(&credentials);
+        if previous.requires_dumpability_reset(credentials.identity()) {
+            vmar_guard.unwrap().process_vm().set_dumpable(false);
+            self.process.clear_parent_death_signal();
+        }
+        result
     }
 }
 

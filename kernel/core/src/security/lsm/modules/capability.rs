@@ -50,9 +50,9 @@ impl LsmCapabilityHook for CapabilityLsm {
 impl LsmAlienAccessHook for CapabilityLsm {
     fn on_alien_access(&self, context: &AlienAccessContext) -> Result<()> {
         let accessor_cred = context.accessor().credentials();
-        let (caller_uid, caller_gid) = match context.mode().creds() {
-            CredsSource::FsCreds => (accessor_cred.fsuid(), accessor_cred.fsgid()),
-            CredsSource::RealCreds => (accessor_cred.ruid(), accessor_cred.rgid()),
+        let (caller_uid, caller_gid, caller_caps) = match context.mode().creds() {
+            CredsSource::FsCreds => (accessor_cred.fsuid(), accessor_cred.fsgid(), accessor_cred.effective_capset()),
+            CredsSource::RealCreds => (accessor_cred.ruid(), accessor_cred.rgid(), accessor_cred.permitted_capset()),
         };
 
         let target_cred = context.target().credentials();
@@ -62,16 +62,17 @@ impl LsmAlienAccessHook for CapabilityLsm {
             && caller_gid == target_cred.egid()
             && caller_gid == target_cred.sgid()
             && caller_gid == target_cred.rgid();
-        if caller_is_same || {
-            let target_process = context.target().process();
-            let target_user_ns = target_process.user_ns().lock();
-            self.on_capable(&CapableContext::new(
-                target_user_ns.as_ref(),
-                context.accessor(),
-                CapSet::SYS_PTRACE,
-            ))
-            .is_ok()
-        } {
+        let accessor_process = context.accessor().process();
+        let accessor_user_ns = accessor_process.user_ns().lock().clone();
+        let target_process = context.target().process();
+        let target_user_ns = target_process.user_ns().lock().clone();
+        if (caller_is_same
+            && Arc::ptr_eq(&accessor_user_ns, &target_user_ns)
+            && caller_caps.contains(target_cred.permitted_capset()))
+            || self.on_capable(&CapableContext::new(
+                target_user_ns.as_ref(), context.accessor(), CapSet::SYS_PTRACE,
+            )).is_ok()
+        {
             return Ok(());
         }
 

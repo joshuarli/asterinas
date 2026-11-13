@@ -12,9 +12,9 @@
 mod heap;
 mod init_stack;
 
-use core::ops::Range;
+use core::{ops::Range, sync::atomic::{AtomicBool, Ordering}};
 #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::AtomicUsize;
 
 use ostd::task::disable_preempt;
 
@@ -67,6 +67,7 @@ use crate::{
 
 /// The process user space virtual memory
 pub(crate) struct ProcessVm {
+    dumpable: AtomicBool,
     /// The initial portion of the main stack of a process.
     init_stack: InitStack,
     /// The user heap
@@ -86,6 +87,7 @@ impl ProcessVm {
     /// Creates a new `ProcessVm` without mapping anything.
     pub(crate) fn new(executable_path: Path) -> Self {
         Self {
+            dumpable: AtomicBool::new(true),
             init_stack: InitStack::new(),
             heap: Heap::new_uninitialized(),
             code_range: SpinLock::new(0..0),
@@ -99,6 +101,7 @@ impl ProcessVm {
     /// Creates a new `ProcessVm` with identical contents of an existing one.
     pub(crate) fn fork_from(process_vm: &Self, heap_guard: &LockedHeap) -> Self {
         Self {
+            dumpable: AtomicBool::new(process_vm.is_dumpable()),
             init_stack: process_vm.init_stack.clone(),
             heap: Heap::fork_from(heap_guard),
             code_range: SpinLock::new(process_vm.code_range.lock().clone()),
@@ -107,6 +110,14 @@ impl ProcessVm {
             #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
             vdso_base: AtomicUsize::new(process_vm.vdso_base.load(Ordering::Relaxed)),
         }
+    }
+
+    pub(crate) fn is_dumpable(&self) -> bool {
+        self.dumpable.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_dumpable(&self, dumpable: bool) {
+        self.dumpable.store(dumpable, Ordering::Release);
     }
 
     /// Returns the initial portion of the main stack of a process.

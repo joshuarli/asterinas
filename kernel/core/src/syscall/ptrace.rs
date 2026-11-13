@@ -163,7 +163,11 @@ fn do_ptrace_attach(tracer_thread: &Arc<Thread>, tracee_thread: Arc<Thread>) -> 
         );
     }
 
-    tracee.check_alien_access_from(tracer, AlienAccessMode::ATTACH_WITH_REAL_CREDS)?;
+    {
+        let process = tracee.process();
+        let vmar_guard = process.lock_vmar();
+        tracee.check_alien_access_from(tracer, AlienAccessMode::ATTACH_WITH_REAL_CREDS, &vmar_guard)?;
+    }
 
     tracer.attach_to(tracer_thread, tracee_thread)
 }

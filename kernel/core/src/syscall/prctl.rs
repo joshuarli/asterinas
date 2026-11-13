@@ -35,14 +35,15 @@ pub(super) fn sys_prctl(
             ctx.user_space().write_val(write_to_addr, &write_val)?;
         }
         PrctlCmd::PR_GET_DUMPABLE => {
-            // TODO: When coredump is supported, return the actual value.
-            return Ok(SyscallReturn::Return(Dumpable::Disable as _));
+            let vmar_guard = ctx.process.lock_vmar();
+            return Ok(SyscallReturn::Return(vmar_guard.unwrap().process_vm().is_dumpable() as _));
         }
         PrctlCmd::PR_SET_DUMPABLE(dumpable) => {
             if dumpable != Dumpable::Disable && dumpable != Dumpable::User {
                 return_errno_with_message!(Errno::EINVAL, "invalid dumpable attribute");
             }
-            // TODO: Implement coredump.
+            let vmar_guard = ctx.process.lock_vmar();
+            vmar_guard.unwrap().process_vm().set_dumpable(dumpable == Dumpable::User);
         }
         PrctlCmd::PR_GET_KEEPCAPS => {
             let keep_cap = {

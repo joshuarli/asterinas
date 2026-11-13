@@ -32,8 +32,7 @@ pub(super) fn sys_setresuid(
 
     debug!("ruid = {:?}, euid = {:?}, suid = {:?}", ruid, euid, suid);
 
-    let credentials = ctx.credentials_mut();
-    credentials.set_resuid(ruid, euid, suid)?;
+    ctx.update_identity(|credentials| credentials.set_resuid(ruid, euid, suid))?;
 
     Ok(SyscallReturn::Return(0))
 }

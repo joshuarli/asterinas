@@ -30,3 +30,22 @@ use crate::prelude::*;
 /// - Linux capabilities;
 /// - secure bits.
 pub(crate) struct Credentials<R = FullOp>(Arc<Credentials_>, R);
+
+#[derive(Clone, Copy)]
+pub(crate) struct CredentialIdentity {
+    effective_user: Uid,
+    effective_group: Gid,
+    filesystem_user: Uid,
+    filesystem_group: Gid,
+    permitted: capabilities::CapSet,
+}
+
+impl CredentialIdentity {
+    pub(crate) fn requires_dumpability_reset(self, next: Self) -> bool {
+        self.effective_user != next.effective_user
+            || self.effective_group != next.effective_group
+            || self.filesystem_user != next.filesystem_user
+            || self.filesystem_group != next.filesystem_group
+            || !self.permitted.contains(next.permitted)
+    }
+}

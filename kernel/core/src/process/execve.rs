@@ -12,7 +12,7 @@ use ostd::{
 
 use super::process_vm::activate_vmar;
 use crate::{
-    fs::vfs::path::{Path, PerMountFlags},
+    fs::{file::Permission, vfs::path::{Path, PerMountFlags}},
     prelude::*,
     process::{
         ContextUnshareAdminApi, Credentials, Process,
@@ -64,6 +64,13 @@ pub(crate) fn do_execve(
     let exec_cred = prepare_exec_cred(program_to_load.elf_path(), ctx)?;
 
     let new_vmar = VmarHandle::new(ProcessVm::new(executable_path.clone()));
+    let credentials = ctx.posix_thread.credentials();
+    new_vmar.process_vm().set_dumpable(
+        executable_path.inode().check_permission(Permission::MAY_READ).is_ok()
+            && program_to_load.elf_path().inode().check_permission(Permission::MAY_READ).is_ok()
+            && credentials.euid() == credentials.ruid()
+            && credentials.egid() == credentials.rgid(),
+    );
     let elf_load_info = program_to_load.load_to_vmar(&new_vmar, &path_resolver)?;
 
     // Ensure no other thread is concurrently performing exit_group or execve.
@@ -209,7 +216,13 @@ fn do_execve_no_return(
     // This prevents race conditions when checking access permissions while opening
     // `/proc/[pid]/mem` or `/proc/[pid]/maps`.
     let (vmar_guard, old_vmar) = activate_vmar(ctx, new_vmar);
-    apply_exec_cred(process, &ctx.credentials_mut(), exec_cred)?;
+    let credentials = ctx.credentials_mut();
+    let previous = credentials.identity();
+    apply_exec_cred(process, &credentials, exec_cred)?;
+    if previous.requires_dumpability_reset(credentials.identity()) {
+        vmar_guard.unwrap().process_vm().set_dumpable(false);
+        process.clear_parent_death_signal();
+    }
     drop(vmar_guard);
     drop(old_vmar);
 
