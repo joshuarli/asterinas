@@ -4,7 +4,7 @@ use ostd::task::Task;
 
 use crate::{
     fs::{
-        file::{InodeType, Permission, mkmod},
+        file::{InodeMode, InodeType, Permission},
         vfs::path::{FsPath, Path},
     },
     prelude::*,
@@ -48,7 +48,8 @@ pub(crate) fn create_socket_file(path_name: &str) -> Result<Path> {
             .lookup_unresolved_no_follow(&fs_path)?
             .into_parent_and_filename()?;
 
-        parent.new_child_bytes(&file_name, InodeType::Socket, mkmod!(u+rw))
+        let mode = InodeMode::from_bits_truncate(0o777 & !fs_ref.umask().get());
+        parent.new_child_bytes(&file_name, InodeType::Socket, mode)
     })();
 
     result.map_err(|err| {

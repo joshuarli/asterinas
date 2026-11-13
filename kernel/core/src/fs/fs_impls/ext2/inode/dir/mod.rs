@@ -13,7 +13,7 @@ mod dir_entry;
 
 use self::dir_entry::{DOT_BYTE, DOT_DOT_BYTE, DirBlockView, DirEntryFileType, DirEntryHeader};
 use super::{super::Ext2, FileFlags, FilePerm, Inode, InodeInner, MAX_LINK_COUNT};
-use crate::fs::ext2::{prelude::*, utils};
+use crate::fs::{ext2::{prelude::*, utils}, file::InodeMode};
 
 /// Information about a candidate directory entry slot.
 #[derive(Clone, Copy, Debug)]
@@ -140,7 +140,7 @@ impl Inode {
         &self,
         name: &[u8],
         type_: InodeType,
-        perm: FilePerm,
+        mut perm: FilePerm,
         init_child_fn: impl FnOnce(&Arc<Ext2>, &Inode) -> Result<()>,
     ) -> Result<Arc<Inode>> {
         let dir_entry_file_type = DirEntryFileType::from(type_);
@@ -161,7 +161,15 @@ impl Inode {
         // concurrent `create` / `lookup_via_fs` on this directory.
         // So the concurrent `lookup_via_fs` won't create a new `Arc<Inode>`
         // from Inode desc and then insert it into inode cache.
-        let child = fs.create_inode(self.ino, type_, perm)?;
+        let inherited_gid = if parent_inner.mode().has_set_gid() {
+            if type_ == InodeType::Dir {
+                perm = FilePerm::from_bits_truncate(perm.bits() | InodeMode::S_ISGID.bits());
+            }
+            Some(parent_inner.gid())
+        } else {
+            None
+        };
+        let child = fs.create_inode(self.ino, type_, perm, inherited_gid)?;
         let child_ino = child.ino();
         let result = init_child_fn(&fs, &child)
             .and_then(|_| parent_inner.add_entry(&slot, name, child_ino, dir_entry_file_type));

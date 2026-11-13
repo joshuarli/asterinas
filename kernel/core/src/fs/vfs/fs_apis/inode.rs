@@ -24,7 +24,7 @@ use crate::{
     },
     prelude::*,
     process::{
-        Gid, Uid,
+        Gid, Uid, UserNamespace,
         credentials::capabilities::CapSet,
         posix_thread::{AsPosixThread, PosixThread},
     },
@@ -784,6 +784,35 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
 
         Ok(())
     }
+}
+
+pub(in crate::fs) fn strip_unprivileged_setgid(
+    type_: InodeType,
+    mut mode: InodeMode,
+    group: Gid,
+) -> InodeMode {
+    if type_ == InodeType::Dir || !mode.contains(InodeMode::S_ISGID | InodeMode::S_IXGRP) {
+        return mode;
+    }
+    let Some(task) = Task::current() else {
+        return mode;
+    };
+    let Some(thread) = task.as_posix_thread() else {
+        return mode;
+    };
+    let member = {
+        let credentials = thread.credentials();
+        credentials.fsgid() == group || credentials.groups().contains(&group)
+    };
+    if member || lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+        UserNamespace::get_init_singleton().as_ref(),
+        thread,
+        CapSet::FSETID,
+    )).is_ok() {
+        return mode;
+    }
+    mode.remove(InodeMode::S_ISGID);
+    mode
 }
 
 fn has_dac_override_capability(task: &CurrentTask, posix_thread: &PosixThread) -> bool {

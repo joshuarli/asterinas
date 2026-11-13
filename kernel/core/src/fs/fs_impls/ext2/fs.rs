@@ -33,7 +33,11 @@ use super::{
 use crate::{
     fs::{
         ext2::utils,
-        vfs::file_system::{AtomicFsFlags, FsEventSubscriberStats, FsFlags},
+        vfs::{
+            file_system::{AtomicFsFlags, FsEventSubscriberStats, FsFlags},
+            inode::strip_unprivileged_setgid,
+        },
+        file::InodeMode,
     },
     process::{Gid, UserNamespace, credentials::capabilities::CapSet, posix_thread::AsPosixThread},
     security::lsm::hooks as lsm_hooks,
@@ -424,11 +428,13 @@ impl Ext2 {
     }
 
     /// Allocates and initializes a new inode.
+    /// An inherited group replaces the caller's filesystem group before metadata is written.
     pub(super) fn create_inode(
         &self,
         parent_ino: Ext2Ino,
         inode_type: InodeType,
         perm: FilePerm,
+        inherited_gid: Option<u32>,
     ) -> Result<Arc<Inode>> {
         if inode_type == InodeType::Unknown {
             return_errno_with_message!(Errno::EINVAL, "cannot create inode with unknown type");
@@ -449,6 +455,13 @@ impl Ext2 {
                 )
             })
             .unwrap_or((0, 0));
+        let gid = inherited_gid.unwrap_or(gid);
+        let mode = strip_unprivileged_setgid(
+            inode_type,
+            InodeMode::from_bits_truncate(perm.bits()),
+            Gid::new(gid),
+        );
+        let perm = FilePerm::from_bits_truncate(mode.bits());
         let now = utils::now();
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let inode_desc = InodeDesc::new(inode_type, perm, uid, gid, link_count, generation, now);
