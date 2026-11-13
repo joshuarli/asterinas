@@ -177,6 +177,9 @@ impl InodeHandle {
         if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_readable() {
             return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
         }
+        if self.path().metadata()?.nr_hard_links == 0 {
+            return_errno_with_message!(Errno::ENOENT, "the directory has been removed");
+        }
 
         let file_ops: &dyn FileOps = if let Some(ref open_file) = self.open_file {
             open_file.as_ref()
