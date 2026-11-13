@@ -21,7 +21,11 @@ use crate::{
         },
     },
     prelude::*,
-    process::signal::{PollHandle, Pollable},
+    process::{
+        ResourceType,
+        posix_thread::AsPosixThread,
+        signal::{PollHandle, Pollable, constants::SIGXFSZ, signals::kernel::KernelSignal},
+    },
     util::ioctl::RawIoctl,
     vm::vmar::FileMmapRequest,
 };
@@ -133,6 +137,40 @@ impl InodeHandle {
             );
         }
         Ok(inode.as_ref())
+    }
+
+    fn write_with_file_size_limit(
+        &self,
+        file_ops: &dyn FileOps,
+        offset: usize,
+        reader: &mut VmReader,
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        if !reader.has_remain() || self.path().type_() != InodeType::File {
+            return file_ops.write_at(offset, reader, status_flags);
+        }
+        let current_thread = current_thread!();
+        let Some(thread) = current_thread.as_posix_thread() else {
+            return file_ops.write_at(offset, reader, status_flags);
+        };
+        let maximum = thread
+            .process()
+            .resource_limits()
+            .get_rlimit(ResourceType::RLIMIT_FSIZE)
+            .get_cur();
+        if offset as u64 >= maximum {
+            thread.enqueue_signal(Box::new(KernelSignal::new(SIGXFSZ)));
+            return_errno_with_message!(Errno::EFBIG, "the file size limit has been reached");
+        }
+
+        let remaining = (maximum - offset as u64).min(usize::MAX as u64) as usize;
+        let mut limited = reader.clone();
+        limited.limit(remaining);
+        let before = limited.remain();
+        clear_file_priv(self.path().dentry())?;
+        let result = file_ops.write_at(offset, &mut limited, status_flags);
+        reader.skip(before - limited.remain());
+        result
     }
 
     pub(crate) fn readdir(&self, visitor: &mut dyn DirentVisitor) -> Result<usize> {
@@ -308,28 +346,31 @@ impl FileLike for InodeHandle {
         if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_writable() {
             return_errno_with_message!(Errno::EBADF, "the file is not opened writable");
         }
-        if reader.remain() > 0 {
-            clear_file_priv(self.path().dentry())?;
-        }
-
         let (file_ops, is_offset_aware) = self.file_ops_and_is_offset_aware();
         let status_flags = self.status_flags();
 
         if !is_offset_aware {
+            if reader.has_remain() {
+                clear_file_priv(self.path().dentry())?;
+            }
             return file_ops.write_at(0, reader, status_flags);
         }
 
         let mut offset = self.offset.lock();
 
         // FIXME: How can we deal with the `O_APPEND` flag if `open_file` is set?
-        if status_flags.contains(StatusFlags::O_APPEND) && self.open_file.is_none() {
+        let write_offset = if status_flags.contains(StatusFlags::O_APPEND) && self.open_file.is_none() {
             // FIXME: `O_APPEND` should ensure that new content is appended even if another process
             // is writing to the file concurrently.
-            *offset = self.path().size();
-        }
+            self.path().size()
+        } else {
+            *offset
+        };
 
-        let len = file_ops.write_at(*offset, reader, status_flags)?;
-        *offset += len;
+        let len = self.write_with_file_size_limit(file_ops, write_offset, reader, status_flags)?;
+        if len > 0 {
+            *offset = write_offset + len;
+        }
 
         Ok(len)
     }
@@ -350,10 +391,6 @@ impl FileLike for InodeHandle {
         if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_writable() {
             return_errno_with_message!(Errno::EBADF, "the file is not opened writable");
         }
-        if reader.remain() > 0 {
-            clear_file_priv(self.path().dentry())?;
-        }
-
         let status_flags = self.status_flags();
 
         // FIXME: How can we deal with the `O_APPEND` flag if `open_file` is set?
@@ -364,7 +401,7 @@ impl FileLike for InodeHandle {
             offset = self.path().size();
         }
 
-        file_ops.write_at(offset, reader, status_flags)
+        self.write_with_file_size_limit(file_ops, offset, reader, status_flags)
     }
 
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
@@ -408,10 +445,6 @@ impl FileLike for InodeHandle {
             return_errno_with_message!(Errno::EINVAL, "the file is not opened writable");
         }
 
-        if self.status_flags().contains(StatusFlags::O_APPEND) {
-            // FIXME: It's allowed to `ftruncate` an append-only file on Linux.
-            return_errno_with_message!(Errno::EPERM, "can not resize append-only file");
-        }
         // `ftruncate` uses the descriptor's write mode and must not recheck current inode
         // permissions. See <https://man7.org/linux/man-pages/man2/truncate.2.html>.
         self.path().resize_unchecked_access(new_size)
