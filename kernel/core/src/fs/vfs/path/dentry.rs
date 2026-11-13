@@ -312,6 +312,14 @@ impl Dentry {
         DentryFlags::from_bits(flags).unwrap()
     }
 
+    pub(super) fn is_unlinked(&self) -> bool {
+        self.flags().contains(DentryFlags::UNLINKED)
+    }
+
+    fn mark_unlinked(&self) {
+        self.flags.fetch_or(DentryFlags::UNLINKED.bits(), Ordering::Relaxed);
+    }
+
     /// Checks if this dentry is a descendant of or the same as the given
     /// ancestor dentry.
     pub(in crate::fs) fn is_equal_or_descendant_of(&self, ancestor: &Arc<Self>) -> bool {
@@ -800,6 +808,7 @@ impl DirDentry<'_> {
         };
 
         remove_child_fn(dir_inode.as_ref(), &child_dentry)?;
+        child_dentry.mark_unlinked();
         if cached_child.is_some() {
             children.upgrade().delete(name);
         }
@@ -887,6 +896,9 @@ impl DirDentry<'_> {
 
             match mode {
                 RenameMode::Replace | RenameMode::NoReplace => {
+                    if let Some(new_dentry) = &new_dentry {
+                        new_dentry.mark_unlinked();
+                    }
                     children.delete(old_name);
                     old_dentry
                         .name_and_parent
@@ -944,6 +956,9 @@ impl DirDentry<'_> {
 
             match mode {
                 RenameMode::Replace | RenameMode::NoReplace => {
+                    if let Some(new_dentry) = &new_dentry {
+                        new_dentry.mark_unlinked();
+                    }
                     old_children.delete(old_name);
                     old_dentry
                         .name_and_parent
@@ -1089,6 +1104,7 @@ impl DentryKey {
 bitflags! {
     struct DentryFlags: u32 {
         const MOUNTED = 1 << 0;
+        const UNLINKED = 1 << 1;
     }
 }
 
