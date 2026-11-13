@@ -8,11 +8,10 @@ pub(super) fn sys_chroot(path_ptr: Vaddr, ctx: &Context) -> Result<SyscallReturn
     debug!("path_name = {:?}", path_name);
 
     let fs_ref = ctx.thread_local.borrow_fs();
-    let mut path_resolver = fs_ref.resolver().write();
     let path = {
         let fs_path = FsPath::try_from(path_name.to_bytes())?;
-        path_resolver.lookup(&fs_path)?
+        fs_ref.resolver().read().lookup(&fs_path)?
     };
-    path_resolver.chroot(path, ctx)?;
+    fs_ref.resolver().write().chroot(path, ctx)?;
     Ok(SyscallReturn::Return(0))
 }

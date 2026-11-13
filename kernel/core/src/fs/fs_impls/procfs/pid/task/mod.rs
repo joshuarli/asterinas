@@ -11,7 +11,7 @@ use crate::{
             pid::task::{
                 auxv::AuxvFileOps, cgroup::CgroupFileOps, children::ChildrenFileOps, cmdline::CmdlineFileOps,
                 comm::CommFileOps, environ::EnvironFileOps, exe::ExeSymOps, fd::FdDirOps,
-                gid_map::GidMapFileOps, maps::MapsFileOps, mem::MemFileOps,
+                fs_links::FsLinkOps, gid_map::GidMapFileOps, maps::MapsFileOps, mem::MemFileOps,
                 mountinfo::MountInfoFileOps, mounts::MountsFileOps, mountstats::MountStatsFileOps,
                 ns::NsDirOps, oom_score_adj::OomScoreAdjFileOps, stat::StatFileOps,
                 statm::StatmFileOps, status::StatusFileOps, uid_map::UidMapFileOps,
@@ -37,6 +37,7 @@ mod comm;
 mod environ;
 mod exe;
 mod fd;
+mod fs_links;
 mod gid_map;
 mod maps;
 mod mem;
@@ -116,6 +117,8 @@ impl TidDirOps {
         ("cmdline", InodeType::File, CmdlineFileOps::new_inode),
         ("comm", InodeType::File, CommFileOps::new_inode),
         ("environ", InodeType::File, EnvironFileOps::new_inode),
+        ("cwd", InodeType::SymLink, FsLinkOps::new_cwd_inode),
+        ("root", InodeType::SymLink, FsLinkOps::new_root_inode),
         ("exe", InodeType::SymLink, ExeSymOps::new_inode),
         ("fd", InodeType::Dir, FdDirOps::<fd::FileSymOps>::new_inode),
         (

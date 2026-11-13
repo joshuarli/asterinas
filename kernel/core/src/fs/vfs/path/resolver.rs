@@ -441,14 +441,11 @@ impl PathResolver {
     /// they will also be changed to `new_root_path`.
     pub(crate) fn pivot_root(
         &mut self,
-        new_root_path: FsPath,
-        put_old_path: FsPath,
+        new_root_path: Path,
+        put_old_path: Path,
         pid_table: &PidTable,
         ctx: &Context,
     ) -> Result<()> {
-        let new_root_path = self.lookup(&new_root_path)?;
-        let put_old_path = self.lookup(&put_old_path)?;
-
         if new_root_path.type_() != InodeType::Dir || put_old_path.type_() != InodeType::Dir {
             return_errno_with_message!(
                 Errno::ENOTDIR,
