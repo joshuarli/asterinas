@@ -49,6 +49,13 @@ FN_TEST(read_invalid_capability)
 }
 END_TEST()
 
+FN_TEST(drop_invalid_capability)
+{
+	TEST_ERRNO(prctl(PR_CAPBSET_DROP, CAP_LAST_CAP + 1), EINVAL);
+	TEST_ERRNO(prctl(PR_CAPBSET_DROP, 63), EINVAL);
+}
+END_TEST()
+
 FN_TEST(drop_bounding_cap)
 {
 	pid_t pid;
@@ -105,6 +112,10 @@ FN_TEST(drop_bounding_cap_without_cap_setpcap)
 		write_cap_data(cap_data);
 
 		CHECK_WITH(prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN),
+			   _ret == -1 && errno == EPERM);
+		CHECK_WITH(prctl(PR_CAPBSET_DROP, CAP_LAST_CAP + 1),
+			   _ret == -1 && errno == EPERM);
+		CHECK_WITH(prctl(PR_CAPBSET_DROP, 63),
 			   _ret == -1 && errno == EPERM);
 		CHECK_WITH(prctl(PR_CAPBSET_READ, CAP_SYS_ADMIN), _ret == 1);
 

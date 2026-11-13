@@ -15,6 +15,7 @@ use crate::{
                 mountinfo::MountInfoFileOps, mounts::MountsFileOps, mountstats::MountStatsFileOps,
                 ns::NsDirOps, oom_score_adj::OomScoreAdjFileOps, stat::StatFileOps,
                 statm::StatmFileOps, status::StatusFileOps, uid_map::UidMapFileOps,
+                wchan::WchanFileOps,
             },
             template::{
                 ListedEntry, ProcDir, ProcDirOps, ReaddirEntry, keyed_readdir_entries,
@@ -50,6 +51,7 @@ pub(super) mod stat;
 mod statm;
 mod status;
 mod uid_map;
+mod wchan;
 
 /// Represents the inode at `/proc/[pid]/task`.
 pub(super) struct TaskDirOps(Arc<PidEntry>);
@@ -140,6 +142,7 @@ impl TidDirOps {
         ("statm", InodeType::File, StatmFileOps::new_inode),
         ("status", InodeType::File, StatusFileOps::new_inode),
         ("uid_map", InodeType::File, UidMapFileOps::new_inode),
+        ("wchan", InodeType::File, WchanFileOps::new_inode),
         ("maps", InodeType::File, MapsFileOps::new_inode),
         ("mounts", InodeType::File, MountsFileOps::new_inode),
     ];

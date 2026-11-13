@@ -12,9 +12,10 @@
 mod heap;
 mod init_stack;
 
-use core::{ops::Range, sync::atomic::{AtomicBool, Ordering}};
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
-use core::sync::atomic::AtomicUsize;
+use core::{
+    ops::Range,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use ostd::task::disable_preempt;
 
@@ -78,6 +79,10 @@ pub(crate) struct ProcessVm {
     data_range: SpinLock<Range<Vaddr>>,
     /// The path of the executable file.
     executable_path: Path,
+    /// The largest virtual size observed, in bytes.
+    hiwater_vm_bytes: AtomicUsize,
+    /// The largest resident set observed, in pages.
+    hiwater_rss_pages: AtomicUsize,
     /// The base address for vDSO segment
     #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
     vdso_base: AtomicUsize,
@@ -93,6 +98,8 @@ impl ProcessVm {
             code_range: SpinLock::new(0..0),
             data_range: SpinLock::new(0..0),
             executable_path,
+            hiwater_vm_bytes: AtomicUsize::new(0),
+            hiwater_rss_pages: AtomicUsize::new(0),
             #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
             vdso_base: AtomicUsize::new(0),
         }
@@ -107,9 +114,29 @@ impl ProcessVm {
             code_range: SpinLock::new(process_vm.code_range.lock().clone()),
             data_range: SpinLock::new(process_vm.data_range.lock().clone()),
             executable_path: process_vm.executable_path.clone(),
+            hiwater_vm_bytes: AtomicUsize::new(0),
+            hiwater_rss_pages: AtomicUsize::new(0),
             #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
             vdso_base: AtomicUsize::new(process_vm.vdso_base.load(Ordering::Relaxed)),
         }
+    }
+
+    /// Records the current sizes and returns the peak virtual size in bytes
+    /// and the peak resident set in pages of this address space.
+    pub(crate) fn record_peak_memory(
+        &self,
+        virtual_bytes: usize,
+        resident_pages: usize,
+    ) -> (usize, usize) {
+        let peak_virtual = self
+            .hiwater_vm_bytes
+            .fetch_max(virtual_bytes, Ordering::Relaxed)
+            .max(virtual_bytes);
+        let peak_resident = self
+            .hiwater_rss_pages
+            .fetch_max(resident_pages, Ordering::Relaxed)
+            .max(resident_pages);
+        (peak_virtual, peak_resident)
     }
 
     pub(crate) fn is_dumpable(&self) -> bool {

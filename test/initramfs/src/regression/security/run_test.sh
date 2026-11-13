@@ -11,6 +11,7 @@ set -e
 ./capability/kill
 ./capability/reboot
 ./capability/setgroups
+./capability/syslog
 ./capability/trusted_xattr
 
 ./lsm/module_selection
@@ -22,3 +23,4 @@ set -e
 ./namespace/proc_nsfs
 ./namespace/setns
 ./namespace/unshare
+./namespace/unshare_privilege

@@ -338,7 +338,7 @@ impl<R: TRights> Credentials<R> {
     ///
     /// This method requires the `Write` right.
     #[require(R > Write)]
-    pub(crate) fn drop_bounding_capability(&self, capability: CapSet) -> Result<()> {
+    pub(crate) fn drop_bounding_capability(&self, capability: u64) -> Result<()> {
         self.0.drop_bounding_capability(capability)
     }
 

@@ -160,16 +160,28 @@ impl ProcFileOps for StatusFileOps {
                 .unwrap_or(0)
         )?;
 
-        let memory_usage = process.lock_vmar().as_ref().map(|vmar| vmar.memory_usage());
-        if let Some(usage) = memory_usage {
+        let memory_usage = process.lock_vmar().as_ref().map(|vmar| {
+            let usage = vmar.memory_usage();
+            let resident = usage.anonymous_resident_pages + usage.file_resident_pages;
+            let peak = vmar
+                .process_vm()
+                .record_peak_memory(usage.virtual_bytes, resident);
+            (usage, peak)
+        });
+        if let Some((usage, (peak_virtual, peak_resident))) = memory_usage {
             let vsize = usage.virtual_bytes / 1024;
             let anon = usage.anonymous_resident_pages * (PAGE_SIZE / 1024);
             let file = usage.file_resident_pages * (PAGE_SIZE / 1024);
             let rss = anon + file;
             writeln!(
                 printer,
-                "VmSize:\t{} kB\nVmRSS:\t{} kB\nRssAnon:\t{} kB\nRssFile:\t{} kB",
-                vsize, rss, anon, file
+                "VmPeak:\t{} kB\nVmSize:\t{} kB\nVmHWM:\t{} kB\nVmRSS:\t{} kB\nRssAnon:\t{} kB\nRssFile:\t{} kB",
+                peak_virtual / 1024,
+                vsize,
+                peak_resident * (PAGE_SIZE / 1024),
+                rss,
+                anon,
+                file
             )?;
         }
 

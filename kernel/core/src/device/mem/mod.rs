@@ -46,6 +46,7 @@ use crate::{
         file::{PerOpenFileOps, mkmod},
     },
     prelude::*,
+    security::syslog::{SYSLOG_ACTION_READ_ALL, check_syslog_permissions},
 };
 
 pub(super) fn init_in_first_kthread() {
@@ -109,7 +110,10 @@ impl Device for MemDevice {
 
     fn open(&self) -> Result<Box<dyn PerOpenFileOps>> {
         match self.payload() {
-            MemFile::Kmsg => Ok(Box::new(kmsg::KmsgFile::open())),
+            MemFile::Kmsg => {
+                check_syslog_permissions(SYSLOG_ACTION_READ_ALL)?;
+                Ok(Box::new(kmsg::KmsgFile::open()))
+            }
             file => Ok(Box::new(*file)),
         }
     }

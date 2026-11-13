@@ -7,7 +7,11 @@ use crate::{
     ipc::IpcNamespace,
     net::uts_ns::UtsNamespace,
     prelude::*,
-    process::{CloneFlags, Process, UserNamespace, posix_thread::PosixThread},
+    process::{
+        CloneFlags, Process, UserNamespace, credentials::capabilities::CapSet,
+        posix_thread::PosixThread,
+    },
+    security::lsm::hooks as lsm_hooks,
 };
 
 /// A struct that acts as a per-thread proxy to give access to most namespaces.
@@ -64,6 +68,12 @@ impl NsProxy {
 
         // Slow path: One or more namespaces need to be cloned,
         // so a new `NsProxy` must be created.
+
+        lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+            user_ns.as_ref(),
+            posix_thread,
+            CapSet::SYS_ADMIN,
+        ))?;
 
         check_unsupported_ns_flags(clone_ns_flags)?;
 

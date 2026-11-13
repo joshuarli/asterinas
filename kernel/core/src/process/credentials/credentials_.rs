@@ -599,13 +599,17 @@ impl Credentials_ {
             .store(bounding_capset, Ordering::Relaxed);
     }
 
-    pub(super) fn drop_bounding_capability(&self, capability: CapSet) -> Result<()> {
+    pub(super) fn drop_bounding_capability(&self, capability: u64) -> Result<()> {
         if !self.effective_capset().contains(CapSet::SETPCAP) {
             return_errno_with_message!(
                 Errno::EPERM,
                 "only threads with CAP_SETPCAP can drop capabilities from the bounding set"
             );
         }
+
+        let Some(capability) = CapSet::from_capability_number(capability) else {
+            return_errno_with_message!(Errno::EINVAL, "invalid capability number");
+        };
 
         let new_bounding_capset = self.bounding_capset() - capability;
         self.set_bounding_capset(new_bounding_capset);
