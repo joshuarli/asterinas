@@ -6,11 +6,13 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
+#include <linux/capability.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -30,7 +32,7 @@ static void check_metadata(const char *path, gid_t group, mode_t expected)
 	assert((metadata.st_mode & 07777) == expected);
 }
 
-static void create_children(gid_t group, mode_t directory_mode, int tmpfile)
+static void create_children(gid_t group, mode_t directory_mode, int tmpfile, int root_has_fsetid)
 {
 	struct sockaddr_un address = {.sun_family = AF_UNIX, .sun_path = "socket"};
 	int fd;
@@ -39,7 +41,7 @@ static void create_children(gid_t group, mode_t directory_mode, int tmpfile)
 	assert(group_count == 0 || group_count == 1);
 	if (group_count == 1)
 		assert(getgroups(1, &supplementary) == 1);
-	int may_keep_setgid = getuid() == 0 || group == getgid() ||
+	int may_keep_setgid = (getuid() == 0 && root_has_fsetid) || group == getgid() ||
 		(group_count == 1 && supplementary == group);
 	umask(0027);
 	fd = open("file", O_CREAT | O_EXCL | O_RDWR, 0666);
@@ -99,7 +101,7 @@ int main(int argc, char **argv)
 		temporary = "/tmp";
 	assert(snprintf(root, sizeof(root), "%s/setgid-inherit-XXXXXX", temporary) < (int)sizeof(root));
 	assert(mkdtemp(root) != NULL && chmod(root, 0755) == 0);
-	for (int unprivileged = 0; unprivileged < 3; unprivileged++) {
+	for (int unprivileged = 0; unprivileged < 4; unprivileged++) {
 		for (int inherited = 0; inherited < 2; inherited++) {
 			assert(snprintf(path, sizeof(path), "%s/%d-%d", root, unprivileged, inherited) < (int)sizeof(path));
 			assert(mkdir(path, 0700) == 0);
@@ -114,10 +116,21 @@ int main(int argc, char **argv)
 					gid_t supplementary = 1001;
 					assert(setgroups(1, &supplementary) == 0);
 				}
-				if (unprivileged)
+				if (unprivileged == 1 || unprivileged == 2)
 					assert(setgid(1000) == 0 && setuid(1000) == 0);
+				if (unprivileged == 3) {
+					struct __user_cap_header_struct header = {
+						.version = _LINUX_CAPABILITY_VERSION_3,
+					};
+					struct __user_cap_data_struct capabilities[2];
+					assert(syscall(SYS_capget, &header, capabilities) == 0);
+					capabilities[0].effective &= ~(1U << CAP_FSETID);
+					assert(syscall(SYS_capset, &header, capabilities) == 0);
+					assert(syscall(SYS_capget, &header, capabilities) == 0);
+					assert((capabilities[0].effective & (1U << CAP_FSETID)) == 0);
+				}
 				assert(chdir(path) == 0);
-				create_children(inherited ? 1001 : getgid(), inherited ? 02750 : 0750, tmpfile);
+				create_children(inherited ? 1001 : getgid(), inherited ? 02750 : 0750, tmpfile, unprivileged != 3);
 				_exit(0);
 			}
 			assert(waitpid(child, &status, 0) == child);
