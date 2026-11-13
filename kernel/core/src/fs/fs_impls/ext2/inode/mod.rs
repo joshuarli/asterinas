@@ -233,7 +233,7 @@ impl Drop for Inode {
 /// Parsed in-memory mirror of an on-disk inode's metadata fields.
 ///
 /// Unlike `RawInode`, fields are decoded into Rust types
-/// (e.g., `Duration` for timestamps, `InodeType` for file type).
+/// (e.g., `FileTime` for timestamps, `InodeType` for file type).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct InodeDesc {
     type_: InodeType,
@@ -241,9 +241,9 @@ pub(super) struct InodeDesc {
     uid: u32,
     gid: u32,
     size: u64,
-    atime: Duration,
-    ctime: Duration,
-    mtime: Duration,
+    atime: FileTime,
+    ctime: FileTime,
+    mtime: FileTime,
     dtime: Duration,
     link_count: u16,
     sector_count: u32,
@@ -261,7 +261,7 @@ impl InodeDesc {
         gid: u32,
         link_count: u16,
         generation: u32,
-        now: Duration,
+        now: FileTime,
     ) -> Self {
         Self {
             type_,
@@ -300,9 +300,9 @@ impl TryFrom<&RawInode> for InodeDesc {
         let perm = FilePerm::from_bits_truncate(mode & 0o7777);
         let uid = (raw.uid as u32) | ((raw.uid_high as u32) << 16);
         let gid = (raw.gid as u32) | ((raw.gid_high as u32) << 16);
-        let atime = Duration::from_secs(raw.atime as u64);
-        let ctime = Duration::from_secs(raw.ctime as u64);
-        let mtime = Duration::from_secs(raw.mtime as u64);
+        let atime = utils::ext2_secs_to_time(raw.atime);
+        let ctime = utils::ext2_secs_to_time(raw.ctime);
+        let mtime = utils::ext2_secs_to_time(raw.mtime);
 
         let mut size = raw.size_lo as u64;
         if type_ == InodeType::File {
@@ -359,9 +359,9 @@ impl From<&InodeDesc> for RawInode {
             mode,
             uid,
             size_lo,
-            atime: utils::duration_to_ext2_secs(desc.atime),
-            ctime: utils::duration_to_ext2_secs(desc.ctime),
-            mtime: utils::duration_to_ext2_secs(desc.mtime),
+            atime: utils::time_to_ext2_secs(desc.atime),
+            ctime: utils::time_to_ext2_secs(desc.ctime),
+            mtime: utils::time_to_ext2_secs(desc.mtime),
             dtime: utils::duration_to_ext2_secs(desc.dtime),
             gid,
             link_count: desc.link_count,
@@ -531,31 +531,31 @@ impl InodeInner {
         self.desc.size = new_size as u64;
     }
 
-    fn atime(&self) -> Duration {
+    fn atime(&self) -> FileTime {
         self.desc.atime
     }
 
-    fn set_atime(&mut self, time: Duration) {
+    fn set_atime(&mut self, time: FileTime) {
         self.desc.atime = time;
     }
 
-    fn mtime(&self) -> Duration {
+    fn mtime(&self) -> FileTime {
         self.desc.mtime
     }
 
-    fn set_mtime(&mut self, time: Duration) {
+    fn set_mtime(&mut self, time: FileTime) {
         self.desc.mtime = time;
     }
 
-    fn ctime(&self) -> Duration {
+    fn ctime(&self) -> FileTime {
         self.desc.ctime
     }
 
-    fn set_ctime(&mut self, time: Duration) {
+    fn set_ctime(&mut self, time: FileTime) {
         self.desc.ctime = time;
     }
 
-    fn set_mtime_ctime(&mut self, time: Duration) {
+    fn set_mtime_ctime(&mut self, time: FileTime) {
         self.set_mtime(time);
         self.set_ctime(time);
     }

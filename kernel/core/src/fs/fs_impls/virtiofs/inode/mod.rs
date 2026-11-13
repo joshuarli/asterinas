@@ -52,6 +52,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
+    time::FileTime,
     vm::page_cache::{PageCache, Vmo},
 };
 
@@ -309,27 +310,27 @@ impl Inode for VirtioFsInode {
         self.setattr(setattr_req)
     }
 
-    fn atime(&self) -> Duration {
+    fn atime(&self) -> FileTime {
         self.inner.read().metadata.last_access_at
     }
 
-    fn set_atime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_atime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.set_time(TimeField::Access, time);
     }
 
-    fn mtime(&self) -> Duration {
+    fn mtime(&self) -> FileTime {
         self.inner.read().metadata.last_modify_at
     }
 
-    fn set_mtime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_mtime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.set_time(TimeField::Modify, time);
     }
 
-    fn ctime(&self) -> Duration {
+    fn ctime(&self) -> FileTime {
         self.inner.read().metadata.last_meta_change_at
     }
 
-    fn set_ctime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_ctime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.set_time(TimeField::Change, time);
     }
 

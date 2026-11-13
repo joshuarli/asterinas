@@ -3,7 +3,6 @@
 //! Memfd Implementation.
 
 use alloc::format;
-use core::time::Duration;
 
 use align_ext::AlignExt;
 use inherit_methods_macro::inherit_methods;
@@ -23,6 +22,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
+    time::FileTime,
     vm::{page_cache::Vmo, perms::VmPerms},
 };
 
@@ -149,12 +149,12 @@ impl FileOps for MemfdInode {
 impl Inode for MemfdInode {
     fn metadata(&self) -> Result<Metadata>;
     fn size(&self) -> usize;
-    fn atime(&self) -> Duration;
-    fn set_atime(&self, self_dentry: &Dentry, time: Duration);
-    fn mtime(&self) -> Duration;
-    fn set_mtime(&self, self_dentry: &Dentry, time: Duration);
-    fn ctime(&self) -> Duration;
-    fn set_ctime(&self, self_dentry: &Dentry, time: Duration);
+    fn atime(&self) -> FileTime;
+    fn set_atime(&self, self_dentry: &Dentry, time: FileTime);
+    fn mtime(&self) -> FileTime;
+    fn set_mtime(&self, self_dentry: &Dentry, time: FileTime);
+    fn ctime(&self) -> FileTime;
+    fn set_ctime(&self, self_dentry: &Dentry, time: FileTime);
     fn ino(&self) -> u64;
     fn type_(&self) -> InodeType;
     fn mode(&self) -> Result<InodeMode>;

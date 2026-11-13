@@ -19,13 +19,12 @@
 //! them belong to the VFS, where the permission checks for these operations
 //! are being added.
 
-use core::time::Duration;
-
 use super::OverlayInode;
 use crate::{
     fs::{file::InodeMode, vfs::{inode_ext::InodeExt, path::Dentry, posix_acl::AccessAclUpdate}},
     prelude::*,
     process::{Gid, Uid},
+    time::FileTime,
 };
 
 impl OverlayInode {
@@ -54,19 +53,19 @@ impl OverlayInode {
         inode.set_group(upper.dentry(), gid)
     }
 
-    pub(super) fn set_atime_impl(&self, self_dentry: &Dentry, time: Duration) {
+    pub(super) fn set_atime_impl(&self, self_dentry: &Dentry, time: FileTime) {
         if let Ok(upper) = self.writable_real_object(self_dentry) {
             upper.real_inode().set_atime(upper.dentry(), time);
         }
     }
 
-    pub(super) fn set_mtime_impl(&self, self_dentry: &Dentry, time: Duration) {
+    pub(super) fn set_mtime_impl(&self, self_dentry: &Dentry, time: FileTime) {
         if let Ok(upper) = self.writable_real_object(self_dentry) {
             upper.real_inode().set_mtime(upper.dentry(), time);
         }
     }
 
-    pub(super) fn set_ctime_impl(&self, self_dentry: &Dentry, time: Duration) {
+    pub(super) fn set_ctime_impl(&self, self_dentry: &Dentry, time: FileTime) {
         if let Ok(upper) = self.writable_real_object(self_dentry) {
             upper.real_inode().set_ctime(upper.dentry(), time);
         }

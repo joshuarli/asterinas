@@ -2,7 +2,6 @@
 
 //! Form file paths within and across FSes with dentries and mount points.
 
-use core::time::Duration;
 use ostd::sync::RwMutexReadGuard;
 
 pub(crate) use dentry::Dentry;
@@ -41,6 +40,7 @@ use crate::{
         posix_thread::{AsPosixThread, PosixThread},
     },
     security::lsm::hooks as lsm_hooks,
+    time::FileTime,
 };
 
 mod dentry;
@@ -886,9 +886,9 @@ impl Path {
     pub(crate) fn size(&self) -> usize;
     pub(crate) fn owner(&self) -> Result<Uid>;
     pub(crate) fn group(&self) -> Result<Gid>;
-    pub(crate) fn atime(&self) -> Duration;
-    pub(crate) fn mtime(&self) -> Duration;
-    pub(crate) fn ctime(&self) -> Duration;
+    pub(crate) fn atime(&self) -> FileTime;
+    pub(crate) fn mtime(&self) -> FileTime;
+    pub(crate) fn ctime(&self) -> FileTime;
     pub(crate) fn list_xattr(
         &self,
         namespace: XattrNamespace,
@@ -973,15 +973,15 @@ impl Path {
         Ok(())
     }
 
-    pub(crate) fn set_atime(&self, time: Duration) {
+    pub(crate) fn set_atime(&self, time: FileTime) {
         self.inode().set_atime(&self.dentry, time)
     }
 
-    pub(crate) fn set_mtime(&self, time: Duration) {
+    pub(crate) fn set_mtime(&self, time: FileTime) {
         self.inode().set_mtime(&self.dentry, time)
     }
 
-    pub(crate) fn set_ctime(&self, time: Duration) {
+    pub(crate) fn set_ctime(&self, time: FileTime) {
         self.inode().set_ctime(&self.dentry, time)
     }
 

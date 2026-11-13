@@ -54,10 +54,7 @@ mod open;
 mod readdir;
 mod xattr;
 
-use core::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::Once;
 
@@ -88,6 +85,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
+    time::FileTime,
     vm::page_cache::Vmo,
 };
 
@@ -313,15 +311,15 @@ impl Inode for OverlayInode {
         self.real_object().real_inode().group()
     }
 
-    fn atime(&self) -> Duration {
+    fn atime(&self) -> FileTime {
         self.real_object().real_inode().atime()
     }
 
-    fn mtime(&self) -> Duration {
+    fn mtime(&self) -> FileTime {
         self.real_object().real_inode().mtime()
     }
 
-    fn ctime(&self) -> Duration {
+    fn ctime(&self) -> FileTime {
         self.real_object().real_inode().ctime()
     }
 
@@ -415,15 +413,15 @@ impl Inode for OverlayInode {
         self.set_group_impl(self_dentry, gid)
     }
 
-    fn set_atime(&self, self_dentry: &Dentry, time: Duration) {
+    fn set_atime(&self, self_dentry: &Dentry, time: FileTime) {
         self.set_atime_impl(self_dentry, time)
     }
 
-    fn set_mtime(&self, self_dentry: &Dentry, time: Duration) {
+    fn set_mtime(&self, self_dentry: &Dentry, time: FileTime) {
         self.set_mtime_impl(self_dentry, time)
     }
 
-    fn set_ctime(&self, self_dentry: &Dentry, time: Duration) {
+    fn set_ctime(&self, self_dentry: &Dentry, time: FileTime) {
         self.set_ctime_impl(self_dentry, time)
     }
 

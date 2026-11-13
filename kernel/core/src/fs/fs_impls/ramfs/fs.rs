@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use align_ext::AlignExt;
 use aster_block::SECTOR_SIZE;
@@ -39,7 +36,7 @@ use crate::{
     prelude::*,
     process::{Gid, Uid, posix_thread::AsPosixThread},
     thread::Thread,
-    time::clocks::RealTimeCoarseClock,
+    time::FileTime,
     vm::page_cache::{PageCache, Vmo},
 };
 
@@ -322,9 +319,9 @@ impl Inner {
 struct InodeMeta {
     size: usize,
     blocks: usize,
-    atime: Duration,
-    mtime: Duration,
-    ctime: Duration,
+    atime: FileTime,
+    mtime: FileTime,
+    ctime: FileTime,
     mode: InodeMode,
     nlinks: usize,
     uid: Uid,
@@ -333,7 +330,7 @@ struct InodeMeta {
 
 impl InodeMeta {
     pub(crate) fn new(mode: InodeMode, uid: Uid, gid: Gid) -> Self {
-        let now = now();
+        let now = FileTime::now();
         Self {
             size: 0,
             blocks: 0,
@@ -348,7 +345,7 @@ impl InodeMeta {
     }
 
     pub(crate) fn new_dir(mode: InodeMode, uid: Uid, gid: Gid) -> Self {
-        let now = now();
+        let now = FileTime::now();
         Self {
             size: NUM_SPECIAL_ENTRIES,
             blocks: 1,
@@ -389,15 +386,15 @@ impl InodeMeta {
             .expect("ramfs allocated sector count overflow")
     }
 
-    pub(crate) fn set_atime(&mut self, time: Duration) {
+    pub(crate) fn set_atime(&mut self, time: FileTime) {
         self.atime = time;
     }
 
-    pub(crate) fn set_mtime(&mut self, time: Duration) {
+    pub(crate) fn set_mtime(&mut self, time: FileTime) {
         self.mtime = time;
     }
 
-    pub(crate) fn set_ctime(&mut self, time: Duration) {
+    pub(crate) fn set_ctime(&mut self, time: FileTime) {
         self.ctime = time;
     }
 
@@ -842,7 +839,7 @@ impl RamInode {
         self_dir.remove_entry(idx);
         drop(self_dir);
 
-        let now = now();
+        let now = FileTime::now();
         let mut self_meta = self.metadata.lock();
         self_meta.dec_size();
         self_meta.set_mtime(now);
@@ -921,7 +918,7 @@ impl RamInode {
         drop(self_dir);
         drop(target_dir);
 
-        let now = now();
+        let now = FileTime::now();
         let mut self_meta = self.metadata.lock();
         self_meta.dec_size();
         self_meta.dec_nlinks();
@@ -991,7 +988,7 @@ impl RamInode {
         self_dir.append_entry(name, new_inode.clone());
         drop(self_dir);
 
-        let now = now();
+        let now = FileTime::now();
         let mut inode_meta = self.metadata.lock();
         inode_meta.set_mtime(now);
         inode_meta.set_ctime(now);
@@ -1072,7 +1069,7 @@ impl RamInode {
         if file_size == new_size {
             return Ok(());
         }
-        let now = now();
+        let now = FileTime::now();
         inode_meta.set_mtime(now);
         inode_meta.set_ctime(now);
 
@@ -1112,7 +1109,7 @@ impl FileOps for RamInode {
         };
 
         if self.typ == InodeType::File {
-            self.metadata.lock().set_atime(now());
+            self.metadata.lock().set_atime(FileTime::now());
         }
         Ok(read_len)
     }
@@ -1131,7 +1128,7 @@ impl FileOps for RamInode {
                     return Ok(0);
                 }
 
-                let now = now();
+                let now = FileTime::now();
 
                 let mut page_cache = self.inner.as_file().unwrap().lock();
 
@@ -1171,7 +1168,7 @@ impl FileOps for RamInode {
             .read()
             .visit_entry(offset, visitor)?;
 
-        self.metadata.lock().set_atime(now());
+        self.metadata.lock().set_atime(FileTime::now());
 
         Ok(cnt)
     }
@@ -1192,27 +1189,27 @@ impl Inode for RamInode {
         self.resize_impl(new_size)
     }
 
-    fn atime(&self) -> Duration {
+    fn atime(&self) -> FileTime {
         self.metadata.lock().atime
     }
 
-    fn set_atime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_atime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.metadata.lock().set_atime(time);
     }
 
-    fn mtime(&self) -> Duration {
+    fn mtime(&self) -> FileTime {
         self.metadata.lock().mtime
     }
 
-    fn set_mtime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_mtime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.metadata.lock().set_mtime(time);
     }
 
-    fn ctime(&self) -> Duration {
+    fn ctime(&self) -> FileTime {
         self.metadata.lock().ctime
     }
 
-    fn set_ctime(&self, _self_dentry: &Dentry, time: Duration) {
+    fn set_ctime(&self, _self_dentry: &Dentry, time: FileTime) {
         self.metadata.lock().set_ctime(time);
     }
 
@@ -1231,7 +1228,7 @@ impl Inode for RamInode {
     fn set_mode(&self, _self_dentry: &Dentry, mode: InodeMode) -> Result<()> {
         let mut inode_meta = self.metadata.lock();
         inode_meta.mode = mode;
-        inode_meta.set_ctime(now());
+        inode_meta.set_ctime(FileTime::now());
         Ok(())
     }
 
@@ -1254,7 +1251,7 @@ impl Inode for RamInode {
         }
         let mut metadata = self.metadata.lock();
         metadata.mode = update.mode();
-        metadata.set_ctime(now());
+        metadata.set_ctime(FileTime::now());
         Ok(())
     }
 
@@ -1265,7 +1262,7 @@ impl Inode for RamInode {
     fn set_owner(&self, _self_dentry: &Dentry, uid: Uid) -> Result<()> {
         let mut inode_meta = self.metadata.lock();
         inode_meta.uid = uid;
-        inode_meta.set_ctime(now());
+        inode_meta.set_ctime(FileTime::now());
         Ok(())
     }
 
@@ -1276,7 +1273,7 @@ impl Inode for RamInode {
     fn set_group(&self, _self_dentry: &Dentry, gid: Gid) -> Result<()> {
         let mut inode_meta = self.metadata.lock();
         inode_meta.gid = gid;
-        inode_meta.set_ctime(now());
+        inode_meta.set_ctime(FileTime::now());
         Ok(())
     }
 
@@ -1405,7 +1402,7 @@ impl Inode for RamInode {
             return_errno_with_message!(Errno::EEXIST, "entry exist");
         }
         self_dir.append_entry(name, old.this.upgrade().unwrap());
-        let now = now();
+        let now = FileTime::now();
 
         // An `O_TMPFILE` inode starts with zero links. Bump the link count
         // before exposing the new entry to concurrent lookup or unlink.
@@ -1519,7 +1516,7 @@ impl Inode for RamInode {
                 self_dir.exchange_entry_inodes(src_idx, dst_idx);
                 drop(self_dir);
 
-                let now = now();
+                let now = FileTime::now();
                 DirChange::touch().apply(self, now);
                 src_inode.metadata.lock().set_ctime(now);
                 dst_inode.metadata.lock().set_ctime(now);
@@ -1532,7 +1529,7 @@ impl Inode for RamInode {
                 );
                 drop(self_dir);
 
-                let now = now();
+                let now = FileTime::now();
                 DirChange::del(&src_inode).apply(self, now);
                 src_inode.metadata.lock().set_ctime(now);
                 let mut dst_metadata = dst_inode.metadata.lock();
@@ -1548,7 +1545,7 @@ impl Inode for RamInode {
                 );
                 drop(self_dir);
 
-                let now = now();
+                let now = FileTime::now();
                 DirChange::touch().apply(self, now);
                 src_inode.metadata.lock().set_ctime(now);
             }
@@ -1577,7 +1574,7 @@ impl Inode for RamInode {
                 drop(self_dir);
                 drop(target_dir);
 
-                let now = now();
+                let now = FileTime::now();
                 DirChange::exchange(&src_inode, &dst_inode).apply(self, now);
                 DirChange::exchange(&dst_inode, &src_inode).apply(new_dir_inode, now);
                 src_inode.metadata.lock().set_ctime(now);
@@ -1596,7 +1593,7 @@ impl Inode for RamInode {
                 drop(self_dir);
                 drop(target_dir);
 
-                let now = now();
+                let now = FileTime::now();
                 DirChange::del(&src_inode).apply(self, now);
                 DirChange::exchange(&dst_inode, &src_inode).apply(new_dir_inode, now);
                 let mut dst_metadata = dst_inode.metadata.lock();
@@ -1613,7 +1610,7 @@ impl Inode for RamInode {
                 drop(self_dir);
                 drop(target_dir);
 
-                let now = now();
+                let now = FileTime::now();
                 DirChange::del(&src_inode).apply(self, now);
                 DirChange::add(&src_inode).apply(new_dir_inode, now);
                 src_inode.metadata.lock().set_ctime(now);
@@ -1800,7 +1797,7 @@ impl DirChange {
 
     /// Applies this change to `dir`'s own metadata, also bumping its mtime/ctime
     /// to `now`.
-    fn apply(self, dir: &RamInode, now: Duration) {
+    fn apply(self, dir: &RamInode, now: FileTime) {
         let mut meta = dir.metadata.lock();
         match (self.old_type, self.new_type) {
             (Some(_), None) => meta.dec_size(),
@@ -1834,10 +1831,6 @@ fn write_lock_two_direntries_by_ino<'a>(
         let this = this.1.write();
         (this, other)
     }
-}
-
-fn now() -> Duration {
-    RealTimeCoarseClock::get().read_time()
 }
 
 fn current_fs_ids() -> (Uid, Gid) {
