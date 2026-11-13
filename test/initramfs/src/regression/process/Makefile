@@ -12,6 +12,7 @@ SUBDIRS := \
 	prctl \
 	pthread \
 	ptrace \
+	pty \
 	sched \
 	signal \
 
