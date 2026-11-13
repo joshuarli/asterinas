@@ -9,6 +9,7 @@ use crate::{
     fs::file::FileCommon,
     net::{iface::{Iface, iter_all_ifaces}, route::{is_broadcast_endpoint, lookup_output_route, lookup_local_iface}, socket::{
         Socket, new_socket_common,
+        sockstat::{Counted, RAW_SOCKETS},
         ip::IpControlMessage,
         options::{Error as SocketError, SocketMark, SocketOption, Timestamping, macros::{sock_option_mut, sock_option_ref}},
         private::SocketPrivate,
@@ -133,6 +134,7 @@ pub(crate) struct IpPacketSocket {
     timeouts: SocketTimeouts,
     pollee: Pollee,
     common: FileCommon,
+    _counted: Option<Counted>,
 }
 
 impl IpPacketSocket {
@@ -163,7 +165,8 @@ impl IpPacketSocket {
         for iface in &registered { iface.add_ip_tap(observer.clone()); }
         Arc::new(Self { tap, registered, options: RwLock::new(Options {
             socket: socket_options, ip: IpOptionSet::new_udp(), mark: 0,
-        }), timeouts: SocketTimeouts::new(), pollee, common: new_socket_common(is_nonblocking) })
+        }), timeouts: SocketTimeouts::new(), pollee, common: new_socket_common(is_nonblocking),
+            _counted: matches!(kind, IpSocketKind::Raw(_)).then(|| Counted::new(&RAW_SOCKETS)) })
     }
 
     fn assign_ping_id(&self, requested: u16, bind_address: Option<Ipv4Address>) -> Result<u16> {

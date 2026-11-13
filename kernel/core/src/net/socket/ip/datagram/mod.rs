@@ -23,6 +23,7 @@ use crate::{
                 options::{IpOptionSet, IpOptions, Mtu, MtuDiscover, PathMtuDiscovery, SetIpLevelOption},
             },
             new_udp_socket_common,
+            sockstat::{Counted, DATAGRAM_SOCKETS},
             options::{
                 BindToDevice, DontRoute, Error as SocketError, ReusePort, SocketMark, SocketOption,
                 macros::{sock_option_mut, sock_option_ref},
@@ -62,6 +63,7 @@ pub(crate) struct DatagramSocket {
 
     pollee: Pollee,
     common: FileCommon,
+    _counted: Counted,
 }
 
 #[derive(Clone, Debug)]
@@ -160,7 +162,7 @@ impl DatagramSocket {
     pub(crate) fn new(is_nonblocking: bool) -> Arc<Self> {
         let credentials = current_thread!().as_posix_thread().unwrap().credentials();
         let (common, owner) = new_udp_socket_common(is_nonblocking, credentials.fsuid(), credentials.fsgid());
-        let unbound_datagram = UnboundDatagram::new(owner);
+        let unbound_datagram = UnboundDatagram::new(owner, common.path().inode().ino());
         Arc::new(Self {
             inner: RwMutex::new(Inner::Unbound(unbound_datagram)),
             options: RwLock::new(OptionSet::new()),
@@ -168,6 +170,7 @@ impl DatagramSocket {
             tx_timestamp_key: AtomicU32::new(0),
             pollee: Pollee::new(),
             common,
+            _counted: Counted::new(&DATAGRAM_SOCKETS),
         })
     }
 

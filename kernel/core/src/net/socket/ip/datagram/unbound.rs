@@ -19,11 +19,12 @@ use crate::{
 
 pub(super) struct UnboundDatagram {
     owner: Arc<AtomicU32>,
+    inode: u64,
 }
 
 impl UnboundDatagram {
-    pub(super) fn new(owner: Arc<AtomicU32>) -> Self {
-        Self { owner }
+    pub(super) fn new(owner: Arc<AtomicU32>, inode: u64) -> Self {
+        Self { owner, inode }
     }
 }
 
@@ -56,6 +57,7 @@ impl datagram_common::Unbound for UnboundDatagram {
         let config = BindPortConfig::new(*endpoint, options.can_reuse);
         let reservation = network_registry().bind(config, device.map(|iface| iface.index()), options.reuse_port, self.owner.clone())?;
         let bound_socket = UdpSocket::new_bind(reservation, DatagramObserver::new(pollee.clone()));
+        bound_socket.set_inode(self.inode);
 
         Ok(BoundDatagram::new(bound_socket))
     }

@@ -59,6 +59,10 @@ impl<E: Ext> PollableIface<E> {
         }
     }
 
+    pub(super) fn reassembly_state(&self, now: i64) -> (usize, usize) {
+        self.reassembly.pending(now)
+    }
+
     pub(super) fn as_mut(&mut self) -> PollableIfaceMut<'_, E> {
         PollableIfaceMut {
             context: self.interface.context(),

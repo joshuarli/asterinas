@@ -41,6 +41,12 @@ impl Ipv4Reassembly {
         Self { packets: BTreeMap::new() }
     }
 
+    pub(in crate::iface) fn pending(&self, now: i64) -> (usize, usize) {
+        self.packets.values()
+            .filter(|packet| now.saturating_sub(packet.created_at) < REASSEMBLY_TIMEOUT_MS)
+            .fold((0, 0), |(count, bytes), packet| (count + 1, bytes + packet.received_len))
+    }
+
     pub(in crate::iface) fn receive(
         &mut self,
         packet: RxPacket<NetworkLayer>,

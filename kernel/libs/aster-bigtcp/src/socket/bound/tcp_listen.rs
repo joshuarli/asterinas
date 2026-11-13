@@ -84,7 +84,7 @@ impl<E: Ext> TcpListenerBg<E> {
             smoltcp::wire::IpAddress::Ipv6(_) => core::net::Ipv6Addr::UNSPECIFIED.into(),
         }, 0);
         TcpSocketSnapshot { family: self.inner.diagnostic.family(), local, remote, state: TcpState::Listen, read_queue, write_queue,
-            cookie, inode, uid, shutdown: 0 }
+            cookie, inode, uid, shutdown: 0, orphan: self.inner.diagnostic.orphaned() }
     }
 
     pub(crate) fn mark(&self) -> u32 { self.inner.mark.load(Ordering::Acquire) }

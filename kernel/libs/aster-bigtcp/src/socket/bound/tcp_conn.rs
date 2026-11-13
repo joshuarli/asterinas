@@ -311,7 +311,7 @@ impl<E: Ext> TcpConnectionBg<E> {
         let (cookie, inode, uid) = self.inner.diagnostic.values();
         TcpSocketSnapshot { family: self.inner.diagnostic.family(), local: self.inner.connection_key.local_endpoint(),
             remote: self.inner.connection_key.remote_endpoint(), state, read_queue, write_queue,
-            cookie, inode, uid, shutdown }
+            cookie, inode, uid, shutdown, orphan: self.inner.diagnostic.orphaned() }
     }
 }
 
