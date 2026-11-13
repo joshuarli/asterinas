@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_rights::{Dup, Read, TRights, Write};
+use aster_rights::{Dup, Read, ReadWriteOp, TRights, Write};
 use aster_rights_proc::require;
 use ostd::sync::{PreemptDisabled, RwLockReadGuard, RwLockWriteGuard};
 
@@ -11,6 +11,11 @@ use super::{
 use crate::prelude::*;
 
 impl<R: TRights> Credentials<R> {
+    #[require(R > Write)]
+    pub(in crate::process) fn publish_identity_from(&self, prepared: &Credentials<ReadWriteOp>) {
+        self.0.publish_identity_from(&prepared.0);
+    }
+
     #[require(R > Read)]
     pub(crate) fn identity(&self) -> CredentialIdentity {
         CredentialIdentity {

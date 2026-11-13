@@ -218,11 +218,14 @@ fn do_execve_no_return(
     let (vmar_guard, old_vmar) = activate_vmar(ctx, new_vmar);
     let credentials = ctx.credentials_mut();
     let previous = credentials.identity();
-    apply_exec_cred(process, &credentials, exec_cred)?;
-    if previous.requires_dumpability_reset(credentials.identity()) {
+    let prepared = Credentials::<ReadWriteOp>::new_from(&credentials);
+    apply_exec_cred(process, &prepared, exec_cred)?;
+    if previous.requires_dumpability_reset(prepared.identity()) {
         vmar_guard.unwrap().process_vm().set_dumpable(false);
         process.clear_parent_death_signal();
     }
+    credentials.set_keep_capabilities(prepared.keep_capabilities())?;
+    credentials.publish_identity_from(&prepared);
     drop(vmar_guard);
     drop(old_vmar);
 

@@ -27,6 +27,7 @@ impl PosixThread {
         }
 
         lsm_hooks::on_alien_access(lsm_hooks::AlienAccessContext::new(accessor, self, mode))?;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
         if vmar_guard.as_ref().is_some_and(|vmar| !vmar.process_vm().is_dumpable()) {
             let process = self.process();
             let user_ns = process.user_ns().lock();

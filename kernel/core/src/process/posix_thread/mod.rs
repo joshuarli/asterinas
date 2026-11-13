@@ -396,11 +396,13 @@ impl ContextPthreadAdminApi for Context<'_> {
         let vmar_guard = self.process.lock_vmar();
         let credentials = self.credentials_mut();
         let previous = credentials.identity();
-        let result = update(&credentials);
-        if previous.requires_dumpability_reset(credentials.identity()) {
+        let prepared = Credentials::<ReadWriteOp>::new_from(&credentials);
+        let result = update(&prepared);
+        if previous.requires_dumpability_reset(prepared.identity()) {
             vmar_guard.unwrap().process_vm().set_dumpable(false);
             self.process.clear_parent_death_signal();
         }
+        credentials.publish_identity_from(&prepared);
         result
     }
 }

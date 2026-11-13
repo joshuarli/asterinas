@@ -107,7 +107,7 @@ static void lifecycle(void)
     stack = mmap(NULL, stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0); CHECK(stack != MAP_FAILED);
     sigset_t old; block_alarm(&old); p = clone(shared_child, (char *)stack + stack_size, CLONE_VM | SIGCHLD, NULL); if (p > 0) child_pid = p; CHECK(sigprocmask(SIG_SETMASK, &old, NULL) == 0); CHECK(p > 0); reap(p); check_dump(1); CHECK(munmap(stack, stack_size) == 0); stack = NULL;
     dump(0); errno = 0; execl("/definitely-not-a-dumpability-executable", "missing", NULL); CHECK(errno == ENOENT); check_dump(0);
-    p = spawn(); if (!p) { execl("/proc/self/exe", "dumpability", "--exec-check", "1", "-1", "-1", NULL); fail("ordinary exec", __LINE__); } reap(p); check_dump(0);
+    p = spawn(); if (!p) { CHECK(prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) == 0); execl("/proc/self/exe", "dumpability", "--exec-check", "1", "-1", "-1", "keep-reset", NULL); fail("ordinary exec", __LINE__); } reap(p); check_dump(0);
 }
 static void identities(void)
 {
@@ -201,7 +201,7 @@ static void proc_maps(void)
 }
 int main(int argc, char **argv)
 {
-    if ((argc == 5 || argc == 6) && strcmp(argv[1], "--exec-check") == 0) { check_dump(atoi(argv[2])); if (atoi(argv[3]) >= 0) CHECK(geteuid() == (uid_t)atoi(argv[3])); if (atoi(argv[4]) >= 0) CHECK(getegid() == (gid_t)atoi(argv[4])); if (argc == 6 && strcmp(argv[5], "cap") == 0) { struct __user_cap_data_struct d[2] = {{0}}; caps(d, 0); CHECK((d[0].permitted & (1u << CAP_NET_BIND_SERVICE)) && (d[0].effective & (1u << CAP_NET_BIND_SERVICE))); } return 0; }
+    if ((argc == 5 || argc == 6) && strcmp(argv[1], "--exec-check") == 0) { check_dump(atoi(argv[2])); if (atoi(argv[3]) >= 0) CHECK(geteuid() == (uid_t)atoi(argv[3])); if (atoi(argv[4]) >= 0) CHECK(getegid() == (gid_t)atoi(argv[4])); if (argc == 6 && strcmp(argv[5], "keep-reset") == 0) CHECK(prctl(PR_GET_KEEPCAPS, 0, 0, 0, 0) == 0); if (argc == 6 && strcmp(argv[5], "cap") == 0) { struct __user_cap_data_struct d[2] = {{0}}; caps(d, 0); CHECK((d[0].permitted & (1u << CAP_NET_BIND_SERVICE)) && (d[0].effective & (1u << CAP_NET_BIND_SERVICE))); } return 0; }
     owner = getpid(); CHECK(signal(SIGPIPE, SIG_IGN) != SIG_ERR); struct sigaction sa = {.sa_handler = timeout}; sigemptyset(&sa.sa_mask); CHECK(sigaction(SIGALRM, &sa, NULL) == 0); alarm(60);
     lifecycle(); if (geteuid() == 0) { identities(); exec_fixtures(); } else puts("dumpability: root-only credential and exec cohort not run"); proc_maps(); cleanup(); alarm(0); puts("DUMPABILITY_PASS"); return 0;
 }

@@ -98,6 +98,21 @@ impl ExecCred {
 }
 
 impl Credentials_ {
+    pub(super) fn publish_identity_from(&self, prepared: &Self) {
+        core::sync::atomic::fence(Ordering::Release);
+        self.ruid.store(prepared.ruid(), Ordering::Relaxed);
+        self.euid.store(prepared.euid(), Ordering::Relaxed);
+        self.suid.store(prepared.suid(), Ordering::Relaxed);
+        self.fsuid.store(prepared.fsuid(), Ordering::Relaxed);
+        self.rgid.store(prepared.rgid(), Ordering::Relaxed);
+        self.egid.store(prepared.egid(), Ordering::Relaxed);
+        self.sgid.store(prepared.sgid(), Ordering::Relaxed);
+        self.fsgid.store(prepared.fsgid(), Ordering::Relaxed);
+        self.permitted_capset.store(prepared.permitted_capset(), Ordering::Relaxed);
+        self.effective_capset.store(prepared.effective_capset(), Ordering::Relaxed);
+        self.ambient_capset.store(prepared.ambient_capset(), Ordering::Relaxed);
+    }
+
     /// Creates a new `Credentials_`.
     ///
     /// The real, effective, saved set, and filesystem IDs will be initialized to the same ID.
