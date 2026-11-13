@@ -221,6 +221,8 @@ fn do_execve_no_return(
     // Set up the CPU context.
     set_cpu_context(thread_local, user_context, elf_load_info);
 
+    process.mark_executed();
+
     // If this was a vfork child, reset vfork-specific state.
     reset_vfork_child(process);
 

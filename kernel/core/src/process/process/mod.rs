@@ -92,6 +92,7 @@ pub struct Process {
     pub(super) pidfile_pollee: Pollee,
 
     // Mutable Part
+    has_executed: AtomicBool,
     /// The threads
     tasks: Mutex<TaskSet>,
     /// Process status
@@ -239,6 +240,7 @@ impl Process {
 
             Self {
                 pid,
+                has_executed: AtomicBool::new(false),
                 vmar: Mutex::new(Some(vmar)),
                 children_wait_queue,
                 pidfile_pollee: Pollee::new(),
@@ -282,6 +284,11 @@ impl Process {
 
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+
+    pub(super) fn mark_executed(&self) {
+        let _pid_table = pid_table::pid_table_mut();
+        self.has_executed.store(true, Ordering::Relaxed);
     }
 
     /// Gets the profiling clock of the process.
@@ -454,6 +461,8 @@ impl Process {
     ///  * The process specified by `pid` does not exist;
     ///  * The process specified by `pid` is neither `self` or a child process of `self`.
     ///
+    /// This method will return `EACCES` if the child has executed a new program.
+    ///
     /// This method will return `EPERM` in following cases:
     ///  * The process is not in the same session as `self`;
     ///  * The process is a session leader, but the given PGID is not the process's PID/PGID;
@@ -471,18 +480,24 @@ impl Process {
             // There is no need to check if the session is the same in this case.
             None
         } else if self.pid == process.parent().pid() {
-            // FIXME: If the child process has called `execve`, we should fail with `EACCESS`.
-
-            // Immediately release the `self.process_group` lock to avoid deadlocks. Race
-            // conditions don't matter because this is used for comparison purposes only.
-            Some(
-                self.process_group
-                    .lock()
-                    .as_ref()
-                    .unwrap()
-                    .session()
-                    .clone(),
-            )
+            let session = self.process_group.lock().as_ref().unwrap().session().clone();
+            let child_session = process
+                .process_group
+                .lock()
+                .as_ref()
+                .unwrap()
+                .session()
+                .clone();
+            if !Arc::ptr_eq(&session, &child_session) {
+                return_errno_with_message!(
+                    Errno::EPERM,
+                    "the process belongs to a different session"
+                );
+            }
+            if process.has_executed.load(Ordering::Relaxed) {
+                return_errno_with_message!(Errno::EACCES, "the child has executed a new program");
+            }
+            Some(session)
         } else {
             return_errno_with_message!(
                 Errno::ESRCH,
