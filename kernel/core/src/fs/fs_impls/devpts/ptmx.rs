@@ -9,7 +9,7 @@ use crate::{
     device::{Device, DeviceType},
     fs::{
         devtmpfs::DevtmpfsNodeMeta,
-        file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, StatusFlags, mkmod},
+        file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, StatusFlags},
         vfs::{
             file_system::{FileSystem, SuperBlock},
             inode::{Extension, FileOps, Inode, Metadata},
@@ -39,11 +39,11 @@ pub(crate) struct Ptmx {
 struct Inner(Weak<DevPts>);
 
 impl Ptmx {
-    pub(crate) fn new(fs: Weak<DevPts>, sb: &SuperBlock) -> Arc<Self> {
+    pub(crate) fn new(fs: Weak<DevPts>, sb: &SuperBlock, mode: InodeMode) -> Arc<Self> {
         let inner = Inner(fs.clone());
         let metadata = Metadata::new_device(
             PTMX_INO,
-            mkmod!(a+rw),
+            mode,
             BLOCK_SIZE,
             &inner,
             sb.container_dev_id,

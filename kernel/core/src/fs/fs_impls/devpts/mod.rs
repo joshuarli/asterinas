@@ -25,7 +25,8 @@ use crate::{
         },
     },
     prelude::*,
-    process::{Gid, Uid},
+    process::{Gid, Uid, posix_thread::AsPosixThread},
+    thread::Thread,
 };
 
 mod ptmx;
@@ -54,24 +55,29 @@ pub(crate) struct DevPts {
     index_alloc: Mutex<IdAlloc>,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     this: Weak<Self>,
+    options: MountOptions,
 }
 
 impl DevPts {
-    pub(crate) fn new() -> Arc<Self> {
+    fn new(options: MountOptions) -> Arc<Self> {
         let anon_device_id = AnonDeviceId::acquire().expect("no device ID is available for devpts");
         let sb = SuperBlock::new(DEVPTS_MAGIC, BLOCK_SIZE, NAME_MAX, anon_device_id.id());
         Arc::new_cyclic(|weak_self| Self {
             _anon_device_id: anon_device_id,
             sb: sb.clone(),
-            root: RootInode::new(weak_self.clone(), &sb),
+            root: RootInode::new(weak_self.clone(), &sb, options.ptmx_mode),
             index_alloc: Mutex::new(IdAlloc::with_capacity(MAX_PTY_NUM)),
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             this: weak_self.clone(),
+            options,
         })
     }
 
     /// Create the master and slave pair.
     fn create_master_slave_pair(&self) -> Result<(Box<PtyMaster>, Arc<PtySlaveInode>)> {
+        let thread = Thread::current().ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let posix_thread = thread.as_posix_thread().ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let credentials = posix_thread.credentials();
         let index = self
             .index_alloc
             .lock()
@@ -80,7 +86,10 @@ impl DevPts {
 
         let (master, slave) = crate::device::new_pty_pair(index as u32, self.root.ptmx.clone())?;
 
-        let slave_inode = PtySlaveInode::new(slave, self.this.clone());
+        let slave_inode = PtySlaveInode::new(
+            slave, self.this.clone(), self.options.mode, credentials.fsuid(),
+            self.options.gid.unwrap_or_else(|| credentials.fsgid()),
+        );
         self.root
             .slaves
             .write()
@@ -125,6 +134,65 @@ impl FileSystem for DevPts {
     }
 }
 
+#[derive(Clone, Copy)]
+struct MountOptions {
+    mode: InodeMode,
+    ptmx_mode: InodeMode,
+    gid: Option<Gid>,
+}
+
+impl MountOptions {
+    fn parse(args: Option<&str>) -> Result<Self> {
+        let mut options = Self {
+            mode: InodeMode::from_bits_truncate(0o600),
+            ptmx_mode: InodeMode::empty(),
+            gid: None,
+        };
+        for option in args.unwrap_or("").split(',') {
+            let (name, value) = option.split_once('=').unwrap_or((option, ""));
+            match name {
+                "mode" | "ptmxmode" => {
+                    let bits = parse_mount_u32(value, 8)?;
+                    let mode = InodeMode::from_bits_truncate((bits & 0o7777) as u16);
+                    if name == "mode" {
+                        options.mode = mode;
+                    } else {
+                        options.ptmx_mode = mode;
+                    }
+                }
+                "gid" => {
+                    let gid = parse_mount_u32(value, 0)?;
+                    if gid == u32::MAX {
+                        return_errno_with_message!(Errno::EINVAL, "invalid devpts gid");
+                    }
+                    options.gid = Some(Gid::from(gid));
+                }
+                _ => {}
+            }
+        }
+        Ok(options)
+    }
+}
+
+fn parse_mount_u32(value: &str, base: u32) -> Result<u32> {
+    let value = value.strip_suffix('\n').unwrap_or(value);
+    let value = value.strip_prefix('+').unwrap_or(value);
+    let (digits, radix) = if base != 0 {
+        (value, base)
+    } else if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        (hex, 16)
+    } else if value.len() > 1 && value.starts_with('0') {
+        (&value[1..], 8)
+    } else {
+        (value, 10)
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return_errno_with_message!(Errno::EINVAL, "invalid devpts mount option");
+    }
+    u32::from_str_radix(digits, radix)
+        .map_err(|_| Error::with_message(Errno::EINVAL, "invalid devpts mount option"))
+}
+
 struct DevPtsType;
 
 impl FsType for DevPtsType {
@@ -138,8 +206,8 @@ impl FsType for DevPtsType {
         FsProperties::empty()
     }
 
-    fn create(&self, _fs_creation_ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
-        Ok(DevPts::new())
+    fn create(&self, fs_creation_ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
+        Ok(DevPts::new(MountOptions::parse(fs_creation_ctx.args())?))
     }
 
     fn sysnode(&self) -> Option<Arc<dyn aster_systree::SysNode>> {
@@ -160,9 +228,9 @@ struct RootInode {
 }
 
 impl RootInode {
-    pub(crate) fn new(fs: Weak<DevPts>, sb: &SuperBlock) -> Arc<Self> {
+    pub(crate) fn new(fs: Weak<DevPts>, sb: &SuperBlock, ptmx_mode: InodeMode) -> Arc<Self> {
         Arc::new(Self {
-            ptmx: Ptmx::new(fs.clone(), sb),
+            ptmx: Ptmx::new(fs.clone(), sb, ptmx_mode),
             slaves: RwLock::new(SlotVec::new()),
             metadata: RwLock::new(Metadata::new_dir(
                 ROOT_INO,

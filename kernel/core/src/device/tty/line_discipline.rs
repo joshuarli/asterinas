@@ -254,13 +254,16 @@ impl LineDiscipline {
     pub(crate) fn set_termios(&mut self, termios: CTermios) {
         let termios2 = CTermios2::new(
             termios,
-            CTermiosSpeeds::from_termios(&termios, *self.termios.speeds()),
+            *self.termios.speeds(),
         );
         self.set_termios2(termios2);
     }
 
     pub(crate) fn set_termios2(&mut self, termios2: CTermios2) {
-        self.termios = termios2;
+        self.termios = CTermios2::new(
+            *termios2,
+            CTermiosSpeeds::from_termios(&termios2, *termios2.speeds()),
+        );
 
         // When switching to raw mode, any pending input bytes should become immediately available.
         // Note that `unwrap()` below won't fail because we checked `is_full()` in `push_char`.
