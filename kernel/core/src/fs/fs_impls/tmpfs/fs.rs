@@ -15,7 +15,7 @@ use crate::{
     process::{Uid, Gid},
 };
 
-const TMPFS_MAGIC: u64 = 0x0102_1994;
+pub(crate) const TMPFS_MAGIC: u64 = 0x0102_1994;
 
 /// The temporary file system (tmpfs) structure.
 //

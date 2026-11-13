@@ -114,7 +114,7 @@ fn do_sys_mmap(
             // Anonymous shared mappings should share the same memory pages.
             if option.typ().is_shared() {
                 let shared_vmo = {
-                    let vmo_options = VmoOptions::new(len);
+                    let vmo_options = VmoOptions::new_shared(len);
                     vmo_options.alloc()?
                 };
                 options = options.vmo(shared_vmo);

@@ -12,7 +12,7 @@ use super::{Vmo, VmoFlags, WritableMappingStatus};
 use crate::{
     prelude::*,
     vm::{
-        page_cache::{CachePage, CachePageMeta, PageCacheBackend},
+        page_cache::{CachePage, CachePageMeta, PageCacheBackend, PageKind, cache_page::PageState},
         vmar::Rmap,
     },
 };
@@ -42,6 +42,7 @@ use crate::{
 /// ```
 pub(crate) struct VmoOptions {
     size: usize,
+    kind: PageKind,
     flags: VmoFlags,
     backend: Option<Weak<dyn PageCacheBackend>>,
 }
@@ -58,6 +59,7 @@ impl VmoOptions {
     pub(crate) fn new(size: usize) -> Self {
         Self {
             size,
+            kind: PageKind::Anonymous,
             flags: VmoFlags::empty(),
             backend: None,
         }
@@ -65,12 +67,26 @@ impl VmoOptions {
 
     /// Creates options for an anonymous resizable VMO.
     pub(crate) fn new_anon(size: usize) -> Self {
-        Self::new(size).flags(VmoFlags::RESIZABLE)
+        Self::new(size)
+            .kind(PageKind::FileCache)
+            .flags(VmoFlags::RESIZABLE)
     }
 
     /// Creates options for a page-cache VMO with a backend.
     pub(crate) fn new_page_cache(size: usize, backend: Weak<dyn PageCacheBackend>) -> Self {
-        Self::new(size).flags(VmoFlags::RESIZABLE).backend(backend)
+        Self::new(size)
+            .kind(PageKind::FileCache)
+            .flags(VmoFlags::RESIZABLE)
+            .backend(backend)
+    }
+
+    pub(crate) fn new_shared(size: usize) -> Self {
+        Self::new(size).kind(PageKind::Shared)
+    }
+
+    fn kind(mut self, kind: PageKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Sets the VMO flags.
@@ -97,9 +113,9 @@ impl VmoOptions {
             size,
             flags,
             backend,
-            ..
+            kind,
         } = self;
-        let vmo = alloc_vmo(size, flags, backend)?;
+        let vmo = alloc_vmo(size, flags, backend, kind)?;
         Ok(Arc::new(vmo))
     }
 }
@@ -108,14 +124,16 @@ fn alloc_vmo(
     size: usize,
     flags: VmoFlags,
     backend: Option<Weak<dyn PageCacheBackend>>,
+    kind: PageKind,
 ) -> Result<Vmo> {
     let size = size.align_up(PAGE_SIZE);
-    let pages = committed_pages_if_continuous(flags, size)?;
+    let pages = committed_pages_if_continuous(flags, size, kind)?;
     let writable_mapping_status = WritableMappingStatus::default();
     let rmap = Rmap::new();
     Ok(Vmo {
         backend,
         flags,
+        kind,
         pages,
         size: AtomicUsize::new(size),
         writable_mapping_status,
@@ -123,12 +141,16 @@ fn alloc_vmo(
     })
 }
 
-fn committed_pages_if_continuous(flags: VmoFlags, size: usize) -> Result<XArray<CachePage>> {
+fn committed_pages_if_continuous(
+    flags: VmoFlags,
+    size: usize,
+    kind: PageKind,
+) -> Result<XArray<CachePage>> {
     if flags.contains(VmoFlags::CONTIGUOUS) {
         // if the vmo is continuous, we need to allocate frames for the vmo
         let frames_num = size / PAGE_SIZE;
         let segment: Segment<CachePageMeta> = FrameAllocOptions::new()
-            .alloc_segment_with(frames_num, |_| CachePageMeta::default())?;
+            .alloc_segment_with(frames_num, |_| CachePageMeta::new(kind, PageState::Uninit))?;
         let committed_pages = XArray::new();
         let mut locked_pages = committed_pages.lock();
         let mut cursor = locked_pages.cursor_mut(0);
@@ -149,6 +171,35 @@ mod test {
     use ostd::{mm::VmIo, prelude::*};
 
     use super::*;
+
+    #[ktest]
+    fn resident_page_lifetime() {
+        use crate::vm::page_cache::{CachePageExt, PageCache, resident_page_counts};
+
+        assert_eq!(VmoOptions::new(PAGE_SIZE).kind, PageKind::Anonymous);
+        assert_eq!(VmoOptions::new_anon(PAGE_SIZE).kind, PageKind::FileCache);
+        assert_eq!(VmoOptions::new_shared(PAGE_SIZE).kind, PageKind::Shared);
+        let before = resident_page_counts();
+        let mut cache = PageCache::new_shared(PAGE_SIZE).unwrap();
+        let page = cache.as_vmo().commit_on_anonymous(0).unwrap();
+        assert_eq!(resident_page_counts(), (before.0, before.1 + 1));
+        let clone = page.clone();
+        cache.resize(0, PAGE_SIZE).unwrap();
+        drop(cache);
+        drop(page);
+        assert_eq!(resident_page_counts(), (before.0, before.1 + 1));
+        drop(clone);
+        assert_eq!(resident_page_counts(), before);
+
+        let file = CachePage::alloc_zero(PageKind::FileCache).unwrap();
+        assert_eq!(resident_page_counts(), (before.0 + 1, before.1));
+        drop(file);
+        let anonymous = CachePage::alloc_zero(PageKind::Anonymous).unwrap();
+        assert_eq!(resident_page_counts(), before);
+        drop(anonymous);
+        assert!(committed_pages_if_continuous(VmoFlags::CONTIGUOUS, 0, PageKind::Shared).is_err());
+        assert_eq!(resident_page_counts(), before);
+    }
 
     #[ktest]
     fn alloc_vmo() {

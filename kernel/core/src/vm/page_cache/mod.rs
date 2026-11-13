@@ -124,7 +124,9 @@ mod cache_page;
 mod tests;
 mod vmo;
 
-pub(crate) use cache_page::{CachePage, CachePageExt, CachePageMeta, LockedCachePage};
+pub(crate) use cache_page::{
+    CachePage, CachePageExt, CachePageMeta, LockedCachePage, PageKind, resident_page_counts,
+};
 pub use vmo::Vmo;
 pub(crate) use vmo::{VmoCommitError, VmoFlags, VmoMapMode, VmoOptions};
 
@@ -176,6 +178,12 @@ impl PageCache {
     /// bytes.
     pub(crate) fn new_anon(size: usize) -> Result<Self> {
         Ok(Self(VmoOptions::new_anon(size).alloc()?))
+    }
+
+    pub(crate) fn new_shared(size: usize) -> Result<Self> {
+        Ok(Self(
+            VmoOptions::new_shared(size).flags(VmoFlags::RESIZABLE).alloc()?,
+        ))
     }
 
     /// Returns the wrapped [`Vmo`].

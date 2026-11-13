@@ -4,6 +4,9 @@
 //! about the memory statistics in the entire system. The definition of the
 //! fields are similar to that of Linux's but there exist differences.
 //!
+//! `Buffers` is zero because block I/O has no retained block-device buffer cache.
+//! `SReclaimable` is zero because the slab allocator has no reclaim mechanism.
+//!
 //! Reference: <https://man7.org/linux/man-pages/man5/proc_meminfo.5.html>
 
 use aster_util::printer::VmPrinter;
@@ -31,6 +34,9 @@ impl MemInfoFileOps {
 
 impl ProcFileOps for MemInfoFileOps {
     fn read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
+        let (file_pages, shared_pages) = crate::vm::page_cache::resident_page_counts();
+        let cached = (file_pages + shared_pages) * PAGE_SIZE / 1024;
+        let shmem = shared_pages * PAGE_SIZE / 1024;
         let mut printer = VmPrinter::new_skip(writer, offset);
 
         // The total amount of physical memory available to the system.
@@ -49,6 +55,10 @@ impl ProcFileOps for MemInfoFileOps {
         writeln!(printer, "MemTotal:\t{} kB", total)?;
         writeln!(printer, "MemFree:\t{} kB", available)?;
         writeln!(printer, "MemAvailable:\t{} kB", available)?;
+        writeln!(printer, "Buffers:\t0 kB")?;
+        writeln!(printer, "Cached:\t{} kB", cached)?;
+        writeln!(printer, "Shmem:\t{} kB", shmem)?;
+        writeln!(printer, "SReclaimable:\t0 kB")?;
         writeln!(printer, "SwapTotal:\t0 kB")?;
         writeln!(printer, "SwapFree:\t0 kB")?;
 

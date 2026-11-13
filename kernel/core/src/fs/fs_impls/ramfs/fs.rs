@@ -216,8 +216,13 @@ impl Inner {
         Self::Dir(RwLock::new(DirEntry::new(this, parent)))
     }
 
-    pub(self) fn new_file() -> Self {
-        Self::File(Mutex::new(PageCache::new_anon(0).unwrap()))
+    pub(self) fn new_file(fs: &RamFs) -> Self {
+        let cache = if fs.sb.magic == crate::fs::tmpfs::TMPFS_MAGIC {
+            PageCache::new_shared(0)
+        } else {
+            PageCache::new_anon(0)
+        };
+        Self::File(Mutex::new(cache.unwrap()))
     }
 
     pub(self) fn new_symlink(target: &[u8]) -> Self {
@@ -241,7 +246,7 @@ impl Inner {
     }
 
     pub(self) fn new_file_in_memfd() -> Self {
-        Self::File(Mutex::new(PageCache::new_anon(0).unwrap()))
+        Self::File(Mutex::new(PageCache::new_shared(0).unwrap()))
     }
 
     fn as_direntry(&self) -> Option<&RwLock<DirEntry>> {
@@ -567,7 +572,7 @@ impl RamInode {
         to_be_revalidated: ToBeRevalidated,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| RamInode {
-            inner: Inner::new_file(),
+            inner: Inner::new_file(fs),
             metadata: SpinLock::new(InodeMeta::new(mode, uid, gid)),
             ino: fs.alloc_id(),
             typ: InodeType::File,
@@ -591,7 +596,7 @@ impl RamInode {
         to_be_revalidated: ToBeRevalidated,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| RamInode {
-            inner: Inner::new_file(),
+            inner: Inner::new_file(fs),
             metadata: SpinLock::new(InodeMeta::new_tmpfile(mode, uid, gid)),
             ino: fs.alloc_id(),
             typ: InodeType::File,

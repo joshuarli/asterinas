@@ -3,7 +3,7 @@
 use core::{
     borrow::Borrow,
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
@@ -69,11 +69,29 @@ impl PageState {
 /// A page in the page cache.
 pub(crate) type CachePage = Frame<CachePageMeta>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PageKind {
+    Anonymous,
+    FileCache,
+    Shared,
+}
+
+static FILE_CACHE_PAGES: AtomicUsize = AtomicUsize::new(0);
+static SHARED_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn resident_page_counts() -> (usize, usize) {
+    (
+        FILE_CACHE_PAGES.load(Ordering::Relaxed),
+        SHARED_PAGES.load(Ordering::Relaxed),
+    )
+}
+
 /// Metadata for a page in the page cache.
 #[derive(Debug)]
 pub(crate) struct CachePageMeta {
     /// The current state of the page (uninit, up-to-date, or dirty).
     state: AtomicPageState,
+    kind: PageKind,
     /// This bit acts as a mutex for the corresponding page.
     ///
     /// When this bit is set, the holder has the exclusive right to perform critical
@@ -91,12 +109,36 @@ pub(crate) struct CachePageMeta {
     // TODO: Add a reverse mapping from the page to VMO for eviction.
 }
 
-impl Default for CachePageMeta {
-    fn default() -> Self {
+impl CachePageMeta {
+    pub(super) fn new(kind: PageKind, state: PageState) -> Self {
+        match kind {
+            PageKind::Anonymous => {}
+            PageKind::FileCache => {
+                FILE_CACHE_PAGES.fetch_add(1, Ordering::Relaxed);
+            }
+            PageKind::Shared => {
+                SHARED_PAGES.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         Self {
-            state: AtomicPageState::new(PageState::Uninit),
+            state: AtomicPageState::new(state),
+            kind,
             lock: AtomicBool::new(false),
             is_writing_back: AtomicBool::new(false),
+        }
+    }
+}
+
+impl Drop for CachePageMeta {
+    fn drop(&mut self) {
+        match self.kind {
+            PageKind::Anonymous => {}
+            PageKind::FileCache => {
+                FILE_CACHE_PAGES.fetch_sub(1, Ordering::Relaxed);
+            }
+            PageKind::Shared => {
+                SHARED_PAGES.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -152,8 +194,8 @@ pub(crate) trait CachePageExt: Sized {
     }
 
     /// Allocates a new cache page which content and state are uninitialized.
-    fn alloc_uninit() -> Result<CachePage> {
-        let meta = CachePageMeta::default();
+    fn alloc_uninit(kind: PageKind) -> Result<CachePage> {
+        let meta = CachePageMeta::new(kind, PageState::Uninit);
         let page = FrameAllocOptions::new()
             .zeroed(false)
             .alloc_frame_with(meta)?;
@@ -161,11 +203,8 @@ pub(crate) trait CachePageExt: Sized {
     }
 
     /// Allocates a new zeroed cache page with the up-to-date state.
-    fn alloc_zero() -> Result<CachePage> {
-        let meta = CachePageMeta {
-            state: AtomicPageState::new(PageState::UpToDate),
-            ..Default::default()
-        };
+    fn alloc_zero(kind: PageKind) -> Result<CachePage> {
+        let meta = CachePageMeta::new(kind, PageState::UpToDate);
         let page = FrameAllocOptions::new()
             .zeroed(true)
             .alloc_frame_with(meta)?;

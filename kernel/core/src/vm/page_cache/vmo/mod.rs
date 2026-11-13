@@ -32,7 +32,7 @@ use xarray::{Cursor, LockedXArray, XArray};
 use crate::{
     prelude::*,
     vm::{
-        page_cache::{CachePage, CachePageExt, PageCacheBackend, PageRun, cache_page::PageState},
+        page_cache::{CachePage, CachePageExt, PageCacheBackend, PageKind, PageRun, cache_page::PageState},
         vmar::Rmap,
     },
 };
@@ -121,6 +121,7 @@ pub struct Vmo {
     pub(super) backend: Option<Weak<dyn PageCacheBackend>>,
     /// Flags
     pub(super) flags: VmoFlags,
+    pub(super) kind: PageKind,
     /// The virtual pages where the VMO resides.
     pub(super) pages: XArray<CachePage>,
     /// The size of the VMO.
@@ -317,7 +318,7 @@ impl Vmo {
             return Ok(page.clone());
         }
 
-        let new_page = CachePage::alloc_zero()?;
+        let new_page = CachePage::alloc_zero(self.kind)?;
         cursor.store(new_page.clone());
         Ok(new_page)
     }
@@ -1094,7 +1095,7 @@ impl<'a> BackedVmo<'a> {
         };
 
         // The page is within the file bounds - need to allocate a cache page.
-        let uninit_page = CachePage::alloc_uninit()?;
+        let uninit_page = CachePage::alloc_uninit(self.vmo.kind)?;
         cursor.store(uninit_page.clone());
         drop(locked_pages);
 
