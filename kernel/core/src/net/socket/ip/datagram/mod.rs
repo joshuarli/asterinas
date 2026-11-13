@@ -586,8 +586,7 @@ impl Socket for DatagramSocket {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
-        // TODO: Deal with flags
-        if !flags.is_all_supported() {
+        if !(flags & !RecvFlags::MSG_DONTWAIT).is_all_supported() {
             warn!("unsupported flags: {:?}", flags);
         }
 
@@ -595,10 +594,13 @@ impl Socket for DatagramSocket {
             return self.recv_error_queue(writer, flags);
         }
 
-        let (output, meta, ifindex) =
+        let (output, meta, ifindex) = if flags.contains(RecvFlags::MSG_DONTWAIT) {
+            self.try_recv(writer, flags)?
+        } else {
             self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
                 self.try_recv(writer, flags)
-            })?;
+            })?
+        };
 
         let control_messages = self.received_control_messages(&meta, ifindex);
         let message_header = MessageHeader::new(Some(meta.remote.into()), control_messages);
