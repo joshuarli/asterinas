@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::sync::atomic::Ordering;
+
 use aster_util::printer::VmPrinter;
+use ostd::{cpu::num_cpus, util::id_set::Id};
 
 use super::TidDirOps;
 use crate::{
@@ -224,6 +227,35 @@ impl ProcFileOps for StatusFileOps {
             "NoNewPrivs:\t{}",
             u8::from(credentials.no_new_privs())
         )?;
+
+        let affinity = thread.atomic_cpu_affinity().load(Ordering::Relaxed);
+        let mut mask = vec![0u32; num_cpus().div_ceil(u32::BITS as usize)];
+        for cpu in affinity.iter() {
+            let id = cpu.as_usize();
+            mask[id / u32::BITS as usize] |= 1 << (id % u32::BITS as usize);
+        }
+        write!(printer, "Cpus_allowed:\t")?;
+        for (index, part) in mask.iter().rev().enumerate() {
+            if index != 0 {
+                write!(printer, ",")?;
+            }
+            write!(printer, "{:08x}", part)?;
+        }
+        write!(printer, "\nCpus_allowed_list:\t")?;
+        let mut cpus = affinity.iter().map(|cpu| cpu.as_usize()).peekable();
+        let mut separator = "";
+        while let Some(first) = cpus.next() {
+            let mut last = first;
+            while cpus.peek().is_some_and(|next| *next == last + 1) {
+                last = cpus.next().unwrap();
+            }
+            write!(printer, "{}{}", separator, first)?;
+            if last != first {
+                write!(printer, "-{}", last)?;
+            }
+            separator = ",";
+        }
+        writeln!(printer)?;
 
         Ok(printer.bytes_written())
     }
