@@ -43,7 +43,15 @@ fn calibrate() {
     let clock = CLOCK.get().unwrap();
     let cycles = clock.read_cycles();
     clock.calibrate(cycles);
-    START_TIME.call_once(|| crate::RTC_DRIVER.get().unwrap().read_rtc());
+    START_TIME.call_once(|| {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(time) = ostd::arch::kernel::wall_time_at_tsc(cycles)
+            .and_then(crate::unix_time_to_system_time)
+        {
+            return time;
+        }
+        crate::RTC_DRIVER.get().unwrap().read_rtc()
+    });
 }
 
 /// Reads an `Instant` of the TSC clocksource.

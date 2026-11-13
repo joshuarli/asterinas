@@ -51,7 +51,7 @@ pub struct SystemTime {
     pub nanos: u64,
 }
 
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "riscv64", target_arch = "aarch64"))]
 impl From<chrono::NaiveDateTime> for SystemTime {
     fn from(time: chrono::NaiveDateTime) -> Self {
         use chrono::{Datelike, Timelike};
@@ -155,4 +155,10 @@ pub fn adjust_wall_clock(
         .unwrap()
         .lock()
         .adjust(raw_ns(), request, privileged)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn unix_time_to_system_time(time: Duration) -> Option<SystemTime> {
+    chrono::DateTime::from_timestamp(i64::try_from(time.as_secs()).ok()?, time.subsec_nanos())
+        .map(|time| time.naive_utc().into())
 }

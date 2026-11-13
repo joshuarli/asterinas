@@ -6,5 +6,6 @@ SUBDIRS := \
 	gettimeofday \
 	itimer \
 	timerfd \
+	wall_clock \
 
 include ../common/Makefile

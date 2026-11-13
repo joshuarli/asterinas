@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::{Ordering, fence};
+use core::{sync::atomic::{Ordering, fence}, time::Duration};
 
 use spin::Once;
 use x86::msr;
@@ -14,6 +14,7 @@ use crate::{
 // KVM feature bits and MSR values.
 // Reference: <https://elixir.bootlin.com/linux/v7.0/source/arch/x86/include/uapi/asm/kvm_para.h>.
 const KVM_FEATURE_CLOCKSOURCE2: u32 = 3;
+const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b56_4d00;
 const MSR_KVM_SYSTEM_TIME_NEW: u32 = 0x4b56_4d01;
 const KVM_MSR_ENABLE_BIT: u64 = 1;
 
@@ -38,8 +39,8 @@ impl_frame_meta_for!(PvclockPageMeta);
 struct PvclockVcpuTimeInfo {
     version: u32,
     _pad0: u32,
-    _tsc_timestamp: u64,
-    _system_time: u64,
+    tsc_timestamp: u64,
+    system_time: u64,
     tsc_to_system_mul: u32,
     tsc_shift: i8,
     _flags: u8,
@@ -103,6 +104,11 @@ impl PvclockPage {
             // the version is written.
             fence(Ordering::Acquire);
 
+            // SAFETY: the page is retained and these fields are read once per snapshot.
+            let (tsc_timestamp, system_time) = unsafe {
+                (read_once(core::ptr::addr_of!((*self.as_ptr()).tsc_timestamp)),
+                 read_once(core::ptr::addr_of!((*self.as_ptr()).system_time)))
+            };
             let tsc_to_system_mul = self.read_tsc_to_system_mul();
             let tsc_shift = self.read_tsc_shift();
 
@@ -113,6 +119,8 @@ impl PvclockPage {
             let version_after = self.read_version();
             if version_before == version_after && tsc_to_system_mul != 0 {
                 return Some(PvclockTimeSnapshot {
+                    tsc_timestamp,
+                    system_time,
                     tsc_to_system_mul,
                     tsc_shift,
                 });
@@ -147,6 +155,8 @@ impl PvclockPage {
 
 /// A consistent snapshot read from the KVM pvclock page.
 struct PvclockTimeSnapshot {
+    tsc_timestamp: u64,
+    system_time: u64,
     tsc_to_system_mul: u32,
     tsc_shift: i8,
 }
@@ -181,4 +191,58 @@ pub(super) fn determine_tsc_freq() -> Option<u64> {
 
 fn has_kvm_clocksource2() -> bool {
     cpuid::query_if_running_under_kvm() && cpuid::query_kvm_feature(KVM_FEATURE_CLOCKSOURCE2)
+}
+
+#[repr(C)]
+struct PvclockWallClock {
+    version: u32,
+    sec: u32,
+    nsec: u32,
+}
+
+/// Returns the KVM wall time corresponding to the given TSC value, if available.
+pub fn wall_time_at_tsc(tsc: u64) -> Option<Duration> {
+    let page = PvclockPage::setup()?;
+    let frame = FrameAllocOptions::new().alloc_frame_with(PvclockPageMeta).ok()?;
+    let ptr = mm::paddr_to_vaddr(frame.paddr()) as *const PvclockWallClock;
+    // SAFETY: KVM clocksource2 supports this MSR, and the live frame is large and aligned
+    // enough for the wall-clock structure. KVM writes it synchronously on this MSR write.
+    unsafe { msr::wrmsr(MSR_KVM_WALL_CLOCK_NEW, frame.paddr() as u64) };
+    for _ in 0..1_000_000 {
+        // SAFETY: ptr points to the live shared frame and all fields are aligned.
+        let version = unsafe { read_once(core::ptr::addr_of!((*ptr).version)) };
+        if version & 1 != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        fence(Ordering::Acquire);
+        // SAFETY: ptr points to the live shared frame and all fields are aligned.
+        let (sec, nsec) = unsafe {
+            (read_once(core::ptr::addr_of!((*ptr).sec)),
+             read_once(core::ptr::addr_of!((*ptr).nsec)))
+        };
+        fence(Ordering::Acquire);
+        // SAFETY: ptr points to the live shared frame and version is aligned.
+        if version != unsafe { read_once(core::ptr::addr_of!((*ptr).version)) } {
+            continue;
+        }
+        if nsec >= 1_000_000_000 {
+            return None;
+        }
+        let snapshot = page.read_time_snapshot()?;
+        let delta = tsc.abs_diff(snapshot.tsc_timestamp);
+        let shifted = if snapshot.tsc_shift < 0 {
+            delta.checked_shr((snapshot.tsc_shift as i32).unsigned_abs())?
+        } else {
+            delta.checked_shl(snapshot.tsc_shift as u32)?
+        };
+        let delta_ns = u64::try_from((shifted as u128 * snapshot.tsc_to_system_mul as u128) >> 32).ok()?;
+        let system_ns = if tsc >= snapshot.tsc_timestamp {
+            snapshot.system_time.checked_add(delta_ns)?
+        } else {
+            snapshot.system_time.checked_sub(delta_ns)?
+        };
+        return Duration::new(sec as u64, nsec).checked_add(Duration::from_nanos(system_ns));
+    }
+    None
 }
