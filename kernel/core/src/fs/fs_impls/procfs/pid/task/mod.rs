@@ -9,7 +9,7 @@ use crate::{
         procfs::{
             StaticEntryWithOps,
             pid::task::{
-                auxv::AuxvFileOps, cgroup::CgroupFileOps, cmdline::CmdlineFileOps,
+                auxv::AuxvFileOps, cgroup::CgroupFileOps, children::ChildrenFileOps, cmdline::CmdlineFileOps,
                 comm::CommFileOps, environ::EnvironFileOps, exe::ExeSymOps, fd::FdDirOps,
                 gid_map::GidMapFileOps, maps::MapsFileOps, mem::MemFileOps,
                 mountinfo::MountInfoFileOps, mounts::MountsFileOps, mountstats::MountStatsFileOps,
@@ -31,6 +31,7 @@ use crate::{
 
 mod auxv;
 mod cgroup;
+mod children;
 mod cmdline;
 mod comm;
 mod environ;
@@ -105,6 +106,10 @@ impl TidDirOps {
         Some((thread, process))
     }
 
+    const TASK_ONLY_ENTRIES: &'static [StaticEntryWithOps<TidDirOps>] = &[
+        ("children", InodeType::File, ChildrenFileOps::new_inode),
+    ];
+
     const STATIC_ENTRIES: &'static [StaticEntryWithOps<TidDirOps>] = &[
         ("auxv", InodeType::File, AuxvFileOps::new_inode),
         ("cgroup", InodeType::File, CgroupFileOps::new_inode),
@@ -147,6 +152,12 @@ impl ProcDirOps for TidDirOps {
             return_errno_with_message!(Errno::ENOENT, "the thread or the process does not exist");
         };
 
+        if let Some(child) = lookup_child_from_table(name, Self::TASK_ONLY_ENTRIES, |f| {
+            (f)(self, this_dir.this_weak().clone())
+        }) {
+            return Ok(child);
+        }
+
         self.lookup_static_child(this_dir.this_weak().clone(), name)
     }
 
@@ -158,7 +169,10 @@ impl ProcDirOps for TidDirOps {
             return_errno_with_message!(Errno::ENOENT, "the thread or the process does not exist");
         };
 
-        visit_listed_entries(offset, self.static_listed_entries(), visit_fn)
+        let entries = self
+            .static_listed_entries()
+            .chain(listed_entries_from_table(Self::TASK_ONLY_ENTRIES));
+        visit_listed_entries(offset, entries, visit_fn)
     }
 
     fn revalidation_policy(&self) -> RevalidationPolicy {

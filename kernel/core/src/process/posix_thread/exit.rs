@@ -61,6 +61,7 @@ fn exit_internal(
     let posix_process = posix_thread.process();
 
     let is_last_thread = {
+        let mut children = posix_process.children().lock();
         let mut tasks = posix_process.tasks().lock();
         let has_exited_group = tasks.has_exited_group();
         let in_evecve = tasks.in_execve();
@@ -85,7 +86,20 @@ fn exit_internal(
         }
         current_thread.exit();
 
-        tasks.remove_exited(&current_task)
+        let is_last = tasks.remove_exited(&current_task);
+        if let Some(sibling) = tasks.as_slice().iter().find_map(|task| {
+            let thread = task.as_thread().unwrap();
+            (!thread.is_exited()).then_some(thread)
+        }) {
+            if let Some(children) = children.as_mut() {
+                for relation in children.values_mut() {
+                    if relation.parent_thread.as_ptr() == Arc::as_ptr(current_thread) {
+                        relation.parent_thread = Arc::downgrade(sibling);
+                    }
+                }
+            }
+        }
+        is_last
     };
 
     // This is put after `current_thread.exit()`,

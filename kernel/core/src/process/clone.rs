@@ -628,7 +628,7 @@ fn clone_child_process(
     };
 
     // Sets parent process and group for child process.
-    set_parent_and_group(clone_flags, process, &child);
+    set_parent_and_group(clone_flags, process, &child, ctx.task.as_thread().unwrap());
 
     Ok(child)
 }
@@ -855,7 +855,12 @@ fn create_child_process(
     child_proc
 }
 
-fn set_parent_and_group(clone_flags: CloneFlags, parent: &Arc<Process>, child: &Arc<Process>) {
+fn set_parent_and_group(
+    clone_flags: CloneFlags,
+    parent: &Arc<Process>,
+    child: &Arc<Process>,
+    current_thread: &Arc<crate::thread::Thread>,
+) {
     loop {
         let real_parent = clone_parent(clone_flags, parent);
 
@@ -867,6 +872,15 @@ fn set_parent_and_group(clone_flags: CloneFlags, parent: &Arc<Process>, child: &
             // The children have been cleared,
             // so the retrial will see an up-to-date real parent.
             continue;
+        };
+
+        let parent_thread = if clone_flags.contains(CloneFlags::CLONE_PARENT) {
+            let Some(relation) = children_mut.get(&parent.pid()) else {
+                continue;
+            };
+            relation.parent_thread.clone()
+        } else {
+            Arc::downgrade(current_thread)
         };
 
         // Lock order: children of process -> parent of process
@@ -896,7 +910,13 @@ fn set_parent_and_group(clone_flags: CloneFlags, parent: &Arc<Process>, child: &
         *child.process_group.lock() = Some(process_group);
 
         // Put the child process in the parent's `children` field
-        children_mut.insert(child.pid(), child.clone());
+        children_mut.insert(
+            child.pid(),
+            super::process::ChildProcess {
+                process: child.clone(),
+                parent_thread,
+            },
+        );
 
         // Put the child process in the global table
         pid_table.insert_process(child.pid(), child);

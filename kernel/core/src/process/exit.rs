@@ -4,6 +4,7 @@ use core::sync::atomic::Ordering;
 
 use super::{INIT_PROCESS_PID, Pid, Process, pid_table};
 use crate::{
+    thread::AsThread,
     events::IoEvents, fs::cgroupfs::CgroupMembership, prelude::*,
     process::signal::signals::kernel::KernelSignal,
 };
@@ -145,16 +146,26 @@ fn move_process_children(
     // We hold the lock of children while updating the children's parents.
     // This ensures when dealing with CLONE_PARENT,
     // the retrial will see an up-to-date real parent.
+    let reaper_thread = {
+        let tasks = reaper_process.tasks().lock();
+        let Some(task) = tasks.as_slice().iter().find(|task| !task.as_thread().unwrap().is_exited()) else {
+            return Err(());
+        };
+        Arc::downgrade(task.as_thread().unwrap())
+    };
     let mut current_children = current_process.children().lock();
     let children = current_children.take().unwrap();
 
-    for child_process in children.values() {
-        let mut parent = child_process.parent.lock();
-        reaper_process_children.insert(child_process.pid(), child_process.clone());
-        parent.set_process(reaper_process);
+    let mut moved = BTreeMap::new();
+    for (pid, mut relation) in children {
+        let child_process = &relation.process;
+        child_process.parent.lock().set_process(reaper_process);
+        moved.insert(pid, child_process.clone());
+        relation.parent_thread = reaper_thread.clone();
+        reaper_process_children.insert(pid, relation);
     }
 
-    Ok(children)
+    Ok(moved)
 }
 
 /// Sends parent-death signals to the children.

@@ -295,7 +295,8 @@ fn try_wait_children(
 
     let mut fallback_result = WaitResult::NoMatch;
 
-    for child in children_mut.values() {
+    for relation in children_mut.values() {
+        let child = &relation.process;
         if !wait_filter(child.pid(), child, child_filter) {
             continue;
         }
@@ -338,10 +339,10 @@ fn try_wait_children(
 /// Free zombie child with `child_pid`, returns the exit code of child process.
 fn reap_zombie_child(
     child_pid: Pid,
-    children_lock: &mut BTreeMap<Pid, Arc<Process>>,
+    children_lock: &mut BTreeMap<Pid, super::process::ChildProcess>,
     reaped_children_stats: &Mutex<ReapedChildrenStats>,
 ) -> ExitCode {
-    let child_process = children_lock.remove(&child_pid).unwrap();
+    let child_process = children_lock.remove(&child_pid).unwrap().process;
     assert!(child_process.status().is_zombie());
 
     let mut pid_table = pid_table::pid_table_mut();

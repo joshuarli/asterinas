@@ -81,6 +81,11 @@ pub(super) fn init_on_each_cpu() {
     timer_manager::init_on_each_cpu();
 }
 
+pub(in crate::process) struct ChildProcess {
+    pub(in crate::process) process: Arc<Process>,
+    pub(in crate::process) parent_thread: Weak<Thread>,
+}
+
 /// Process stands for a set of threads that shares the same userspace.
 pub struct Process {
     // Immutable Part
@@ -100,7 +105,7 @@ pub struct Process {
     /// Parent process
     pub(super) parent: ParentProcess,
     /// Children processes
-    children: Mutex<Option<BTreeMap<Pid, Arc<Process>>>>,
+    children: Mutex<Option<BTreeMap<Pid, ChildProcess>>>,
     /// Process group
     pub(super) process_group: Mutex<Option<Arc<ProcessGroup>>>,
     /// The resource usage statistics of reaped child processes.
@@ -332,8 +337,23 @@ impl Process {
         self.parent.pid() == 0
     }
 
-    pub(super) fn children(&self) -> &Mutex<Option<BTreeMap<Pid, Arc<Process>>>> {
+    pub(in crate::process) fn children(&self) -> &Mutex<Option<BTreeMap<Pid, ChildProcess>>> {
         &self.children
+    }
+
+    pub(crate) fn children_of_thread(&self, thread: &Arc<Thread>) -> Vec<Pid> {
+        let children = self.children.lock();
+        children
+            .as_ref()
+            .map(|children| {
+                children
+                    .iter()
+                    .filter_map(|(pid, child)| {
+                        (child.parent_thread.as_ptr() == Arc::as_ptr(thread)).then_some(*pid)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn children_wait_queue(&self) -> &WaitQueue {
@@ -760,7 +780,8 @@ impl Process {
     fn propagate_has_child_subreaper(&self) {
         let mut process_queue = VecDeque::new();
         let children = self.children().lock();
-        for child_process in children.as_ref().unwrap().values() {
+        for child in children.as_ref().unwrap().values() {
+            let child_process = &child.process;
             let has_child_subreaper = child_process
                 .has_child_subreaper
                 .fetch_or(true, Ordering::Release);
@@ -775,7 +796,8 @@ impl Process {
                 // The process is exiting group at the same time.
                 continue;
             };
-            for child_process in children_ref.values() {
+            for child in children_ref.values() {
+                let child_process = &child.process;
                 let has_child_subreaper = child_process
                     .has_child_subreaper
                     .fetch_or(true, Ordering::Release);
