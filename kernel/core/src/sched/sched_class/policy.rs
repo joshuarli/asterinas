@@ -67,7 +67,7 @@ impl UserFairPolicy {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct UserSchedAttr {
     pub(crate) fair_policy: UserFairPolicy,
-    pub(crate) idle_nice: Nice,
+    pub(crate) user_nice: Nice,
     pub(crate) reset_on_fork: bool,
     pub(crate) slice_ns: u64,
 }

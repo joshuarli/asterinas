@@ -155,7 +155,7 @@ impl LinuxSchedAttr {
                 Ok(LinuxSchedPolicy::Idle) => UserFairPolicy::Idle,
                 _ => UserFairPolicy::Normal,
             },
-            idle_nice: Nice::default(),
+            user_nice: Nice::default(),
             reset_on_fork: self.sched_flags & SCHED_FLAG_RESET_ON_FORK != 0,
             slice_ns: if is_fair && self.sched_runtime != 0 {
                 self.sched_runtime.clamp(MIN_FAIR_SLICE_NS, MAX_FAIR_SLICE_NS)
@@ -171,10 +171,8 @@ impl LinuxSchedAttr {
 
         if is_fair {
             self.sched_policy = user.fair_policy.linux_policy() as u32;
-            if user.fair_policy == UserFairPolicy::Idle {
-                self.sched_nice = user.idle_nice.value().get().into();
-            }
         }
+        self.sched_nice = user.user_nice.value().get().into();
         if user.reset_on_fork {
             self.sched_flags |= SCHED_FLAG_RESET_ON_FORK;
         }
@@ -324,13 +322,10 @@ fn change_thread_sched_attr(thread: &Thread, ctx: &Context, change: SchedChange)
         if legacy {
             user.slice_ns = old_user.slice_ns;
         }
-        if user.fair_policy == UserFairPolicy::Idle {
-            user.idle_nice = if old_user.fair_policy == UserFairPolicy::Idle {
-                old_user.idle_nice
-            } else {
-                i8::try_from(old.sched_nice).ok().and_then(|nice| nice.try_into().ok()).unwrap_or_default()
-            };
-        }
+        user.user_nice = match policy {
+            SchedPolicy::Fair(nice) if user.fair_policy != UserFairPolicy::Idle => nice,
+            _ => old_user.user_nice,
+        };
         if !privileged {
             let rt = matches!(policy, SchedPolicy::RealTime { .. });
             let old_rt = matches!(old_policy, SchedPolicy::RealTime { .. });

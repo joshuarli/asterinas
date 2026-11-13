@@ -369,7 +369,7 @@ fn sched_values(thread: &Thread) -> (i32, u8, i32) {
             (-i32::from(rt_priority) - 1, rt_priority)
         }
         SchedPolicy::Fair(nice) => {
-            let nice = if user.fair_policy == UserFairPolicy::Idle { user.idle_nice } else { nice };
+            let nice = if user.fair_policy == UserFairPolicy::Idle { user.user_nice } else { nice };
             (NICE_TO_PRIORITY_OFFSET + nice.value().get() as i32, 0)
         }
         SchedPolicy::Idle => (NICE_TO_PRIORITY_OFFSET, 0),

@@ -169,7 +169,13 @@ impl SchedAttr {
                 SchedPolicy::Fair(nice) => nice,
                 _ => Nice::default(),
             }),
-            user: SpinLock::new(UserSchedAttr::default()),
+            user: SpinLock::new(UserSchedAttr {
+                user_nice: match policy {
+                    SchedPolicy::Fair(nice) => nice,
+                    _ => Nice::default(),
+                },
+                ..UserSchedAttr::default()
+            }),
             user_update: SpinLock::new(()),
         }
     }
@@ -189,12 +195,13 @@ impl SchedAttr {
         let (mut policy, mut user) = self.user_policy();
         if user.reset_on_fork {
             user.slice_ns = 0;
-            if user.fair_policy == UserFairPolicy::Idle && user.idle_nice.value().get() < 0 {
-                user.idle_nice = Nice::default();
+            if user.user_nice.value().get() < 0 {
+                user.user_nice = Nice::default();
             }
             policy = match policy {
                 SchedPolicy::RealTime { .. } => {
                     user.fair_policy = UserFairPolicy::Normal;
+                    user.user_nice = Nice::default();
                     SchedPolicy::Fair(Nice::default())
                 }
                 SchedPolicy::Fair(nice) if nice.value().get() < 0 => {

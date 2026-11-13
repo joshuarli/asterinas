@@ -561,12 +561,11 @@ fn clone_child_process(
     // Inherit the parent's resource limits
     let child_resource_limits = process.resource_limits().clone();
 
-    // Inherit the parent's nice value
     let child_schedule = ctx.thread.sched_attr().for_child();
     let child_nice = match child_schedule {
-        (_, user) if user.fair_policy == UserFairPolicy::Idle => user.idle_nice,
+        (_, user) if user.fair_policy == UserFairPolicy::Idle => user.user_nice,
         (SchedPolicy::Fair(nice), _) => nice,
-        _ => process.nice().load(Ordering::Relaxed),
+        (_, user) => user.user_nice,
     };
 
     // Inherit the parent's OOM score adjustment

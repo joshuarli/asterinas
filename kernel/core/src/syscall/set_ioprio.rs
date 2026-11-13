@@ -2,7 +2,7 @@
 
 use core::sync::atomic::Ordering;
 
-use super::{SyscallReturn, get_ioprio::IoPrioWho};
+use super::{SyscallReturn, get_ioprio::{IoPrioAccess, IoPrioWho}};
 use crate::{
     prelude::*,
     process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::AsPosixThread},
@@ -35,27 +35,21 @@ pub(super) fn sys_ioprio_set(
         _ => return_errno!(Errno::EINVAL),
     }
 
-    let ioprio_who = IoPrioWho::from_which_and_who(which, who, ctx)?;
-
-    match ioprio_who {
-        IoPrioWho::Thread(thread) => {
-            let target = thread.as_posix_thread().unwrap();
-            let same_owner = {
-                let caller = ctx.posix_thread.credentials();
-                let target = target.credentials();
-                target.ruid() == caller.ruid() || target.ruid() == caller.euid()
-            };
-            if !same_owner && !capable(CapSet::SYS_NICE) {
-                return_errno!(Errno::EPERM);
-            }
-            target.io_priority().store(ioprio & 0xffff, Ordering::Relaxed);
-            Ok(SyscallReturn::Return(0))
-        }
-        IoPrioWho::ProcessGroup(_) => {
-            return_errno!(Errno::EINVAL);
-        }
-        IoPrioWho::User(_) => {
-            return_errno!(Errno::EINVAL);
-        }
+    let threads = IoPrioWho::resolve(which, who, ctx, IoPrioAccess::Write)?.threads();
+    if threads.is_empty() {
+        return_errno!(Errno::ESRCH);
     }
+    for thread in threads {
+        let target = thread.as_posix_thread().unwrap();
+        let same_owner = {
+            let caller = ctx.posix_thread.credentials();
+            let target = target.credentials();
+            target.ruid() == caller.ruid() || target.ruid() == caller.euid()
+        };
+        if !same_owner && !capable(CapSet::SYS_NICE) {
+            return_errno!(Errno::EPERM);
+        }
+        target.io_priority().store(ioprio & 0xffff, Ordering::Relaxed);
+    }
+    Ok(SyscallReturn::Return(0))
 }

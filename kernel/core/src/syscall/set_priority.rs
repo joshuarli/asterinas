@@ -6,7 +6,7 @@ use super::SyscallReturn;
 use crate::{
     prelude::*,
     process::ResourceType::RLIMIT_NICE,
-    sched::Nice,
+    sched::{Nice, SchedPolicy, UserFairPolicy},
     syscall::get_priority::{PriorityTarget, get_processes},
 };
 
@@ -40,9 +40,14 @@ pub(super) fn sys_set_priority(
         if new_nice < limit {
             return_errno!(Errno::EACCES);
         }
-        // FIXME: `setpriority` updates only the per-process nice value. Fair
-        // scheduler state is kept in each thread's `SchedPolicy::Fair`, so it
-        // should be updated from the same source of truth.
+        process.main_thread().sched_attr().update_user_policy(|policy, mut user| {
+            user.user_nice = new_nice;
+            let policy = match policy {
+                SchedPolicy::Fair(_) if user.fair_policy != UserFairPolicy::Idle => SchedPolicy::Fair(new_nice),
+                policy => policy,
+            };
+            Ok((policy, user, ()))
+        })?;
         process.nice().store(new_nice, Ordering::Relaxed);
     }
 
