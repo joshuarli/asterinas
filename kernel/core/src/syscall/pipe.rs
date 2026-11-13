@@ -25,7 +25,9 @@ pub(super) fn sys_pipe2(fds: Vaddr, flags: u32, ctx: &Context) -> Result<Syscall
     }
 
     let status_flags = StatusFlags::from_bits_truncate(flags);
-    let (pipe_reader, pipe_writer) = pipe::new_file_pair(status_flags)?;
+    let credentials = ctx.posix_thread.credentials();
+    let (pipe_reader, pipe_writer) =
+        pipe::new_file_pair(status_flags, credentials.fsuid(), credentials.fsgid())?;
 
     let creation_flags = CreationFlags::from_bits_truncate(flags);
     let fd_flags = if creation_flags.contains(CreationFlags::O_CLOEXEC) {
