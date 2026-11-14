@@ -18,6 +18,7 @@ use crate::{
     util::{MultiRead, MultiWrite, ioctl::RawIoctl},
 };
 
+pub(crate) mod proc_registry;
 pub(crate) mod ip;
 pub(crate) mod netlink;
 pub(crate) mod options;
@@ -143,6 +144,8 @@ pub(crate) trait Socket: private::SocketPrivate + Send + Sync {
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)>;
+
+    fn proc_info(&self) -> Option<proc_registry::ProcSocket> { None }
 
     /// Returns the common state for this socket.
     fn common(&self) -> &FileCommon;

@@ -6,6 +6,7 @@ SUBDIRS := \
 	ethtool_link \
 	netlink_parity \
 	tcp_ephemeral_connect \
+	proc_net_identity \
 	vsock \
 
 include ../common/Makefile

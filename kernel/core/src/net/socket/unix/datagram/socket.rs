@@ -57,7 +57,9 @@ impl OptionSet {
 
 impl UnixDatagramSocket {
     pub(crate) fn new(is_nonblocking: bool) -> Arc<Self> {
-        Arc::new(Self::new_raw(is_nonblocking))
+        let socket = Arc::new(Self::new_raw(is_nonblocking));
+        crate::net::socket::proc_registry::register(&socket);
+        socket
     }
 
     pub(crate) fn new_pair(is_nonblocking: bool) -> (Arc<Self>, Arc<Self>) {
@@ -74,7 +76,11 @@ impl UnixDatagramSocket {
         *remote_queue_a = Some(socket_b.local_receiver.queue().clone());
         *remote_queue_b = Some(socket_a.local_receiver.queue().clone());
 
-        (Arc::new(socket_a), Arc::new(socket_b))
+        let socket_a = Arc::new(socket_a);
+        let socket_b = Arc::new(socket_b);
+        crate::net::socket::proc_registry::register(&socket_a);
+        crate::net::socket::proc_registry::register(&socket_b);
+        (socket_a, socket_b)
     }
 
     fn new_raw(is_nonblocking: bool) -> Self {
@@ -165,6 +171,14 @@ impl SocketPrivate for UnixDatagramSocket {
 }
 
 impl Socket for UnixDatagramSocket {
+    fn proc_info(&self) -> Option<crate::net::socket::proc_registry::ProcSocket> {
+        let state = if self.remote_queue.read().is_some() { 3 } else { 1 };
+        Some(crate::net::socket::proc_registry::ProcSocket::Unix {
+            inode: self.common.path().inode().ino(), kind: 2, state, listening: false,
+            addr: self.local_receiver.addr(),
+        })
+    }
+
     fn bind(&self, socket_addr: SocketAddr) -> Result<()> {
         let addr = UnixSocketAddr::try_from(socket_addr)?;
         self.local_receiver.bind(addr)
@@ -367,4 +381,8 @@ impl SetSocketLevelOption for (&MessageReceiver, &SocketTimeouts) {
     fn socket_timeouts(&self) -> Option<&SocketTimeouts> {
         Some(self.1)
     }
+}
+
+impl Drop for UnixDatagramSocket {
+    fn drop(&mut self) { crate::net::socket::proc_registry::unregister(self.common.path().inode().ino()); }
 }

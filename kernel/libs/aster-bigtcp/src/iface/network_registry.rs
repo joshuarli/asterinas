@@ -41,9 +41,16 @@ struct PathMtuEntry {
 
 struct State<E: Ext> {
     bindings: BTreeMap<u64, Binding>,
-    sockets: Vec<Weak<UdpSocketBg<E>>>,
+    sockets: BTreeMap<u64, Weak<UdpSocketBg<E>>>,
+    next_socket_id: u64,
     next_id: u64,
     next_port: u16,
+}
+
+#[derive(Clone, Copy)]
+pub struct UdpSnapshotCursor {
+    after: u64,
+    last: u64,
 }
 
 #[derive(Clone)]
@@ -60,7 +67,8 @@ impl<E: Ext> NetworkRegistry<E> {
         Arc::new(Self {
             state: SpinLock::new(State {
                 bindings: BTreeMap::new(),
-                sockets: Vec::new(),
+                sockets: BTreeMap::new(),
+                next_socket_id: 0,
                 next_id: 0,
                 next_port: EPHEMERAL_START,
             }),
@@ -169,12 +177,15 @@ impl<E: Ext> NetworkRegistry<E> {
     }
 
     pub(crate) fn register(&self, socket: &Arc<UdpSocketBg<E>>) {
-        self.state.lock().sockets.push(Arc::downgrade(socket));
+        let mut state = self.state.lock();
+        let id = state.next_socket_id;
+        state.next_socket_id += 1;
+        state.sockets.insert(id, Arc::downgrade(socket));
     }
 
     pub(crate) fn unregister(&self, socket: &Arc<UdpSocketBg<E>>) {
         let target = Arc::downgrade(socket);
-        self.state.lock().sockets.retain(|entry| !Weak::ptr_eq(entry, &target));
+        self.state.lock().sockets.retain(|_, entry| !Weak::ptr_eq(entry, &target));
     }
 
     /// Returns snapshots of the open UDP sockets bound in this registry.
@@ -182,10 +193,34 @@ impl<E: Ext> NetworkRegistry<E> {
         self.sockets().iter().filter_map(|socket| socket.diagnostic_snapshot()).collect()
     }
 
+    /// Returns a bounded page, excluding sockets registered after the first page.
+    pub fn udp_snapshot_page(&self, cursor: Option<UdpSnapshotCursor>, limit: usize) -> (Option<UdpSnapshotCursor>, Vec<crate::diagnostic::UdpSocketSnapshot>) {
+        use core::ops::Bound::{Excluded, Included, Unbounded};
+        let (next, page) = {
+            let state = self.state.lock();
+            let (start, last) = if let Some(cursor) = cursor {
+                (Excluded(cursor.after), cursor.last)
+            } else if let Some((&last, _)) = state.sockets.last_key_value() {
+                (Unbounded, last)
+            } else {
+                return (None, Vec::new());
+            };
+            let mut next = None;
+            let mut page = Vec::new();
+            for (&id, socket) in state.sockets.range((start, Included(last))).take(limit) {
+                next = Some(UdpSnapshotCursor { after: id, last });
+                if let Some(socket) = socket.upgrade() { page.push(socket); }
+            }
+            (next, page)
+        };
+        let snapshots = page.into_iter().filter_map(|socket| socket.diagnostic_snapshot()).collect();
+        (next, snapshots)
+    }
+
     pub(crate) fn sockets(&self) -> Vec<Arc<UdpSocketBg<E>>> {
         let mut state = self.state.lock();
         let mut sockets = Vec::new();
-        state.sockets.retain(|socket| {
+        state.sockets.retain(|_, socket| {
             if let Some(socket) = socket.upgrade() {
                 sockets.push(socket);
                 true

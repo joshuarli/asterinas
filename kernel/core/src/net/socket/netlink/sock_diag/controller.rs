@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use aster_bigtcp::{
+    iface::UdpSnapshotCursor,
     socket::{TCP_RECV_BUF_LEN, TCP_SEND_BUF_LEN, UDP_RECV_PAYLOAD_LEN, UDP_SEND_PAYLOAD_LEN},
     diagnostic::{TcpAddressFamily, TcpSocketSnapshot, TcpState, UdpSocketSnapshot, tcp_table_generation},
     wire::IpAddress,
@@ -323,15 +324,9 @@ pub(super) fn handle(request: &CMsgSegHdr, payload: &[u8], port: PortNum) -> Res
         return if dump { done(request, port, Some(Errno::ENOENT)) } else { error(request, payload, port, Some(Errno::ENOENT)) };
     }
     if dump {
-        let udp = if query.protocol == IPPROTO_UDP && query.family == AF_INET {
-            network_registry().udp_snapshots().iter().map(Entry::from_udp)
-                .filter(|socket| query.matches(socket, true)).collect()
-        } else {
-            Vec::new()
-        };
         let mut cursor = DumpCursor {
             query, request: *request, port, iface: 0, offset: 0,
-            generation: tcp_table_generation(), udp, finished: false,
+            generation: tcp_table_generation(), udp_cursor: None, finished: false,
         };
         let bytes = cursor.packet();
         return NetlinkSockDiagProtocol::unicast(port, SockDiagMessage::Dump(Mutex::new(super::message::Dump {
@@ -368,7 +363,7 @@ pub(super) struct DumpCursor {
     iface: usize,
     offset: usize,
     generation: u64,
-    udp: Vec<Entry>,
+    udp_cursor: Option<UdpSnapshotCursor>,
     pub(super) finished: bool,
 }
 
@@ -376,18 +371,31 @@ impl DumpCursor {
     pub(super) fn packet(&mut self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(DUMP_PACKET_SIZE);
         if self.query.protocol == IPPROTO_UDP {
-            while let Some(socket) = self.udp.get(self.offset) {
-                if DUMP_PACKET_SIZE - bytes.len() - 20 < ENTRY_SIZE { return bytes; }
-                bytes.extend_from_slice(&reply(&self.request, self.port, socket, true, self.query.extensions));
-                self.offset += 1;
+            loop {
+                let room = (DUMP_PACKET_SIZE - bytes.len() - 20) / ENTRY_SIZE;
+                if room == 0 { return bytes; }
+                let (next, page) = if self.query.family == AF_INET {
+                    network_registry().udp_snapshot_page(self.udp_cursor, room.min(128))
+                } else {
+                    (None, Vec::new())
+                };
+                let Some(next) = next else {
+                    let mut end = Vec::with_capacity(20);
+                    header(&mut end, 3, MULTI, self.request.seq, self.port);
+                    put_u32(&mut end, 0);
+                    end[..4].copy_from_slice(&20u32.to_ne_bytes());
+                    bytes.extend_from_slice(&end);
+                    self.finished = true;
+                    return bytes;
+                };
+                self.udp_cursor = Some(next);
+                for socket in page {
+                    let socket = Entry::from_udp(&socket);
+                    if self.query.matches(&socket, true) {
+                        bytes.extend_from_slice(&reply(&self.request, self.port, &socket, true, self.query.extensions));
+                    }
+                }
             }
-            let mut end = Vec::with_capacity(20);
-            header(&mut end, 3, MULTI, self.request.seq, self.port);
-            put_u32(&mut end, 0);
-            end[..4].copy_from_slice(&20u32.to_ne_bytes());
-            bytes.extend_from_slice(&end);
-            self.finished = true;
-            return bytes;
         }
         if self.query.states == 0 { self.iface = iter_all_ifaces().len(); }
         loop {

@@ -63,14 +63,16 @@ where
         debug_assert!(socket_type == SockType::SOCK_RAW || socket_type == SockType::SOCK_DGRAM);
 
         let unbound = UnboundNetlink::new();
-        Arc::new(Self {
+        let socket = Arc::new(Self {
             inner: RwMutex::new(Inner::Unbound(unbound)),
             options: RwLock::new(OptionSet::new()),
             socket_type,
             timeouts: SocketTimeouts::new(),
             pollee: Pollee::new(),
             common: new_socket_common(is_nonblocking),
-        })
+        });
+        crate::net::socket::proc_registry::register(&socket);
+        socket
     }
 
     fn try_send(
@@ -115,6 +117,17 @@ impl<P: SupportedNetlinkProtocol> Socket for NetlinkSocket<P>
 where
     BoundNetlink<P::Message>: Bound<Endpoint = NetlinkSocketAddr>,
 {
+    fn proc_info(&self) -> Option<crate::net::socket::proc_registry::ProcSocket> {
+        let endpoint = match &*self.inner.read() {
+            Inner::Unbound(_) => return None,
+            Inner::Bound(bound) => bound.local_endpoint(),
+        };
+        Some(crate::net::socket::proc_registry::ProcSocket::Netlink {
+            inode: self.common.path().inode().ino(), protocol: P::PROTOCOL as u32,
+            port: endpoint.port(), groups: endpoint.groups().as_u32(),
+        })
+    }
+
     fn bind(&self, socket_addr: SocketAddr) -> Result<()> {
         let endpoint = socket_addr.try_into()?;
 
@@ -334,4 +347,8 @@ fn do_netlink_setsockopt<P: SupportedNetlinkProtocol>(
     });
 
     Ok(())
+}
+
+impl<P: SupportedNetlinkProtocol> Drop for NetlinkSocket<P> {
+    fn drop(&mut self) { crate::net::socket::proc_registry::unregister(self.common.path().inode().ino()); }
 }
