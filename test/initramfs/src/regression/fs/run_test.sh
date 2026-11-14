@@ -140,6 +140,7 @@ TEST_TMPDIR=/ext2 TEST_DIRECT=1 ./empty_write/empty_write
 
 ./overlayfs/lchown_lower_symlink
 ./overlayfs/link_lower_file
+./overlayfs/deep_teardown /ext2
 ./overlayfs/lifetime /ext2
 ./overlayfs/mknod_whiteout_rejected
 ./overlayfs/ovl_test
