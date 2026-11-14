@@ -38,14 +38,15 @@ pub(super) fn sys_openat(
         let fs_path = FsPath::from_fd_at_bytes(dirfd, path.to_bytes(), EmptyPathStr::Reject)?;
 
         let fs_ref = ctx.thread_local.borrow_fs();
-        let mask_mode = mode & !fs_ref.umask().get();
+        let umask = fs_ref.umask().get();
 
         let path_resolver = fs_ref.resolver().read();
         do_open(
             &path_resolver,
             &fs_path,
             flags,
-            InodeMode::from_bits_truncate(mask_mode),
+            InodeMode::from_bits_truncate(mode),
+            umask,
         )
         .map_err(|err| match err.error() {
             Errno::EINTR => Error::new(Errno::ERESTARTSYS),
@@ -126,8 +127,8 @@ pub(super) fn sys_openat2(
         // Keep path ancestry stable until the file is opened. Directory renames and mount
         // topology changes take the write side of these locks.
         let _path_lookup_guard = path_lookup_read_lock();
-        let mode = InodeMode::from_bits_truncate((how.mode as u16) & !fs_ref.umask().get());
-        let open_args = OpenArgs::from_flags_and_mode(flags, mode)?;
+        let umask = fs_ref.umask().get();
+        let open_args = OpenArgs::from_flags_and_mode(flags, InodeMode::from_bits_truncate(how.mode as u16))?;
         let lookup_res = path_resolver.lookup_unresolved_openat2(
             dirfd,
             path.to_bytes(),
@@ -135,7 +136,7 @@ pub(super) fn sys_openat2(
             resolve,
         );
         lookup_res
-            .and_then(|lookup_res| do_open_resolved(lookup_res, open_args))
+            .and_then(|lookup_res| do_open_resolved(lookup_res, open_args, umask))
             .map_err(|err| match err.error() {
                 Errno::EINTR => Error::new(Errno::ERESTARTSYS),
                 _ => err,
@@ -184,6 +185,7 @@ fn do_open(
     fs_path: &FsPath,
     flags: u32,
     mode: InodeMode,
+    umask: u16,
 ) -> Result<Arc<dyn FileLike>> {
     let open_args = OpenArgs::from_flags_and_mode(flags, mode)?;
 
@@ -199,12 +201,13 @@ fn do_open(
         path_resolver.lookup_unresolved_no_follow(fs_path)?
     };
 
-    do_open_resolved(lookup_res, open_args)
+    do_open_resolved(lookup_res, open_args, umask)
 }
 
 fn do_open_resolved(
     lookup_res: LookupResult,
     open_args: OpenArgs,
+    umask: u16,
 ) -> Result<Arc<dyn FileLike>> {
     if open_args.is_tmpfile() {
         let dir_path = match lookup_res {
@@ -213,7 +216,7 @@ fn do_open_resolved(
                 return_errno_with_message!(Errno::ENOENT, "the directory does not exist");
             }
         };
-        return do_open_tmpfile(&dir_path, &open_args);
+        return do_open_tmpfile(&dir_path, &open_args, umask);
     }
 
     let file_handle: Arc<dyn FileLike> = match lookup_res {
@@ -232,7 +235,8 @@ fn do_open_resolved(
             }
 
             let (parent, tail_name) = result.into_parent_and_basename();
-            let new_path = parent.new_child_bytes(&tail_name, InodeType::File, open_args.inode_mode)?;
+            let new_path =
+                parent.new_child_bytes_inheriting(&tail_name, InodeType::File, open_args.inode_mode, umask)?;
             fs::vfs::notify::on_create(&parent, || tail_name.clone());
 
             // Don't check access mode for newly created file.
@@ -250,6 +254,7 @@ fn do_open_resolved(
 fn do_open_tmpfile(
     dir_path: &Path,
     open_args: &OpenArgs,
+    umask: u16,
 ) -> Result<Arc<dyn FileLike>> {
     // `O_EXCL` with `O_TMPFILE` is allowed by Linux, but it prevents the tmpfile
     // from being linked later by `linkat(..., AT_EMPTY_PATH)`.
@@ -259,7 +264,7 @@ fn do_open_tmpfile(
     } else {
         HardLinkability::Linkable
     };
-    let tmpfile_path = dir_path.create_tmpfile(open_args.inode_mode, hard_linkability)?;
+    let tmpfile_path = dir_path.create_tmpfile_inheriting(open_args.inode_mode, umask, hard_linkability)?;
 
     Ok(Arc::new(InodeHandle::new_unchecked_access(
         tmpfile_path,

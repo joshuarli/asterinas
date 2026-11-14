@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 SUBDIRS := \
+	acl_default \
 	copy_file_range \
 	empty_write \
 	ext2 \

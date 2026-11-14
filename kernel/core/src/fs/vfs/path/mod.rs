@@ -29,7 +29,7 @@ use crate::{
             file_system::{FileSystem, FsFlags},
             inode::{HardLinkability, Inode, Metadata, MknodType, RenameMode, may_retain_setgid},
             inode_ext::InodeExt,
-            posix_acl::{self, AccessAclUpdate},
+            posix_acl::{self, AccessAclUpdate, PosixAcl},
             registry::FsAndRoot,
             xattr::{self, XattrName, XattrNamespace, XattrSetFlags},
         },
@@ -813,6 +813,83 @@ impl Path {
         self.dentry.name_bytes()
     }
 
+    /// Creates a child for a user request, applying this directory's default ACL or the `umask`.
+    pub(crate) fn new_child_bytes_inheriting(
+        &self,
+        name: &[u8],
+        type_: InodeType,
+        mode: InodeMode,
+        umask: u16,
+    ) -> Result<Self> {
+        let creation = self.child_creation(mode, umask)?;
+        let child = self.new_child_bytes(name, type_, creation.mode)?;
+        child.apply_inherited_acls(creation)?;
+        Ok(child)
+    }
+
+    /// Creates a device or pipe for a user request, applying this directory's default ACL or the `umask`.
+    pub(crate) fn mknod_bytes_inheriting(
+        &self,
+        name: &[u8],
+        mode: InodeMode,
+        type_: MknodType,
+        umask: u16,
+    ) -> Result<Self> {
+        let creation = self.child_creation(mode, umask)?;
+        let child = self.mknod_bytes(name, creation.mode, type_)?;
+        child.apply_inherited_acls(creation)?;
+        Ok(child)
+    }
+
+    /// Creates an unnamed file for a user request, applying this directory's default ACL or the `umask`.
+    pub(crate) fn create_tmpfile_inheriting(
+        &self,
+        mode: InodeMode,
+        umask: u16,
+        hard_linkability: HardLinkability,
+    ) -> Result<Self> {
+        let creation = self.child_creation(mode, umask)?;
+        let child = self.create_tmpfile(creation.mode, hard_linkability)?;
+        child.apply_inherited_acls(creation)?;
+        Ok(child)
+    }
+
+    fn child_creation(&self, mode: InodeMode, umask: u16) -> Result<ChildCreation> {
+        let Some(default) = posix_acl::read_default_acl(self.inode().as_ref())? else {
+            return Ok(ChildCreation {
+                mode: InodeMode::from_bits_truncate(mode.bits() & !umask),
+                acls: None,
+            });
+        };
+        let mut access = default.clone();
+        let (mode, extended) = access.create_masq(mode);
+        Ok(ChildCreation {
+            mode,
+            acls: Some(InheritedAcls { access: extended.then_some(access), default }),
+        })
+    }
+
+    fn apply_inherited_acls(&self, creation: ChildCreation) -> Result<()> {
+        let Some(acls) = creation.acls else {
+            return Ok(());
+        };
+        let inode = self.inode();
+        let type_ = inode.type_();
+        if type_ == InodeType::Dir {
+            let name = XattrName::try_from_full_name(posix_acl::DEFAULT).unwrap();
+            let value = acls.default.encode();
+            let mut reader = VmReader::from(value.as_slice()).to_fallible();
+            inode.set_xattr(&self.dentry, name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE)?;
+        }
+        if let Some(access) = acls.access
+            && matches!(type_, InodeType::File | InodeType::Dir)
+        {
+            let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+            inode.update_access_acl(&self.dentry, AccessAclUpdate::set(Some(access), creation.mode))?;
+        }
+        Ok(())
+    }
+
     /// Creates a `Path` by making an inode of the `type_` with the `mode`.
     pub(crate) fn mknod(&self, name: &str, mode: InodeMode, type_: MknodType) -> Result<Self> {
         self.mknod_bytes(name.as_bytes(), mode, type_)
@@ -1008,7 +1085,8 @@ impl Path {
     ) -> Result<()> {
         let inode = self.inode();
         if name.full_name() == posix_acl::DEFAULT {
-            return_errno!(Errno::EOPNOTSUPP);
+            let acl = posix_acl::read_user_acl(value_reader)?;
+            return self.set_default_acl(name, acl, flags, ctx);
         }
         if name.full_name() == posix_acl::ACCESS {
             let acl = posix_acl::read_user_acl(value_reader)?;
@@ -1028,6 +1106,39 @@ impl Path {
             inode.check_permission(Permission::MAY_WRITE)?;
         }
         inode.set_xattr(&self.dentry, name, value_reader, flags)
+    }
+
+    /// Sets or, for `None`, removes the default ACL.
+    ///
+    /// Reference: Linux `set_posix_acl` in `fs/posix_acl.c`.
+    fn set_default_acl(
+        &self,
+        name: XattrName,
+        acl: Option<PosixAcl>,
+        flags: XattrSetFlags,
+        ctx: &Context,
+    ) -> Result<()> {
+        self.check_mount_writable()?;
+        if self.type_() != InodeType::Dir {
+            if acl.is_some() {
+                return_errno_with_message!(Errno::EACCES, "default ACLs apply only to directories");
+            }
+            return Ok(());
+        }
+        let inode = self.inode();
+        {
+            let _ownership = inode.fs_lock_context_or_init().ownership_lock().lock();
+            capable_modify_acl(inode.as_ref(), ctx)?;
+        }
+        let Some(acl) = acl else {
+            return match inode.remove_xattr(&self.dentry, name) {
+                Err(error) if error.error() == Errno::ENODATA => Ok(()),
+                result => result,
+            };
+        };
+        let value = acl.encode();
+        let mut reader = VmReader::from(value.as_slice()).to_fallible();
+        inode.set_xattr(&self.dentry, name, &mut reader, flags)
     }
 
     /// Gets an xattr of the file.
@@ -1056,7 +1167,7 @@ impl Path {
     pub(crate) fn remove_xattr(&self, name: XattrName, ctx: &Context) -> Result<()> {
         let inode = self.inode();
         if name.full_name() == posix_acl::DEFAULT {
-            return_errno!(Errno::EOPNOTSUPP);
+            return self.set_default_acl(name, None, XattrSetFlags::CREATE_OR_REPLACE, ctx);
         }
         if name.full_name() == posix_acl::ACCESS {
             self.check_mount_writable()?;
@@ -1071,6 +1182,16 @@ impl Path {
         }
         inode.remove_xattr(&self.dentry, name)
     }
+}
+
+struct ChildCreation {
+    mode: InodeMode,
+    acls: Option<InheritedAcls>,
+}
+
+struct InheritedAcls {
+    access: Option<PosixAcl>,
+    default: PosixAcl,
 }
 
 fn capable_modify_acl(inode: &dyn Inode, ctx: &Context) -> Result<Metadata> {

@@ -272,6 +272,13 @@ impl OverlayInode {
             temp.inode().set_xattr(temp.dentry(), name, &mut reader,
                 XattrSetFlags::CREATE_OR_REPLACE)?;
         }
+        if let Some(acl) = posix_acl::read_default_acl(source.real_inode().as_ref())? {
+            let value = acl.encode();
+            let name = XattrName::try_from_full_name(posix_acl::DEFAULT).unwrap();
+            let mut reader = VmReader::from(value.as_slice()).to_fallible();
+            temp.inode().set_xattr(temp.dentry(), name, &mut reader,
+                XattrSetFlags::CREATE_OR_REPLACE)?;
+        }
         for namespace in [
             XattrNamespace::User,
             XattrNamespace::Trusted,

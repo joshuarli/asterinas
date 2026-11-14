@@ -23,10 +23,8 @@ pub(super) fn sys_mknodat(
 ) -> Result<SyscallReturn> {
     let path_name = ctx.user_space().read_cstring(path_addr, MAX_FILENAME_LEN)?;
     let fs_ref = ctx.thread_local.borrow_fs();
-    let inode_mode = {
-        let mask_mode = mode & !fs_ref.umask().get();
-        InodeMode::from_bits_truncate(mask_mode)
-    };
+    let inode_mode = InodeMode::from_bits_truncate(mode);
+    let umask = fs_ref.umask().get();
     let inode_type = InodeType::from_raw_mode(mode)?;
     debug!(
         "dirfd = {}, path = {:?}, inode_mode = {:?}, inode_type = {:?}, dev = {}",
@@ -45,19 +43,19 @@ pub(super) fn sys_mknodat(
 
     match inode_type {
         InodeType::File => {
-            let _ = dir_path.new_child_bytes(&name, InodeType::File, inode_mode)?;
+            let _ = dir_path.new_child_bytes_inheriting(&name, InodeType::File, inode_mode, umask)?;
         }
         InodeType::CharDevice => {
-            let _ = dir_path.mknod_bytes(&name, inode_mode, MknodType::CharDevice(dev as u64))?;
+            let _ = dir_path.mknod_bytes_inheriting(&name, inode_mode, MknodType::CharDevice(dev as u64), umask)?;
         }
         InodeType::BlockDevice => {
-            let _ = dir_path.mknod_bytes(&name, inode_mode, MknodType::BlockDevice(dev as u64))?;
+            let _ = dir_path.mknod_bytes_inheriting(&name, inode_mode, MknodType::BlockDevice(dev as u64), umask)?;
         }
         InodeType::NamedPipe => {
-            let _ = dir_path.mknod_bytes(&name, inode_mode, MknodType::NamedPipe)?;
+            let _ = dir_path.mknod_bytes_inheriting(&name, inode_mode, MknodType::NamedPipe, umask)?;
         }
         InodeType::Socket => {
-            let _ = dir_path.new_child_bytes(&name, InodeType::Socket, inode_mode)?;
+            let _ = dir_path.new_child_bytes_inheriting(&name, InodeType::Socket, inode_mode, umask)?;
         }
         _ => return_errno_with_message!(Errno::EPERM, "unimplemented file types"),
     }
