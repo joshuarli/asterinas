@@ -5,6 +5,7 @@ SUBDIRS := \
 	copy_file_range \
 	empty_write \
 	ext2 \
+	ext2_persist \
 	fdatasync \
 	ficlone \
 	getcwd \
