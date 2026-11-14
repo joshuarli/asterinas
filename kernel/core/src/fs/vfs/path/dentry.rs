@@ -254,7 +254,7 @@ impl Dentry {
             revalidation_policy: inode.revalidation_policy(),
         });
 
-        Arc::new_cyclic(|weak_self| Self {
+        let dentry = Arc::new_cyclic(|weak_self| Self {
             inode,
             type_,
             name_and_parent,
@@ -262,7 +262,19 @@ impl Dentry {
             flags: AtomicU32::new(DentryFlags::empty().bits()),
             mount_count: AtomicU32::new(0),
             this: weak_self.clone(),
-        })
+        });
+        if is_dir {
+            dentry.inode().register_dentry(&dentry);
+        }
+        dentry
+    }
+
+    /// Clears cached children after no mount or open path can reach the filesystem.
+    pub(in crate::fs) fn clear_cached_children(&self) {
+        if let Some(dir) = &self.dir_state {
+            let children = core::mem::replace(&mut *dir.children.write(), DentryChildren::new());
+            drop(children);
+        }
     }
 
     pub(super) fn is_pseudo(&self) -> bool {

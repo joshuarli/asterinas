@@ -608,6 +608,10 @@ pub(crate) trait Inode: Any + FileOps + Send + Sync {
     /// Returns the filesystem containing this inode.
     fn fs(&self) -> Arc<dyn FileSystem>;
 
+    /// Observes a newly constructed directory dentry before it is published.
+    /// Implementations must not retain a strong reference that extends its lifetime.
+    fn register_dentry(&self, _dentry: &Arc<Dentry>) {}
+
     /// Returns the revalidation policy for cached children of this directory.
     ///
     /// See [`RevalidationPolicy`] for the full protocol description.

@@ -27,6 +27,7 @@ use crate::{
         vfs::{
             file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
             inode::Inode,
+            path::Dentry,
         },
     },
     prelude::*,
@@ -42,6 +43,7 @@ pub(super) struct OverlayFs {
     inodes: InodeCache,
     fs_event_stats: FsEventSubscriberStats,
     self_weak: Weak<OverlayFs>,
+    dentries: Mutex<Vec<Weak<Dentry>>>,
 }
 
 impl OverlayFs {
@@ -50,6 +52,14 @@ impl OverlayFs {
         self.upper_workdir_inuse
             .as_ref()
             .expect("a writable overlay mount claims the upper and workdir pair")
+    }
+
+    pub(super) fn register_dentry(&self, dentry: &Arc<Dentry>) {
+        let mut dentries = self.dentries.lock();
+        if dentries.len().is_multiple_of(1024) {
+            dentries.retain(|dentry| dentry.strong_count() != 0);
+        }
+        dentries.push(Arc::downgrade(dentry));
     }
 
     pub(super) fn policy(&self) -> &MountPolicy {
@@ -70,6 +80,17 @@ impl OverlayFs {
 
     pub(super) fn whiteout_cache(&self) -> &WhiteoutCache {
         &self.whiteout_cache
+    }
+}
+
+impl Drop for OverlayFs {
+    fn drop(&mut self) {
+        let dentries = core::mem::take(&mut *self.dentries.lock());
+        for dentry in dentries {
+            if let Some(dentry) = dentry.upgrade() {
+                dentry.clear_cached_children();
+            }
+        }
     }
 }
 
