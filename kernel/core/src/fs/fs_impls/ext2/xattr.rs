@@ -97,12 +97,14 @@ fn xattr_value_size(size: usize) -> usize {
 #[derive(Debug)]
 pub(super) struct Xattr {
     cache: RwMutex<XattrCache>,
+    fs: Weak<Ext2>,
 }
 
 impl Xattr {
     /// Creates a new xattr handle for the block referenced by `InodeDesc.file_acl`.
     pub(super) fn new(bid: Ext2Bid, inode: Weak<Inode>, fs: Weak<Ext2>) -> Self {
         Self {
+            fs: fs.clone(),
             cache: RwMutex::new(XattrCache {
                 block_buf: None,
                 entries: Vec::new(),
@@ -139,6 +141,8 @@ impl Xattr {
             value_reader.read_fallible(&mut VmWriter::from(value.as_mut_slice()))?;
         }
 
+        let fs = self.fs.upgrade().ok_or_else(|| Error::new(Errno::EIO))?;
+        let _ownership = fs.xattr_ownership.write();
         self.cache
             .write()
             .set_entry(target_index, target_name, value, flags)
@@ -172,14 +176,17 @@ impl Xattr {
     /// Frees the xattr block if this was the last entry in it.
     pub(super) fn remove_xattr(&self, name: XattrName) -> Result<()> {
         let (target_index, target_name) = Self::parse_target_name(name)?;
+        let fs = self.fs.upgrade().ok_or_else(|| Error::new(Errno::EIO))?;
+        let _ownership = fs.xattr_ownership.write();
         self.cache.write().remove_entry(target_index, &target_name)
     }
 
     /// Frees the xattr block entirely (called during inode eviction).
     pub(super) fn delete_xattr_block(&self) -> Result<()> {
+        let fs = self.fs.upgrade().ok_or_else(|| Error::new(Errno::EIO))?;
+        let _ownership = fs.xattr_ownership.write();
         let mut cache = self.cache.write();
         cache.load()?;
-        cache.check_exclusive_block()?;
         cache.free_and_invalidate()
     }
 
@@ -251,7 +258,6 @@ impl XattrCache {
         flags: XattrSetFlags,
     ) -> Result<()> {
         self.load()?;
-        self.check_exclusive_block()?;
 
         let (found_idx, insert_at) =
             Self::find_entry_position(&self.entries, target_index, &target_name);
@@ -275,6 +281,8 @@ impl XattrCache {
         }
         if self.bid == 0 {
             self.alloc_block()?;
+        } else {
+            self.make_exclusive()?;
         }
 
         if let Some(idx) = found_idx {
@@ -321,7 +329,6 @@ impl XattrCache {
 
     fn remove_entry(&mut self, target_index: XattrNameIndex, target_name: &[u8]) -> Result<()> {
         self.load()?;
-        self.check_exclusive_block()?;
 
         let (found_idx, _) = Self::find_entry_position(&self.entries, target_index, target_name);
         let Some(found_idx) = found_idx else {
@@ -330,6 +337,7 @@ impl XattrCache {
         if self.entries.len() == 1 {
             return self.free_and_invalidate();
         }
+        self.make_exclusive()?;
         self.entries.remove(found_idx);
         self.dirty = true;
         Ok(())
@@ -428,13 +436,40 @@ impl XattrCache {
         Ok(())
     }
 
-    fn check_exclusive_block(&self) -> Result<()> {
-        if let Some(buffer) = &self.block_buf {
-            let header = buffer.read_val::<XattrHeader>(0)?;
-            if header.ref_count > 1 {
-                return_errno_with_message!(Errno::EOPNOTSUPP, "shared ext2 xattr block is read-only");
-            }
+    fn read_current_block(&self) -> Result<USegment> {
+        let block = Self::alloc_block_buffer()?;
+        let bio = BioSegment::new_from_segment(block.clone(), BioDirection::FromDevice);
+        self.fs()?.read_blocks(self.bid, bio)?;
+        Self::validate_block(&block)?;
+        Ok(block)
+    }
+
+    fn make_exclusive(&mut self) -> Result<()> {
+        if self.dirty {
+            return Ok(());
         }
+        let old_block = self.read_current_block()?;
+        let mut header = old_block.read_val::<XattrHeader>(0)?;
+        if header.ref_count == 1 {
+            return Ok(());
+        }
+        let fs = self.fs()?;
+        let inode = self.inode()?;
+        let goal = fs.super_block().group_first_block_no(inode.block_group_idx());
+        let new_block = Self::alloc_block_buffer()?;
+        let mut bytes = vec![0u8; BLOCK_SIZE];
+        old_block.read_bytes(0, &mut bytes)?;
+        new_block.write_bytes(0, &bytes)?;
+        header.ref_count -= 1;
+        old_block.write_val(0, &header)?;
+        let range = fs.alloc_blocks(1, goal)?;
+        let bio = BioSegment::new_from_segment(old_block, BioDirection::ToDevice);
+        if let Err(error) = fs.write_blocks(self.bid, bio) {
+            fs.free_blocks(range.start, 1)?;
+            return Err(error);
+        }
+        self.bid = range.start;
+        self.block_buf = Some(new_block);
         Ok(())
     }
 
@@ -458,7 +493,20 @@ impl XattrCache {
     fn free_and_invalidate(&mut self) -> Result<()> {
         if self.bid != 0 {
             let fs = self.fs()?;
-            fs.free_blocks(self.bid, 1)?;
+            if self.dirty {
+                fs.free_blocks(self.bid, 1)?;
+            } else {
+                let block = self.read_current_block()?;
+                let mut header = block.read_val::<XattrHeader>(0)?;
+                if header.ref_count > 1 {
+                    header.ref_count -= 1;
+                    block.write_val(0, &header)?;
+                    let bio = BioSegment::new_from_segment(block, BioDirection::ToDevice);
+                    fs.write_blocks(self.bid, bio)?;
+                } else {
+                    fs.free_blocks(self.bid, 1)?;
+                }
+            }
         }
         self.bid = 0;
         self.block_buf = None;

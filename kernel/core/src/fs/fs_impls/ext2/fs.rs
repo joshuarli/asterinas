@@ -76,6 +76,7 @@ pub(crate) struct Ext2 {
     fs_event_subscriber_stats: FsEventSubscriberStats,
     /// Per-filesystem inode generation counter.
     next_generation: AtomicU32,
+    pub(super) xattr_ownership: RwMutex<()>,
     /// Weak self reference for inode back-pointers.
     self_ref: Weak<Ext2>,
 }
@@ -199,6 +200,7 @@ impl Ext2 {
             next_generation: AtomicU32::new(utils::duration_to_ext2_secs(
                 utils::now().to_duration_saturating(),
             )),
+            xattr_ownership: RwMutex::new(()),
             self_ref: weak_self.clone(),
         });
 
