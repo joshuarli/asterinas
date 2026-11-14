@@ -27,6 +27,8 @@ sleep 0.2
 ./sendmmsg
 ./socketpair
 ./socket_ioctl
+./ethtool_link/ethtool_link
+./ethtool_link/link_transition
 ./sockoption
 ./sockoption_short
 ./sockoption_unix
