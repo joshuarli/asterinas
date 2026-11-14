@@ -95,7 +95,13 @@ impl NetlinkRouteKernelSocket {
             Vec::new()
         };
 
-        for segments in [response_segments, done_segments] {
+        let ack_segments = if matches!(request, RtnlSegment::GetLink(_)) && done_segments.is_empty() {
+            acknowledgement(request_header)
+        } else {
+            Vec::new()
+        };
+
+        for segments in [response_segments, done_segments, ack_segments] {
             if segments.is_empty() {
                 continue;
             }

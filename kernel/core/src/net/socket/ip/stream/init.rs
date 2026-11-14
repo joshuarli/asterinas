@@ -175,9 +175,17 @@ impl InitStream {
                 Ok(endpoint) => endpoint,
                 Err(err) => return Err((err, self)),
             };
-            match bind_port(&endpoint, can_reuse) {
+            let first = match bind_port(&endpoint, can_reuse) {
                 Ok(bound_port) => bound_port,
                 Err(err) => return Err((err, self)),
+            };
+            if first.endpoint() == remote_endpoint {
+                match bind_port(&endpoint, can_reuse) {
+                    Ok(bound_port) => bound_port,
+                    Err(err) => return Err((err, self)),
+                }
+            } else {
+                first
             }
         };
 
