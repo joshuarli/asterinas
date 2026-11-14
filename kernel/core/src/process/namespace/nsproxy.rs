@@ -5,7 +5,7 @@ use spin::Once;
 use crate::{
     fs::{cgroupfs::CgroupNamespace, vfs::path::MountNamespace},
     ipc::IpcNamespace,
-    net::uts_ns::UtsNamespace,
+    net::{net_ns::NetNamespace, uts_ns::UtsNamespace},
     prelude::*,
     process::{
         CloneFlags, Process, UserNamespace, credentials::capabilities::CapSet,
@@ -20,11 +20,12 @@ use crate::{
 /// and keeps a local copy in `ThreadLocal` for fast access.
 /// `NsProxy` contains all types of namespaces except
 /// 1. The user namespace, which is included in the `Process` struct.
-/// 2. The PID namespace, which is included in the `Process` struct (TODO).
+/// 2. The PID namespace, which is accessed through `Process::pid_ns`.
 pub(crate) struct NsProxy {
     cgroup_ns: Arc<CgroupNamespace>,
     ipc_ns: Arc<IpcNamespace>,
     mnt_ns: Arc<MountNamespace>,
+    net_ns: Arc<NetNamespace>,
     uts_ns: Arc<UtsNamespace>,
 }
 
@@ -37,6 +38,7 @@ impl NsProxy {
                 cgroup_ns: CgroupNamespace::get_init_singleton().clone(),
                 ipc_ns: IpcNamespace::get_init_singleton().clone(),
                 mnt_ns: MountNamespace::get_init_singleton().clone(),
+                net_ns: NetNamespace::get_init_singleton().clone(),
                 uts_ns: UtsNamespace::get_init_singleton().clone(),
             })
         })
@@ -121,6 +123,10 @@ impl NsProxy {
         &self.mnt_ns
     }
 
+    pub(crate) fn net_ns(&self) -> &Arc<NetNamespace> {
+        &self.net_ns
+    }
+
     /// Returns the associated UTS namespace.
     pub(crate) fn uts_ns(&self) -> &Arc<UtsNamespace> {
         &self.uts_ns
@@ -194,6 +200,7 @@ impl<'a> NsProxyBuilder<'a> {
             cgroup_ns: new_cgroup,
             ipc_ns: new_ipc,
             mnt_ns: new_mnt,
+            net_ns: old_proxy.net_ns.clone(),
             uts_ns: new_uts,
         }
     }

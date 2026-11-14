@@ -25,3 +25,4 @@ endif
 include ../common/Makefile
 
 $(OBJ_OUTPUT_DIR)/thread_priority: C_FLAGS += -pthread
+$(OBJ_OUTPUT_DIR)/initial_namespaces: C_FLAGS += -pthread

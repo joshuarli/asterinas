@@ -20,9 +20,9 @@ use crate::{
         },
     },
     ipc::IpcNamespace,
-    net::uts_ns::UtsNamespace,
+    net::{net_ns::NetNamespace, uts_ns::UtsNamespace},
     prelude::*,
-    process::{NsProxy, UserNamespace, posix_thread::AsPosixThread},
+    process::{NsProxy, PidNamespace, UserNamespace, posix_thread::AsPosixThread},
     thread::Thread,
 };
 
@@ -52,13 +52,14 @@ enum NsProxyEntry {
     Ipc,
     /// The mount namespace.
     Mnt,
+    Net,
     /// The UTS namespace.
     Uts,
 }
 
 impl NsProxyEntry {
     /// All supported `NsProxy`-backed namespace entries.
-    const ALL: &[Self] = &[Self::Cgroup, Self::Ipc, Self::Mnt, Self::Uts];
+    const ALL: &[Self] = &[Self::Cgroup, Self::Ipc, Self::Mnt, Self::Net, Self::Uts];
 
     /// Returns the filename of this namespace entry under `/proc/[pid]/ns/`.
     fn as_str(self) -> &'static str {
@@ -66,6 +67,7 @@ impl NsProxyEntry {
             Self::Cgroup => "cgroup",
             Self::Ipc => "ipc",
             Self::Mnt => "mnt",
+            Self::Net => "net",
             Self::Uts => "uts",
         }
     }
@@ -76,6 +78,7 @@ impl NsProxyEntry {
             "cgroup" => Some(Self::Cgroup),
             "ipc" => Some(Self::Ipc),
             "mnt" => Some(Self::Mnt),
+            "net" => Some(Self::Net),
             "uts" => Some(Self::Uts),
             _ => None,
         }
@@ -104,6 +107,11 @@ impl NsProxyEntry {
                 ns_proxy.mnt_ns().get_path(),
                 parent,
             ),
+            Self::Net => NsSymOps::<NetNamespace>::new_inode(
+                dir.clone(),
+                ns_proxy.net_ns().get_path(),
+                parent,
+            ),
             Self::Uts => NsSymOps::<UtsNamespace>::new_inode(
                 dir.clone(),
                 ns_proxy.uts_ns().get_path(),
@@ -126,6 +134,12 @@ fn cached_ns_path(inode: &dyn Inode) -> Option<&Path> {
     if let Some(sym) = inode.downcast_ref::<NsSymlink<MountNamespace>>() {
         return Some(&sym.inner().ns_path);
     }
+    if let Some(sym) = inode.downcast_ref::<NsSymlink<NetNamespace>>() {
+        return Some(&sym.inner().ns_path);
+    }
+    if let Some(sym) = inode.downcast_ref::<NsSymlink<PidNamespace>>() {
+        return Some(&sym.inner().ns_path);
+    }
     if let Some(sym) = inode.downcast_ref::<NsSymlink<UserNamespace>>() {
         return Some(&sym.inner().ns_path);
     }
@@ -142,6 +156,16 @@ impl ProcDirOps for NsDirOps {
     }
 
     fn lookup_child(&self, this_dir: &ProcDir<Self>, name: &str) -> Result<Arc<dyn Inode>> {
+        if name == "pid" {
+            let process = self.dir.process().ok_or_else(|| {
+                Error::with_message(Errno::ESRCH, "the process does not exist")
+            })?;
+            return Ok(NsSymOps::<PidNamespace>::new_inode(
+                self.dir.clone(),
+                process.pid_ns().get_path(),
+                this_dir.this_weak().clone(),
+            ));
+        }
         if name == "user" {
             let Some(process) = self.dir.process() else {
                 return_errno_with_message!(Errno::ESRCH, "the process does not exist");
@@ -194,9 +218,11 @@ impl ProcDirOps for NsDirOps {
                     .map(|entry| ListedEntry::new(entry.as_str(), InodeType::SymLink))
             });
 
-        let user_entry = Some(ListedEntry::new("user", InodeType::SymLink)).into_iter();
+        let process_entries = ["pid", "user"]
+            .into_iter()
+            .map(|name| ListedEntry::new(name, InodeType::SymLink));
 
-        visit_listed_entries(offset, ns_proxy_entries.chain(user_entry), visit_fn)
+        visit_listed_entries(offset, ns_proxy_entries.chain(process_entries), visit_fn)
     }
 
     fn revalidation_policy(&self) -> RevalidationPolicy {
@@ -209,6 +235,12 @@ impl ProcDirOps for NsDirOps {
         let Some(cached_path) = cached_ns_path(child) else {
             return false;
         };
+
+        if child.downcast_ref::<NsSymlink<PidNamespace>>().is_some() {
+            return self.dir.process().is_some_and(|process| {
+                cached_path == &process.pid_ns().get_path()
+            });
+        }
 
         if child.downcast_ref::<NsSymlink<UserNamespace>>().is_some() {
             let Some(process) = self.dir.process() else {
@@ -232,6 +264,10 @@ impl ProcDirOps for NsDirOps {
 
         if child.downcast_ref::<NsSymlink<MountNamespace>>().is_some() {
             return cached_path == &ns_proxy.mnt_ns().get_path();
+        }
+
+        if child.downcast_ref::<NsSymlink<NetNamespace>>().is_some() {
+            return cached_path == &ns_proxy.net_ns().get_path();
         }
 
         if child.downcast_ref::<NsSymlink<UtsNamespace>>().is_some() {

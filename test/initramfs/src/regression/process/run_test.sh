@@ -77,6 +77,7 @@ fi
 ./cgroup.sh
 ./group_session
 ./job_control
+./initial_namespaces
 ./pidfd
 ./pidfd_getfd
 ./proc_status_peak
