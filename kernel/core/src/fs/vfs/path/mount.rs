@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
 use hashbrown::{HashMap, HashSet};
@@ -63,6 +63,9 @@ pub(crate) struct Mount {
     propagation: RwLock<MountPropagation>,
     /// The flags of this mount.
     flags: AtomicPerMountFlags,
+    /// Whether an unmount detached this mount, so dropping the last mount of its
+    /// filesystem must finish the unmount.
+    unmounted: AtomicBool,
     /// Reference to self.
     this: Weak<Self>,
 }
@@ -166,6 +169,7 @@ impl Mount {
             mnt_ns,
             propagation: RwLock::new(MountPropagation::default()),
             flags: AtomicPerMountFlags::new(flags),
+            unmounted: AtomicBool::new(false),
             this: weak_self.clone(),
         });
         // `upgrade` returns `None` for pseudo mounts (no namespace) and for
@@ -230,14 +234,21 @@ impl Mount {
     /// If this mount is shared,
     /// corresponding children below its propagation receivers are also unmounted.
     ///
+    /// Unless `lazy` is set, the operation fails with `EBUSY` when any of those mounts
+    /// has a child mount or a user beyond the caller's own path: an open file, a
+    /// working or root directory, or another in-progress lookup.
+    ///
     /// The operation is atomic: an error leaves the mount tree and propagation topology
     /// unchanged.
-    /// The caller must hold the mount-topology write lock in `topology`.
+    /// The caller must hold the mount-topology write lock in `topology`, and must drop
+    /// the returned mounts only after releasing it, since dropping the last mount of a
+    /// filesystem finishes its unmount.
     pub(super) fn do_unmount(
         self: &Arc<Self>,
         mountpoint: &Arc<Dentry>,
+        lazy: bool,
         topology: &mut MountTopology,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Vec<Arc<Self>>> {
         let child_mount = self
             .get(mountpoint)
             .ok_or_else(|| Error::with_message(Errno::ENOENT, "can not find child mount"))?;
@@ -255,17 +266,29 @@ impl Mount {
             }
         }
 
+        if !lazy {
+            // Each mount is referenced by its parent's `children` and by `unmounted_mounts`;
+            // the requested mount is also referenced by the caller's path.
+            for (index, target) in unmounted_mounts.iter().enumerate() {
+                let expected = if index == 0 { 3 } else { 2 };
+                if Arc::strong_count(target) > expected || !target.children.read().is_empty() {
+                    return_errno_with_message!(Errno::EBUSY, "the mount is busy");
+                }
+            }
+        }
+
         for target in &unmounted_mounts {
             target
                 .try_walk_tree(|mount| {
                     mount.clear_propagation(topology);
+                    mount.unmounted.store(true, Ordering::Release);
                     Ok(())
                 })
                 .unwrap();
             target.detach_from_parent(topology);
         }
 
-        Ok(unmounted_mounts.into_iter().next().unwrap())
+        Ok(unmounted_mounts)
     }
 
     /// Clones this mount as an unpublished mount rooted at `root_dentry`.
@@ -293,6 +316,7 @@ impl Mount {
             mnt_ns: new_ns.clone(),
             propagation: RwLock::new(propagation),
             flags: AtomicPerMountFlags::new(self.flags.load(Ordering::Relaxed)),
+            unmounted: AtomicBool::new(false),
             this: weak_self.clone(),
         });
         if let Some(ns) = mount.mnt_ns.upgrade() {
@@ -829,6 +853,14 @@ impl Debug for Mount {
 
 impl Drop for Mount {
     fn drop(&mut self) {
+        if self.unmounted.load(Ordering::Acquire) && Arc::strong_count(&self.fs) == 1 {
+            if let Err(err) = self.fs.sync() {
+                error!("failed to sync the unmounted filesystem: {:?}", err);
+            }
+            if let Err(err) = self.fs.put_super() {
+                error!("failed to record the clean unmount: {:?}", err);
+            }
+        }
         self.clear_mountpoint();
         // `upgrade` returns `None` for pseudo mounts (no namespace) and for
         // mounts whose namespace is itself being dropped (the `mounts` map
