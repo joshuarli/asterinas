@@ -280,6 +280,10 @@ impl FileOps for OverlayInode {
 }
 
 impl Inode for OverlayInode {
+    fn register_dentry(&self, dentry: &Arc<Dentry>) {
+        self.fs_arc().register_dentry(dentry);
+    }
+
     fn size(&self) -> usize {
         self.real_object().real_inode().size()
     }

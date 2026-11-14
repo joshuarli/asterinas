@@ -140,6 +140,18 @@ pub(crate) struct Dentry {
     this: Weak<Dentry>,
 }
 
+// Releasing a deep chain whose ancestors are otherwise unreferenced must not recurse once per level on the bounded kernel stack.
+impl Drop for Dentry {
+    fn drop(&mut self) {
+        let mut parent = self.name_and_parent.take_parent();
+        while let Some(dentry) = parent {
+            parent = Arc::try_unwrap(dentry)
+                .ok()
+                .and_then(|mut dentry| dentry.name_and_parent.take_parent());
+        }
+    }
+}
+
 /// Per-directory cache state.
 struct DentryDirState {
     children: RwMutex<DentryChildren>,
@@ -180,6 +192,17 @@ impl NameAndParent {
 
     fn name(&self, inode: &dyn Inode) -> String {
         String::from_utf8_lossy(&self.name_bytes(inode)).into_owned()
+    }
+
+    fn take_parent(&mut self) -> Option<Arc<Dentry>> {
+        match core::mem::replace(self, NameAndParent::Real(None)) {
+            NameAndParent::Real(Some(mut name_and_parent)) => Some(name_and_parent.get_mut().1.clone()),
+            NameAndParent::Anonymous(parent) => Some(parent),
+            other => {
+                *self = other;
+                None
+            }
+        }
     }
 
     fn parent(&self) -> Option<Arc<Dentry>> {
@@ -254,7 +277,7 @@ impl Dentry {
             revalidation_policy: inode.revalidation_policy(),
         });
 
-        Arc::new_cyclic(|weak_self| Self {
+        let dentry = Arc::new_cyclic(|weak_self| Self {
             inode,
             type_,
             name_and_parent,
@@ -262,7 +285,19 @@ impl Dentry {
             flags: AtomicU32::new(DentryFlags::empty().bits()),
             mount_count: AtomicU32::new(0),
             this: weak_self.clone(),
-        })
+        });
+        if is_dir {
+            dentry.inode().register_dentry(&dentry);
+        }
+        dentry
+    }
+
+    /// Clears cached children after no mount or open path can reach the filesystem.
+    pub(in crate::fs) fn clear_cached_children(&self) {
+        if let Some(dir) = &self.dir_state {
+            let children = core::mem::replace(&mut *dir.children.write(), DentryChildren::new());
+            drop(children);
+        }
     }
 
     pub(super) fn is_pseudo(&self) -> bool {
