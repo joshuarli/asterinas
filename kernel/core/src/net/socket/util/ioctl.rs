@@ -29,6 +29,7 @@ mod ioctl_defs {
     };
 
     // Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/sockios.h#L56>.
+    pub(super) type Ethtool         = ioc!(SIOCETHTOOL,    0x8946, InData<CIfReq>);
     pub(super) type GetIfName       = ioc!(SIOCGIFNAME,     0x8910, InOutData<CIfReq>);
     pub(super) type GetIfConf       = ioc!(SIOCGIFCONF,     0x8912, InOutData<CIfConf>);
     pub(super) type GetIfFlags      = ioc!(SIOCGIFFLAGS,    0x8913, InOutData<CIfReq>);
@@ -79,6 +80,11 @@ fn network_device_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
     use ioctl_defs::*;
 
     dispatch_ioctl!(match raw_ioctl {
+        cmd @ Ethtool => {
+            let ifreq = cmd.read()?;
+            ethtool(&ifreq)?;
+            Ok(0)
+        }
         cmd @ GetIfName => {
             let mut ifreq = cmd.read()?;
             let iface = ifreq.get_iface_by_index()?;
@@ -163,6 +169,48 @@ fn network_device_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
         }
         _ => return_errno_with_message!(Errno::ENOTTY, "the socket ioctl command is unknown"),
     })
+}
+
+fn ethtool(ifreq: &CIfReq) -> Result<()> {
+    const ETHTOOL_GLINK: u32 = 0x0a;
+    const ETHTOOL_PERQUEUE: u32 = 0x4b;
+
+    let task = Task::current().unwrap();
+    let user_space = CurrentUserSpace::new(task.as_thread_local().unwrap());
+    let address = *ifreq.data.data();
+    let command: u32 = user_space.read_val(address)?;
+    let iface = ifreq.get_iface_by_name()?;
+    let subcommand = if command == ETHTOOL_PERQUEUE {
+        let subcommand_address = address.checked_add(size_of::<u32>())
+            .ok_or_else(|| Error::with_message(Errno::EFAULT, "invalid ethtool payload"))?;
+        user_space.read_val(subcommand_address)?
+    } else {
+        command
+    };
+
+    // Linux's unprivileged ethtool commands, from net/ethtool/ioctl.c.
+    if !matches!(subcommand,
+        0x01 | 0x03 | 0x07 | 0x0a | 0x0e | 0x10 | 0x12 | 0x14 | 0x16 | 0x18 |
+        0x1b | 0x1d | 0x1e | 0x20 | 0x21 | 0x23 | 0x25 | 0x27 | 0x29 | 0x2b |
+        0x2d | 0x2e | 0x2f | 0x30 | 0x37 | 0x38 | 0x3a | 0x3c | 0x41 | 0x44 |
+        0x46 | 0x48 | 0x4a | 0x4c | 0x4e | 0x50
+    ) {
+        check_current_privileged()?;
+    }
+    if command != ETHTOOL_GLINK {
+        return_errno_with_message!(Errno::EOPNOTSUPP, "ethtool command is not supported");
+    }
+    let mut value: CEthtoolValue = user_space.read_val(address)?;
+    value.data = u32::from(iface.flags().contains(InterfaceFlags::UP) && iface.carrier().on);
+    user_space.write_val(address, &value)?;
+    Ok(())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod)]
+struct CEthtoolValue {
+    cmd: u32,
+    data: u32,
 }
 
 /// Applies the requested flags of `SIOCSIFFLAGS`.

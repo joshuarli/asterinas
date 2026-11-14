@@ -3,6 +3,7 @@
 EXTRA_C_FLAGS := -I/usr/include/libnl3 -lnl-3 -lnl-route-3
 
 SUBDIRS := \
+	ethtool_link \
 	netlink_parity \
 	tcp_ephemeral_connect \
 	vsock \
