@@ -83,3 +83,4 @@ fi
 ./proc_status_peak
 ./proc_wchan
 ./wait4
+./waitid_nohang
