@@ -486,7 +486,10 @@ impl Path {
     /// - The current path is not a mount root.
     /// - The mount of the current path is the root mount.
     /// - The current path is not in the current mount namespace.
-    pub(crate) fn unmount(&self, ctx: &Context) -> Result<Arc<Mount>> {
+    ///
+    /// Returns `EBUSY` if `lazy` is not set and the mount, or a propagated copy of it,
+    /// is in use. The filesystem's unmount finishes when its last mount is dropped.
+    pub(crate) fn unmount(&self, lazy: bool, ctx: &Context) -> Result<Arc<Mount>> {
         if !self.is_mount_root() {
             return_errno_with_message!(Errno::EINVAL, "the path is not a mount root");
         }
@@ -508,15 +511,10 @@ impl Path {
             return_errno_with_message!(Errno::EINVAL, "the mount has been detached");
         };
         let parent_mount = self.mount.parent().unwrap().upgrade().unwrap();
-        let child_mount = parent_mount.do_unmount(&mountpoint, &mut topology_guard)?;
+        let unmounted = parent_mount.do_unmount(&mountpoint, lazy, &mut topology_guard)?;
         drop(topology_guard);
-        if Arc::strong_count(child_mount.fs()) == 1
-            && let Err(err) = child_mount.fs().put_super()
-        {
-            error!("failed to record the clean unmount: {:?}", err);
-        }
 
-        Ok(child_mount)
+        Ok(unmounted.into_iter().next().unwrap())
     }
 
     /// Remounts the filesystem with new `PerMountFlags` and optionally new `FsFlags`.

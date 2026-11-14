@@ -34,7 +34,9 @@ pub(super) fn sys_umount(path_addr: Vaddr, flags: u64, ctx: &Context) -> Result<
     // to the topmost mount. If there is a mount stacked above the current thread's `cwd`, normal
     // path lookup through "." cannot access the upper mount, but umount through "." can operate
     // on the upper mount.
-    target_path.get_top_path().unmount(ctx)?;
+    target_path
+        .get_top_path()
+        .unmount(umount_flags.contains(UmountFlags::MNT_DETACH), ctx)?;
 
     Ok(SyscallReturn::Return(0))
 }
