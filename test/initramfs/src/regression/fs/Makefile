@@ -22,5 +22,6 @@ SUBDIRS := \
 	tmpfile \
 	tmpfs \
 	utimensat \
+	xattr_cow \
 
 include ../common/Makefile
