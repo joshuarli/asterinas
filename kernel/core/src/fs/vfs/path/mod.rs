@@ -823,7 +823,10 @@ impl Path {
     ) -> Result<Self> {
         let creation = self.child_creation(mode, umask)?;
         let child = self.new_child_bytes(name, type_, creation.mode)?;
-        child.apply_inherited_acls(creation)?;
+        if let Err(error) = child.apply_inherited_acls(creation) {
+            let _ = if type_ == InodeType::Dir { self.rmdir_bytes(name) } else { self.unlink_bytes(name) };
+            return Err(error);
+        }
         Ok(child)
     }
 
@@ -837,7 +840,10 @@ impl Path {
     ) -> Result<Self> {
         let creation = self.child_creation(mode, umask)?;
         let child = self.mknod_bytes(name, creation.mode, type_)?;
-        child.apply_inherited_acls(creation)?;
+        if let Err(error) = child.apply_inherited_acls(creation) {
+            let _ = self.unlink_bytes(name);
+            return Err(error);
+        }
         Ok(child)
     }
 
