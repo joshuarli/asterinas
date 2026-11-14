@@ -1721,7 +1721,13 @@ impl Inode for RamInode {
         flags: XattrSetFlags,
     ) -> Result<()> {
         if name.full_name() == posix_acl::DEFAULT {
-            return_errno!(Errno::EOPNOTSUPP);
+            let acl = posix_acl::read_user_acl(value_reader)?;
+            RamXattr::check_file_type_for_xattr(self.typ)?;
+            let Some(acl) = acl else {
+                return self.xattr.remove(name);
+            };
+            let value = acl.encode();
+            return self.xattr.set(name, &mut VmReader::from(value.as_slice()).to_fallible(), flags);
         }
         if name.full_name() == posix_acl::ACCESS {
             let acl = posix_acl::read_user_acl(value_reader)?;

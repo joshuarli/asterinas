@@ -140,6 +140,42 @@ impl PosixAcl {
         }
     }
 
+    /// Masks an inherited default ACL and the requested creation mode by each other.
+    ///
+    /// Returns the resulting mode and whether the ACL carries entries beyond the mode bits.
+    /// Reference: Linux `posix_acl_create_masq` in `fs/posix_acl.c`.
+    pub(crate) fn create_masq(&mut self, mode: InodeMode) -> (InodeMode, bool) {
+        let mut bits = mode.bits();
+        let mut extended = false;
+        let mut group_index = None;
+        let mut mask_index = None;
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            match entry {
+                Entry::Owner(p) => {
+                    *p &= ((bits >> 6) & 7) as u8;
+                    bits &= ((*p as u16) << 6) | !0o700;
+                }
+                Entry::User(..) | Entry::Group(..) => extended = true,
+                Entry::OwningGroup(_) => group_index = Some(index),
+                Entry::Mask(_) => {
+                    mask_index = Some(index);
+                    extended = true;
+                }
+                Entry::Other(p) => {
+                    *p &= (bits & 7) as u8;
+                    bits &= (*p as u16) | !0o007;
+                }
+            }
+        }
+        if let Some(index) = mask_index.or(group_index)
+            && let Entry::Mask(p) | Entry::OwningGroup(p) = &mut self.entries[index]
+        {
+            *p &= ((bits >> 3) & 7) as u8;
+            bits &= ((*p as u16) << 3) | !0o070;
+        }
+        (InodeMode::from_bits_truncate(bits), extended)
+    }
+
     pub(crate) fn permits(&self, uid: Uid, owner: Uid, owning_group: Gid,
         mut in_group: impl FnMut(Gid) -> bool, wanted: u8) -> bool {
         let mask = self.entries.iter().find_map(|entry| match entry {
@@ -230,4 +266,25 @@ pub(crate) fn read_stored_acl(inode: &dyn Inode) -> Result<Option<PosixAcl>> {
         return_errno_with_message!(Errno::EIO, "stored POSIX ACL changed during a locked read");
     }
     PosixAcl::decode(&bytes)
+}
+
+/// Reads a directory's stored default ACL in one attribute read.
+pub(crate) fn read_default_acl(inode: &dyn Inode) -> Result<Option<PosixAcl>> {
+    let name = XattrName::try_from_full_name(DEFAULT).unwrap();
+    let mut capacity = 4 + 8 * 32;
+    loop {
+        let mut bytes = vec![0; capacity];
+        let mut writer = VmWriter::from(bytes.as_mut_slice()).to_fallible();
+        match inode.get_xattr(name, &mut writer) {
+            Ok(length) => {
+                bytes.truncate(length);
+                return PosixAcl::decode(&bytes);
+            }
+            Err(error) if matches!(error.error(), Errno::ENODATA | Errno::EOPNOTSUPP) => return Ok(None),
+            Err(error) if error.error() == Errno::ERANGE && capacity < XATTR_VALUE_MAX_LEN => {
+                capacity = XATTR_VALUE_MAX_LEN;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }

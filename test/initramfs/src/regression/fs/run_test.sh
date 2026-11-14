@@ -120,6 +120,8 @@ TEST_TMPDIR=/exfat TEST_DIRECT=1 ./empty_write/empty_write
 TEST_TMPDIR=/ext2 TEST_DIRECT=0 ./empty_write/empty_write
 TEST_TMPDIR=/ext2 TEST_DIRECT=1 ./empty_write/empty_write
 
+./acl_default/default
+
 ./getcwd/getcwd
 
 ./inotify/inotify_align

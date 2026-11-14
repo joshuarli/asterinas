@@ -202,7 +202,21 @@ impl Inode {
         flags: XattrSetFlags,
     ) -> Result<()> {
         if name.full_name() == posix_acl::DEFAULT {
-            return_errno!(Errno::EOPNOTSUPP);
+            let acl = posix_acl::read_user_acl(value_reader)?;
+            let _ownership = self.fs_lock_context_or_init().ownership_lock().lock();
+            let xattr = self.xattr.as_ref().ok_or_else(|| Error::new(Errno::EOPNOTSUPP))?;
+            if let Some(acl) = acl {
+                let value = encode_disk_acl(&acl.encode());
+                let mut reader = VmReader::from(value.as_slice()).to_fallible();
+                xattr.set_xattr(name, &mut reader, flags)?;
+            } else {
+                xattr.remove_xattr(name)?;
+            }
+            let new_bid = xattr.bid();
+            let mut inner = self.inner.write();
+            inner.set_file_acl(new_bid);
+            inner.set_ctime(utils::now());
+            return Ok(());
         }
         if name.full_name() == posix_acl::ACCESS {
             let acl = posix_acl::read_user_acl(value_reader)?;

@@ -30,11 +30,12 @@ pub(super) fn sys_mkdirat(
             .into_parent_and_basename()?
     };
 
-    let inode_mode = {
-        let mask_mode = mode & !fs_ref.umask().get();
-        InodeMode::from_bits_truncate(mask_mode)
-    };
-    dir_path.new_child_bytes(&name, InodeType::Dir, inode_mode)?;
+    dir_path.new_child_bytes_inheriting(
+        &name,
+        InodeType::Dir,
+        InodeMode::from_bits_truncate(mode),
+        fs_ref.umask().get(),
+    )?;
     fs::vfs::notify::on_mkdir(&dir_path, || name);
     Ok(SyscallReturn::Return(0))
 }
