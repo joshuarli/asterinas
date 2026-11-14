@@ -102,7 +102,7 @@ pub(super) fn sys_socket(
                             "user-provided netlink family is not supported"
                         )
                     }
-                    return_errno_with_message!(Errno::EAFNOSUPPORT, "invalid netlink family");
+                    return_errno_with_message!(Errno::EPROTONOSUPPORT, "invalid netlink family");
                 }
             }
         }
