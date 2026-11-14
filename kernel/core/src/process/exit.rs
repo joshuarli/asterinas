@@ -2,11 +2,15 @@
 
 use core::sync::atomic::Ordering;
 
-use super::{INIT_PROCESS_PID, Pid, Process, pid_table};
+use super::{INIT_PROCESS_PID, Pid, Process, Uid, pid_table};
 use crate::{
     thread::AsThread,
     events::IoEvents, fs::cgroupfs::CgroupMembership, prelude::*,
-    process::signal::signals::kernel::KernelSignal,
+    process::signal::{
+        c_types::siginfo_t,
+        constants::{CLD_EXITED, CLD_KILLED, SIGCHLD},
+        signals::{kernel::KernelSignal, raw::RawSignal},
+    },
 };
 
 /// Exits the current POSIX process.
@@ -16,7 +20,7 @@ use crate::{
 ///
 /// [`do_exit`]: crate::process::posix_thread::do_exit
 /// [`do_exit_group`]: crate::process::posix_thread::do_exit_group
-pub(super) fn exit_process(current_process: &Process) {
+pub(super) fn exit_process(current_process: &Process, uid: Uid) {
     current_process.status().set_vfork_child(false);
 
     // Drop fields in `Process`.
@@ -38,7 +42,7 @@ pub(super) fn exit_process(current_process: &Process) {
 
     current_process.pidfile_pollee.notify(IoEvents::IN);
 
-    send_child_death_signal(current_process);
+    send_child_death_signal(current_process, uid);
 
     // Remove the process from the cgroup.
     let mut cgroup_guard = CgroupMembership::write_lock();
@@ -186,13 +190,26 @@ fn send_parent_death_signal(children: &BTreeMap<Pid, Arc<Process>>) {
 }
 
 /// Sends a child-death signal to the parent.
-fn send_child_death_signal(current_process: &Process) {
+fn send_child_death_signal(current_process: &Process, uid: Uid) {
     let Some(parent) = current_process.parent().lock().process().upgrade() else {
         return;
     };
 
-    if let Some(signal) = current_process.exit_signal().map(KernelSignal::new) {
-        parent.enqueue_signal(Box::new(signal));
-    };
+    if let Some(signum) = current_process.exit_signal() {
+        if signum == SIGCHLD {
+            let exit_code = current_process.status().exit_code();
+            let (code, status) = if exit_code & 0x7f == 0 {
+                (CLD_EXITED, (exit_code >> 8) as i32)
+            } else {
+                (CLD_KILLED, (exit_code & 0x7f) as i32)
+            };
+            let mut info = siginfo_t::new(signum, code);
+            info.set_pid_uid(current_process.pid(), uid);
+            info.set_status(status);
+            parent.enqueue_signal(Box::new(RawSignal::new(info)));
+        } else {
+            parent.enqueue_signal(Box::new(KernelSignal::new(signum)));
+        }
+    }
     parent.children_wait_queue().wake_all();
 }

@@ -17,6 +17,7 @@ set -e
 ./pty/open_pty_peer
 ./pty/pty_blocking
 ./pty/pty_packet_mode
+./pty/session_exit
 ./pty/signal_char
 ./pty/termios2
 

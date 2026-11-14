@@ -132,7 +132,7 @@ fn exit_internal(
     drop_after!(thread_local.borrow_ns_proxy_mut().remove());
 
     if is_last_thread {
-        exit_process(&posix_process);
+        exit_process(&posix_process, posix_thread.credentials().ruid());
     }
 }
 

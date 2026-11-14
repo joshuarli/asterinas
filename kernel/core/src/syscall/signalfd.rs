@@ -28,7 +28,7 @@ use crate::{
         posix_thread::{AsPosixThread, PosixThread},
         signal::{
             HandlePendingSignal, PollHandle, Pollable, Poller,
-            constants::{SIGKILL, SIGSTOP},
+            constants::{SIGCHLD, SIGKILL, SIGSTOP},
             sig_mask::{AtomicSigMask, SigMask},
             signals::Signal,
         },
@@ -308,18 +308,24 @@ trait ToSignalfdSiginfo {
 impl ToSignalfdSiginfo for Box<dyn Signal> {
     fn to_signalfd_siginfo(&self) -> SignalfdSiginfo {
         let siginfo = self.to_info();
+        let (pid, uid, status) = if siginfo.si_signo == SIGCHLD.as_u8() as i32 {
+            let (pid, uid) = siginfo.pid_uid();
+            (pid, u32::from(uid), siginfo.status())
+        } else {
+            (0, 0, 0)
+        };
         SignalfdSiginfo {
             ssi_signo: siginfo.si_signo as _,
             ssi_errno: siginfo.si_errno,
             ssi_code: siginfo.si_code,
-            ssi_pid: 0,
-            ssi_uid: 0,
+            ssi_pid: pid,
+            ssi_uid: uid,
             ssi_fd: 0,
             ssi_tid: 0,
             ssi_band: 0,
             ssi_overrun: 0,
             ssi_trapno: 0,
-            ssi_status: 0,
+            ssi_status: status,
             ssi_int: 0,
             ssi_ptr: 0,
             ssi_utime: 0,
