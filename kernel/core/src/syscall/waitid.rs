@@ -47,6 +47,11 @@ pub(super) fn sys_waitid(
         })?;
 
     let Some(wait_status) = wait_status else {
+        // Linux clears the caller's `siginfo_t` when `WNOHANG` finds no waitable child,
+        // and callers distinguish that case by the zero `si_signo` or `si_pid`.
+        if infoq_addr != 0 {
+            ctx.user_space().write_val(infoq_addr as usize, &siginfo_t::default())?;
+        }
         return Ok(SyscallReturn::Return(0));
     };
 
