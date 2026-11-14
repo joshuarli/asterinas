@@ -2,9 +2,17 @@
 
 //! This module offers `/proc/net` files that summarize the sockets of the network stack.
 //!
+//! Queue, timer, reference-count and netlink memory telemetry not supplied by the
+//! socket models is emitted as zero; these tables do not provide complete Linux telemetry.
+//!
 //! Reference: <https://www.man7.org/linux/man-pages/man5/proc_pid_net.5.html>
 
+mod inet;
+mod local;
+
 use aster_util::printer::VmPrinter;
+use inet::InetFileOps;
+use local::LocalFileOps;
 
 use crate::{
     fs::{
@@ -31,6 +39,12 @@ impl NetDirOps {
     }
 
     const ENTRIES: &'static [StaticEntry] = &[
+        ("tcp", InodeType::File, InetFileOps::tcp),
+        ("tcp6", InodeType::File, InetFileOps::tcp6),
+        ("udp", InodeType::File, InetFileOps::udp),
+        ("udp6", InodeType::File, InetFileOps::udp6),
+        ("unix", InodeType::File, LocalFileOps::unix),
+        ("netlink", InodeType::File, LocalFileOps::netlink),
         ("sockstat", InodeType::File, SockStatFileOps::new_inode),
         ("sockstat6", InodeType::File, SockStat6FileOps::new_inode),
     ];

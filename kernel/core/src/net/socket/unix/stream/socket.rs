@@ -175,14 +175,16 @@ impl UnixStreamSocket {
     }
 
     fn new_init(init: Init, is_nonblocking: bool, socket_type: SockType) -> Arc<Self> {
-        Arc::new(Self {
+        let socket = Arc::new(Self {
             state: RwMutex::new(Takeable::new(State::Init(init))),
             options: RwLock::new(OptionSet::new()),
             timeouts: SocketTimeouts::new(),
             socket_type,
             pollee: Pollee::new(),
             common: new_socket_common(is_nonblocking),
-        })
+        });
+        crate::net::socket::proc_registry::register(&socket);
+        socket
     }
 
     pub(crate) fn new_pair(is_nonblocking: bool, socket_type: SockType) -> (Arc<Self>, Arc<Self>) {
@@ -213,14 +215,16 @@ impl UnixStreamSocket {
         socket_type: SockType,
     ) -> Arc<Self> {
         let cloned_pollee = connected.cloned_pollee();
-        Arc::new(Self {
+        let socket = Arc::new(Self {
             state: RwMutex::new(Takeable::new(State::Connected(connected))),
             options: RwLock::new(options),
             timeouts: SocketTimeouts::new(),
             socket_type,
             pollee: cloned_pollee,
             common: new_socket_common(is_nonblocking),
-        })
+        });
+        crate::net::socket::proc_registry::register(&socket);
+        socket
     }
 
     fn try_send(
@@ -322,6 +326,19 @@ impl SocketPrivate for UnixStreamSocket {
 }
 
 impl Socket for UnixStreamSocket {
+    fn proc_info(&self) -> Option<crate::net::socket::proc_registry::ProcSocket> {
+        let state = self.state.read();
+        let (state, listening, addr) = match state.as_ref() {
+            State::Init(init) => (1, false, init.addr().cloned()),
+            State::Listen(listener) => (1, true, Some(listener.addr().clone())),
+            State::Connected(connected) => (3, false, connected.addr().cloned()),
+        };
+        Some(crate::net::socket::proc_registry::ProcSocket::Unix {
+            inode: self.common.path().inode().ino(), kind: self.socket_type as u32,
+            state, listening, addr: addr.into(),
+        })
+    }
+
     fn bind(&self, socket_addr: SocketAddr) -> Result<()> {
         let addr = UnixSocketAddr::try_from(socket_addr)?;
 
@@ -590,4 +607,8 @@ impl SetSocketLevelOption for (&State, &SocketTimeouts) {
     fn socket_timeouts(&self) -> Option<&SocketTimeouts> {
         Some(self.1)
     }
+}
+
+impl Drop for UnixStreamSocket {
+    fn drop(&mut self) { crate::net::socket::proc_registry::unregister(self.common.path().inode().ino()); }
 }

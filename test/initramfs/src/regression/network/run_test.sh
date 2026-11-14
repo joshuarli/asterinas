@@ -45,5 +45,6 @@ sleep 0.2
 ./unix_stream_err
 
 ./netlink_route
+./proc_net_identity/proc_net_identity
 ./rtnl_err
 ./uevent_err

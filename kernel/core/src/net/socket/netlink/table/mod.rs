@@ -40,7 +40,8 @@ impl NetlinkSocketTable {
     }
 }
 
-pub(crate) trait SupportedNetlinkProtocol {
+pub(crate) trait SupportedNetlinkProtocol: 'static {
+    const PROTOCOL: StandardNetlinkProtocol;
     type Message: 'static + Send;
 
     fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>>;
@@ -73,6 +74,7 @@ pub(crate) trait SupportedNetlinkProtocol {
 pub(crate) enum NetlinkRouteProtocol {}
 
 impl SupportedNetlinkProtocol for NetlinkRouteProtocol {
+    const PROTOCOL: StandardNetlinkProtocol = StandardNetlinkProtocol::ROUTE;
     type Message = RtnlMessage;
 
     fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>> {
@@ -83,6 +85,7 @@ impl SupportedNetlinkProtocol for NetlinkRouteProtocol {
 pub(crate) enum NetlinkSockDiagProtocol {}
 
 impl SupportedNetlinkProtocol for NetlinkSockDiagProtocol {
+    const PROTOCOL: StandardNetlinkProtocol = StandardNetlinkProtocol::SOCK_DIAG;
     type Message = SockDiagMessage;
 
     fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>> {
@@ -93,6 +96,7 @@ impl SupportedNetlinkProtocol for NetlinkSockDiagProtocol {
 pub(crate) enum NetlinkGenericProtocol {}
 
 impl SupportedNetlinkProtocol for NetlinkGenericProtocol {
+    const PROTOCOL: StandardNetlinkProtocol = StandardNetlinkProtocol::GENERIC;
     type Message = GenericMessage;
 
     fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>> {
@@ -103,6 +107,7 @@ impl SupportedNetlinkProtocol for NetlinkGenericProtocol {
 pub(crate) enum NetlinkUeventProtocol {}
 
 impl SupportedNetlinkProtocol for NetlinkUeventProtocol {
+    const PROTOCOL: StandardNetlinkProtocol = StandardNetlinkProtocol::KOBJECT_UEVENT;
     type Message = UeventMessage;
 
     fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>> {
