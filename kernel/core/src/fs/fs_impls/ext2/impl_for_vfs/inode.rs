@@ -307,24 +307,7 @@ impl Inode for Ext2Inode {
         replaced_inode: Option<&Arc<dyn Inode>>,
         mode: RenameMode,
     ) -> Result<()> {
-        if mode == RenameMode::Exchange {
-            return_errno_with_message!(Errno::EINVAL, "RENAME_EXCHANGE is not supported on ext2");
-        }
-
-        let new_dir_inode = new_dir_dentry.inode().downcast_ref::<Ext2Inode>().unwrap();
-        let old_inode = old_child_dentry
-            .inode()
-            .downcast_ref::<Ext2Inode>()
-            .unwrap();
-        let replaced_inode = replaced_inode.map(|inode| inode.downcast_ref::<Ext2Inode>().unwrap());
-
-        self.rename(
-            &old_child_dentry.name(),
-            old_inode,
-            new_dir_inode,
-            new_name,
-            replaced_inode,
-        )
+        <Self as Inode>::rename_bytes(self, old_child_dentry, new_dir_dentry, new_name.as_bytes(), replaced_inode, mode)
     }
 
     fn rename_bytes(
@@ -335,19 +318,16 @@ impl Inode for Ext2Inode {
         replaced_inode: Option<&Arc<dyn Inode>>,
         mode: RenameMode,
     ) -> Result<()> {
-        if mode == RenameMode::Exchange {
-            return_errno_with_message!(Errno::EINVAL, "RENAME_EXCHANGE is not supported on ext2");
-        }
         let new_dir_inode = new_dir_dentry.inode().downcast_ref::<Ext2Inode>().unwrap();
         let old_inode = old_child_dentry.inode().downcast_ref::<Ext2Inode>().unwrap();
         let replaced_inode = replaced_inode.map(|inode| inode.downcast_ref::<Ext2Inode>().unwrap());
-        self.rename_bytes(
-            &old_child_dentry.name_bytes(),
-            old_inode,
-            new_dir_inode,
-            new_name,
-            replaced_inode,
-        )
+        if mode == RenameMode::Exchange {
+            self.exchange_bytes(&old_child_dentry.name_bytes(), old_inode, new_dir_inode,
+                new_name, replaced_inode.unwrap())
+        } else {
+            self.rename_bytes(&old_child_dentry.name_bytes(), old_inode, new_dir_inode,
+                new_name, replaced_inode)
+        }
     }
 
     fn read_link(&self) -> Result<SymbolicLink> {
