@@ -18,7 +18,7 @@ use crate::{
         signal::{
             DequeuedSignal, PauseReason,
             c_types::siginfo_t,
-            constants::{CLD_TRAPPED, SIGCHLD, SIGKILL, SIGTRAP},
+            constants::{CLD_TRAPPED, SIGCHLD, SIGKILL, SIGSTOP, SIGTRAP},
             signals::{kernel::KernelSignal, raw::RawSignal, user::UserSignal},
         },
     },
@@ -115,11 +115,51 @@ impl PosixThread {
         }
     }
 
-    /// Returns whether a clone-family ptrace event would be required for `clone_args`.
-    pub(in crate::process) fn needs_ptrace_clone_stop(&self, clone_args: &CloneArgs) -> bool {
-        self.tracee_status
-            .get()
-            .is_some_and(|status| status.needs_clone_stop(clone_args))
+    pub(in crate::process) fn ptrace_clone_event(
+        &self,
+        clone_args: &CloneArgs,
+        child: Arc<Thread>,
+    ) -> Option<PtraceEvent> {
+        if clone_args.flags.contains(CloneFlags::CLONE_UNTRACED) {
+            return None;
+        }
+        let state = self.tracee_status.get()?.state.lock();
+        let tracer = state.tracer()?;
+        let child_posix = child.as_posix_thread().unwrap();
+        let event = if clone_args.flags.contains(CloneFlags::CLONE_VFORK) {
+            PtraceEvent::Vfork(child_posix.tid())
+        } else if clone_args.exit_signal == Some(SIGCHLD) {
+            PtraceEvent::Fork(child_posix.tid())
+        } else {
+            PtraceEvent::Clone(child_posix.tid())
+        };
+        if !state.options.contains(event.option()) {
+            return None;
+        }
+        let options = state.options;
+        drop(state);
+        tracer.as_posix_thread().unwrap().attach_to(&tracer, child.clone()).ok()?;
+        let child_status = child_posix.tracee_status.get()?;
+        let mut child_state = child_status.state.lock();
+        child_state.options = options;
+        child_state.initial_stop = true;
+        Some(event)
+    }
+
+    pub(crate) fn ptrace_initial_stop(&self, ctx: &Context, user_ctx: &mut UserContext) {
+        let Some(status) = self.tracee_status.get() else {
+            return;
+        };
+        let mut state = status.state.lock();
+        if !core::mem::take(&mut state.initial_stop) {
+            return;
+        }
+        let Some(tracer) = state.tracer() else {
+            return;
+        };
+        let signal = DequeuedSignal::FromThread(Box::new(KernelSignal::new(SIGSTOP)));
+        let wait_status = PtraceWaitStatus::from_signal(SIGSTOP);
+        status.do_ptrace_stop(state, tracer, signal, wait_status, None, ctx, user_ctx);
     }
 
     /// Returns the ptrace-stop status changes for the `wait` syscall.
@@ -545,25 +585,6 @@ impl TraceeStatus {
         PtraceStopResult::Continued(signal)
     }
 
-    fn needs_clone_stop(&self, clone_args: &CloneArgs) -> bool {
-        let state = self.state.lock();
-        if state.tracer().is_none() {
-            return false;
-        }
-        let options = state.options;
-
-        if clone_args.flags.contains(CloneFlags::CLONE_VFORK) {
-            return options.contains(PtraceOptions::PTRACE_O_TRACEVFORK)
-                || options.contains(PtraceOptions::PTRACE_O_TRACEVFORKDONE);
-        }
-
-        if clone_args.exit_signal == Some(SIGCHLD) {
-            return options.contains(PtraceOptions::PTRACE_O_TRACEFORK);
-        }
-
-        options.contains(PtraceOptions::PTRACE_O_TRACECLONE)
-    }
-
     fn is_ptrace_stopped(&self) -> bool {
         self.is_stopped.load(Ordering::Relaxed)
     }
@@ -759,6 +780,7 @@ impl TraceeStatus {
 }
 
 struct TraceeState {
+    initial_stop: bool,
     tracer: Weak<Thread>,
     /// The signal associated with the current ptrace-stop and later signal delivery.
     signal: StopDeliverySignal,
@@ -786,6 +808,7 @@ struct TraceeState {
 impl TraceeState {
     fn new() -> Self {
         Self {
+            initial_stop: false,
             tracer: Weak::new(),
             signal: StopDeliverySignal::default(),
             event: None,

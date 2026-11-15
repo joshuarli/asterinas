@@ -12,7 +12,7 @@ use ostd::{
 
 use super::{
     Credentials, Pid, Process, pid_table,
-    posix_thread::{AsPosixThread, PosixThreadBuilder},
+    posix_thread::{AsPosixThread, PosixThreadBuilder, ptrace::PtraceEvent},
     rlimit::ResourceLimits,
     signal::{constants::SIGCHLD, sig_disposition::SigDispositions, sig_num::SigNum},
 };
@@ -237,16 +237,6 @@ impl CloneArgs {
             );
         }
 
-        // TODO: Support clone-family ptrace events and remove this check.
-        if !clone_flags.contains(CloneFlags::CLONE_UNTRACED)
-            && ctx.posix_thread.needs_ptrace_clone_stop(self)
-        {
-            return_errno_with_message!(
-                Errno::EOPNOTSUPP,
-                "ptrace clone events are not supported currently"
-            );
-        }
-
         Ok(())
     }
 }
@@ -291,7 +281,7 @@ impl CloneFlags {
 /// but this may not be the expected behavior.
 pub(crate) fn clone_child(
     ctx: &Context,
-    parent_context: &UserContext,
+    parent_context: &mut UserContext,
     clone_args: CloneArgs,
 ) -> Result<Tid> {
     clone_args.check(ctx)?;
@@ -299,7 +289,11 @@ pub(crate) fn clone_child(
     if clone_args.flags.contains(CloneFlags::CLONE_THREAD) {
         let child_task = clone_child_task(ctx, parent_context, clone_args)?;
         let child_thread = child_task.as_thread().unwrap();
+        let event = ctx.posix_thread.ptrace_clone_event(&clone_args, child_thread.clone());
         child_thread.run();
+        if let Some(event) = event {
+            ctx.posix_thread.ptrace_may_stop_on(event, ctx, parent_context);
+        }
 
         let child_tid = child_thread.as_posix_thread().unwrap().tid();
         Ok(child_tid)
@@ -344,7 +338,12 @@ pub(crate) fn clone_child(
             child_process.status().set_vfork_child(true);
         }
 
+        let child_thread = child_process.main_thread();
+        let event = ctx.posix_thread.ptrace_clone_event(&clone_args, child_thread);
         child_process.run();
+        if let Some(event) = event {
+            ctx.posix_thread.ptrace_may_stop_on(event, ctx, parent_context);
+        }
 
         PROCESS_CREATION_COUNTER
             .get()
@@ -359,6 +358,9 @@ pub(crate) fn clone_child(
         }
 
         let child_pid = child_process.pid();
+        if clone_args.flags.contains(CloneFlags::CLONE_VFORK) {
+            ctx.posix_thread.ptrace_may_stop_on(PtraceEvent::VforkDone(child_pid), ctx, parent_context);
+        }
         Ok(child_pid)
     }
 }

@@ -68,6 +68,9 @@ pub(crate) fn create_new_user_task(
             crate::init::on_first_process_startup(&ctx);
         }
 
+        ctx.posix_thread
+            .ptrace_initial_stop(&ctx, user_mode.context_mut());
+
         while !current_thread.is_exited() {
             // Execute the user code
             let return_reason = user_mode.execute(&ctx);
