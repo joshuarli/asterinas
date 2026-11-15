@@ -39,13 +39,16 @@ pub(super) struct SysFsInode {
 impl SysTreeInodeTy for SysFsInode {
     fn new_arc(
         node_kind: SysTreeNodeKind,
-        metadata: Metadata,
+        mut metadata: Metadata,
         mode: InodeMode,
         parent: Weak<Self>,
     ) -> Arc<Self>
     where
         Self: Sized,
     {
+        if matches!(node_kind, SysTreeNodeKind::Attr(..)) {
+            metadata.size = PAGE_SIZE;
+        }
         Arc::new_cyclic(|this| Self {
             node_kind,
             metadata,
