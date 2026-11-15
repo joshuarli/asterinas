@@ -2,7 +2,7 @@
 
 use core::sync::atomic::Ordering;
 
-use super::{INIT_PROCESS_PID, Pid, Process, Uid, pid_table};
+use super::{INIT_PROCESS_PID, Pid, Process, Uid, pid_table, posix_thread::AsPosixThread};
 use crate::{
     thread::AsThread,
     events::IoEvents, fs::cgroupfs::CgroupMembership, prelude::*,
@@ -39,6 +39,20 @@ pub(super) fn exit_process(current_process: &Process, uid: Uid) {
     // This must happen after `move_children_to_reaper_process`. See the comments in
     // `find_reaper_process` for details.
     current_process.status().set_zombie();
+
+    if let Some(tracer) = current_process
+        .main_thread()
+        .as_posix_thread()
+        .unwrap()
+        .tracer()
+    {
+        tracer
+            .as_posix_thread()
+            .unwrap()
+            .process()
+            .children_wait_queue()
+            .wake_all();
+    }
 
     current_process.pidfile_pollee.notify(IoEvents::IN);
 
