@@ -1169,6 +1169,13 @@ enum DentryOptions {
 //
 // TODO: Implement a global reclamation mechanism for `DentryCache` to avoid unbounded growth
 // of cached dentries.
+/// The number of entries a directory's cache may hold before it stops adding negative entries.
+///
+/// A negative entry only saves a filesystem lookup. Unbounded, failed lookups and deletions of
+/// distinct names grow one hash table whose backing array becomes a single large kernel-heap
+/// allocation, which eventually fails with `Failed to allocate a large slot`.
+const MAX_CACHED_CHILDREN: usize = 1024;
+
 #[derive(Debug)]
 struct DentryChildren {
     entries: HashMap<Vec<u8>, CachedDentry>,
@@ -1245,8 +1252,12 @@ impl DentryChildren {
 
     /// Inserts a negative dentry.
     ///
-    /// This operation should not overwrite an existing entry.
+    /// This operation should not overwrite an existing entry. If the cache
+    /// is full, the name is left uncached so that memory stays bounded.
     fn insert_negative(&mut self, name: Vec<u8>) {
+        if self.entries.len() >= MAX_CACHED_CHILDREN && !self.entries.contains_key(&name) {
+            return;
+        }
         let prev = self.entries.insert(name, CachedDentry::new_negative());
         debug_assert!(
             prev.is_none(),
@@ -1263,20 +1274,32 @@ impl DentryChildren {
     }
 
     /// Deletes a positive dentry by name, turning it into a negative entry if exists.
+    ///
+    /// If the cache is already full, the entry is dropped instead of being
+    /// retained as a negative so that mass deletion stays bounded too.
     fn delete(&mut self, name: &[u8]) {
-        let Some((_, exist_entry)) = self.entries.get_key_value_mut(name) else {
+        let is_positive = self
+            .entries
+            .get(name)
+            .is_some_and(CachedDentry::is_positive);
+        if !is_positive {
+            return;
+        }
+        if self.entries.len() >= MAX_CACHED_CHILDREN {
+            self.remove(name);
+            return;
+        }
+        let Some(exist_entry) = self.entries.get_mut(name) else {
             return;
         };
-        if exist_entry.is_positive() {
-            #[cfg(debug_assertions)]
-            {
-                let new_count = NEGATIVE_ENTRY_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-                if new_count > NEGATIVE_ENTRY_LIMIT as u64 {
-                    warn!("number of negative dentries has reached {}", new_count);
-                }
+        #[cfg(debug_assertions)]
+        {
+            let new_count = NEGATIVE_ENTRY_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+            if new_count > NEGATIVE_ENTRY_LIMIT as u64 {
+                warn!("number of negative dentries has reached {}", new_count);
             }
-            *exist_entry = CachedDentry::new_negative()
         }
+        *exist_entry = CachedDentry::new_negative()
     }
 
     /// Removes a dentry by name without installing a negative cache entry.
@@ -1338,5 +1361,25 @@ fn write_lock_children_on_two_dentries<'a>(
         core::cmp::Ordering::Equal => {
             unreachable!("two distinct DirDentry's with identical DentryKey")
         }
+    }
+}
+
+#[cfg(ktest)]
+mod test {
+    use alloc::format;
+
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    #[ktest]
+    fn negative_entries_stop_at_the_cache_bound() {
+        let mut children = DentryChildren::new();
+        for index in 0..MAX_CACHED_CHILDREN * 4 {
+            children.insert_negative(format!("missing-{index}").into_bytes());
+        }
+        assert_eq!(children.entries.len(), MAX_CACHED_CHILDREN);
+        assert!(children.find(b"missing-0").is_some());
+        assert!(children.find(format!("missing-{}", MAX_CACHED_CHILDREN).as_bytes()).is_none());
     }
 }
