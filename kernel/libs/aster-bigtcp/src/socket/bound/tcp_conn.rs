@@ -57,6 +57,7 @@ pub struct RawTcpSocketExt<E: Ext> {
     /// Indicates if the receiving side of this socket is shut down by the user.
     is_recv_shut: bool,
     is_send_shut: bool,
+    has_consumed_fin: bool,
     reset_error: Option<ResetError>,
 }
 
@@ -244,6 +245,7 @@ impl<E: Ext> TcpConnectionInner<E> {
             has_connected: false,
             is_recv_shut: false,
             is_send_shut: false,
+            has_consumed_fin: false,
             reset_error: None,
         };
 
@@ -302,7 +304,10 @@ impl<E: Ext> TcpConnectionBg<E> {
     pub(crate) fn diagnostic_snapshot(&self) -> TcpSocketSnapshot {
         let (state, read_queue, write_queue, shutdown) = {
             let socket = self.inner.lock();
-            (socket.state(), socket.recv_queue().min(u32::MAX as usize) as u32,
+            (socket.state(), socket.recv_queue().saturating_add(usize::from(
+                !socket.has_consumed_fin && matches!(socket.state(),
+                    State::CloseWait | State::LastAck | State::Closing)
+             )).min(u32::MAX as usize) as u32,
              socket.send_queue().min(u32::MAX as usize) as u32,
              u8::from(socket.is_recv_shut || matches!(socket.state(),
                  State::CloseWait | State::LastAck | State::Closing | State::TimeWait))
@@ -541,6 +546,13 @@ impl<E: Ext> TcpConnection<E> {
                     })
                 }
             };
+
+            if behavior.will_consume_data() && socket.recv_queue() == 0
+                && (recv_bytes > 0 || matches!(recv_result, Err(smoltcp::socket::tcp::RecvError::Finished)))
+                && matches!(socket.state(), State::CloseWait | State::LastAck | State::Closing | State::TimeWait)
+            {
+                socket.has_consumed_fin = true;
+            }
 
             let copy_result = match recv_result {
                 Err(_) if socket.reset_error == Some(ResetError::ConnReset) && total_recv_bytes == 0 => {
