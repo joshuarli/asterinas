@@ -16,6 +16,20 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy)]
+pub(crate) struct SleepRestartBlock {
+    clockid: clockid_t,
+    deadline: Duration,
+    remain_timespec_addr: Vaddr,
+}
+
+pub(super) fn sys_restart_syscall(ctx: &Context) -> Result<SyscallReturn> {
+    let Some(block) = ctx.thread_local.restart_block().take() else {
+        return_errno_with_message!(Errno::EINTR, "no sleep to restart");
+    };
+    sleep_until(block, ctx)
+}
+
 pub(super) fn sys_nanosleep(
     request_timespec_addr: Vaddr,
     remain_timespec_addr: Vaddr,
@@ -70,15 +84,26 @@ fn do_clock_nanosleep(
     );
 
     let start_time = read_clock(clockid, ctx)?;
-    let duration = if is_abs_time {
-        if request_time < start_time {
-            return Ok(SyscallReturn::Return(0));
-        }
-
-        request_time - start_time
-    } else {
+    let deadline = if is_abs_time {
         request_time
+    } else {
+        start_time.saturating_add(request_time)
     };
+    ctx.thread_local.restart_block().set(None);
+    sleep_until(
+        SleepRestartBlock {
+            clockid,
+            deadline,
+            remain_timespec_addr: if is_abs_time { 0 } else { remain_timespec_addr },
+        },
+        ctx,
+    )
+}
+
+fn sleep_until(block: SleepRestartBlock, ctx: &Context) -> Result<SyscallReturn> {
+    let SleepRestartBlock { clockid, deadline, remain_timespec_addr } = block;
+    let start_time = read_clock(clockid, ctx)?;
+    let duration = deadline.saturating_sub(start_time);
 
     // FIXME: sleeping thread can only be interrupted by signals that will call signal handler or terminate
     // current process. i.e., the signals that should be ignored will not interrupt sleeping thread.
@@ -118,18 +143,19 @@ fn do_clock_nanosleep(
         Err(e) if e.error() == Errno::EINTR => {
             let end_time = read_clock(clockid, ctx)?;
 
-            if end_time >= start_time + duration {
+            if end_time >= deadline {
                 return Ok(SyscallReturn::Return(0));
             }
 
-            if remain_timespec_addr != 0 && !is_abs_time {
-                let remaining_duration = (start_time + duration) - end_time;
+            if remain_timespec_addr != 0 {
+                let remaining_duration = deadline - end_time;
                 let remaining_timespec = timespec_t::from(remaining_duration);
                 ctx.user_space()
                     .write_val(remain_timespec_addr, &remaining_timespec)?;
             }
 
-            return_errno_with_message!(Errno::EINTR, "sleep was interrupted");
+            ctx.thread_local.restart_block().set(Some(block));
+            return_errno_with_message!(Errno::ERESTART_RESTARTBLOCK, "sleep was interrupted");
         }
         Ok(()) | Err(_) => unreachable!(),
     }

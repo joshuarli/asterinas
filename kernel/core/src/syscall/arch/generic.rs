@@ -86,7 +86,7 @@ macro_rules! import_generic_syscall_entries {
             mremap::sys_mremap,
             msync::sys_msync,
             munmap::sys_munmap,
-            nanosleep::{sys_clock_nanosleep, sys_nanosleep},
+            nanosleep::{sys_clock_nanosleep, sys_nanosleep, sys_restart_syscall},
             open::{sys_openat, sys_openat2},
             personality::sys_personality,
             pidfd_getfd::sys_pidfd_getfd,
@@ -212,6 +212,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
 
         $crate::syscall::impl_syscall_nums_and_dispatch_fn! {
             // Generic syscalls
+            SYS_RESTART_SYSCALL = 128         => sys_restart_syscall(args[..0]);
             SYS_SETXATTR = 5                 => sys_setxattr(args[..5]);
             SYS_LSETXATTR = 6                => sys_lsetxattr(args[..5]);
             SYS_FSETXATTR = 7                => sys_fsetxattr(args[..5]);

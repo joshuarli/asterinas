@@ -23,6 +23,8 @@ use crate::{cpu::LinuxAbi, prelude::*};
 #[cfg_attr(target_arch = "aarch64", path = "arch/arm.rs")]
 mod arch;
 
+pub(crate) use arch::SYS_RESTART_SYSCALL;
+
 mod accept;
 mod access;
 mod alarm;
@@ -105,7 +107,7 @@ mod mprotect;
 mod mremap;
 mod msync;
 mod munmap;
-mod nanosleep;
+pub(crate) mod nanosleep;
 mod open;
 mod pause;
 mod personality;

@@ -52,15 +52,20 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
     // other pending unmasked signals until the next trap. Consider a looped scan.
     //
     // For details, see <https://github.com/asterinas/asterinas/pull/2984/#discussion_r3137275994>.
-    let syscall_restart = if let Some(orig_syscall_ret) = ctx.thread_local.orig_syscall_ret()
-        && user_ctx.syscall_ret() == -(Errno::ERESTARTSYS as i32) as usize
-    {
-        // We should never return `ERESTARTSYS` to the userspace.
+    let syscall_restart = ctx.thread_local.orig_syscall_ret().and_then(|original| {
+        let ret = user_ctx.syscall_ret();
+        let kind = if ret == -(Errno::ERESTARTSYS as i32) as usize {
+            Errno::ERESTARTSYS
+        } else if ret == -(Errno::ERESTARTNOHAND as i32) as usize {
+            Errno::ERESTARTNOHAND
+        } else if ret == -(Errno::ERESTART_RESTARTBLOCK as i32) as usize {
+            Errno::ERESTART_RESTARTBLOCK
+        } else {
+            return None;
+        };
         user_ctx.set_syscall_ret(-(Errno::EINTR as i32) as usize);
-        Some(orig_syscall_ret)
-    } else {
-        None
-    };
+        Some((kind, original))
+    });
 
     let mut restore_sig_mask = ctx
         .thread_local
@@ -73,6 +78,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
     } else {
         // Fast path: There is no signal mask to restore.
         if restore_sig_mask.is_none() {
+            restart_without_handler(user_ctx, syscall_restart);
             return;
         }
         // Restore the signal mask first.
@@ -82,6 +88,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
         if let Some(dequeued_signal) = dequeue_pending_signal(ctx) {
             dequeued_signal
         } else {
+            restart_without_handler(user_ctx, syscall_restart);
             return;
         }
     };
@@ -101,12 +108,16 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                     //
                     // Reference: <https://elixir.bootlin.com/linux/v6.16.5/source/kernel/signal.c#L2770>
                     requeue_signal(ctx, dequeued);
+                    restart_without_handler(user_ctx, syscall_restart);
                     return;
                 }
 
                 (dequeued.unwrap(), get_sig_action(ctx, sig_num))
             }
-            PtraceStopResult::Continued(None) => return,
+            PtraceStopResult::Continued(None) => {
+                restart_without_handler(user_ctx, syscall_restart);
+                return;
+            }
             PtraceStopResult::Interrupted => {
                 match dequeue_pending_signal(ctx) {
                     Some((dequeued, action)) if dequeued.num() == SIGKILL => {
@@ -114,7 +125,10 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                     }
                     // SIGKILL was consumed by a sibling thread; this thread will be
                     // terminated as part of the process-wide exit.
-                    _ => return,
+                    _ => {
+                        restart_without_handler(user_ctx, syscall_restart);
+                        return;
+                    }
                 }
             }
             PtraceStopResult::NotTraced(dequeued) => (dequeued.unwrap().unwrap(), sig_action),
@@ -143,21 +157,13 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                 sig_dispositions.set_default(sig_num);
             }
 
-            if let Some(orig_syscall_ret) = syscall_restart
-                && flags.contains(SigActionFlags::SA_RESTART)
-            {
-                #[cfg(target_arch = "x86_64")]
-                const SYSCALL_INSTR_LEN: usize = 2; // syscall
-                #[cfg(target_arch = "riscv64")]
-                const SYSCALL_INSTR_LEN: usize = 4; // ecall
-                #[cfg(target_arch = "loongarch64")]
-                const SYSCALL_INSTR_LEN: usize = 4; // syscall
-                #[cfg(target_arch = "aarch64")]
-                const SYSCALL_INSTR_LEN: usize = 4; // svc
-
-                user_ctx.set_syscall_ret(orig_syscall_ret);
-                user_ctx
-                    .set_instruction_pointer(user_ctx.instruction_pointer() - SYSCALL_INSTR_LEN);
+            if let Some((kind, original)) = syscall_restart {
+                if kind == Errno::ERESTARTSYS && flags.contains(SigActionFlags::SA_RESTART) {
+                    restart_syscall(user_ctx, original, false);
+                }
+                if kind == Errno::ERESTART_RESTARTBLOCK {
+                    ctx.thread_local.restart_block().set(None);
+                }
             }
 
             if let Err(e) = handle_user_signal(
@@ -180,6 +186,7 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
                 // This can be observed in LTP test `signal06`.
                 do_exit_group(TermStatus::Killed(SIGSEGV), ctx, user_ctx);
             }
+            return;
         }
         SigAction::Dfl if ctx.process.is_init_process() => {
             // From Linux man pages "kill(2)":
@@ -206,6 +213,28 @@ pub(crate) fn handle_pending_signal(user_ctx: &mut UserContext, ctx: &Context) {
             }
         }
     }
+    restart_without_handler(user_ctx, syscall_restart);
+}
+
+fn restart_without_handler(user_ctx: &mut UserContext, restart: Option<(Errno, usize)>) {
+    if let Some((kind, original)) = restart {
+        if kind == Errno::ERESTARTNOHAND || kind == Errno::ERESTART_RESTARTBLOCK {
+            restart_syscall(user_ctx, original, kind == Errno::ERESTART_RESTARTBLOCK);
+        }
+    }
+}
+
+fn restart_syscall(user_ctx: &mut UserContext, original: usize, restart_block: bool) {
+    #[cfg(target_arch = "x86_64")]
+    const SYSCALL_INSTR_LEN: usize = 2;
+    #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64", target_arch = "aarch64"))]
+    const SYSCALL_INSTR_LEN: usize = 4;
+
+    user_ctx.set_syscall_ret(original);
+    if restart_block {
+        user_ctx.set_syscall_num(crate::syscall::SYS_RESTART_SYSCALL as usize);
+    }
+    user_ctx.set_instruction_pointer(user_ctx.instruction_pointer() - SYSCALL_INSTR_LEN);
 }
 
 /// A guard that restores the signal mask on drop.

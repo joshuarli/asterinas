@@ -86,7 +86,7 @@ use super::{
     mremap::sys_mremap,
     msync::sys_msync,
     munmap::sys_munmap,
-    nanosleep::{sys_clock_nanosleep, sys_nanosleep},
+    nanosleep::{sys_clock_nanosleep, sys_nanosleep, sys_restart_syscall},
     open::{sys_creat, sys_open, sys_openat, sys_openat2},
     pause::sys_pause,
     personality::sys_personality,
@@ -367,6 +367,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_CLOCK_SETTIME = 227    => sys_clock_settime(args[..2]);
     SYS_CLOCK_GETTIME = 228    => sys_clock_gettime(args[..2]);
     SYS_CLOCK_GETRES = 229     => sys_clock_getres(args[..2]);
+    SYS_RESTART_SYSCALL = 219  => sys_restart_syscall(args[..0]);
     SYS_CLOCK_NANOSLEEP = 230  => sys_clock_nanosleep(args[..4]);
     SYS_EXIT_GROUP = 231       => sys_exit_group(args[..1], &mut user_ctx);
     SYS_EPOLL_WAIT = 232       => sys_epoll_wait(args[..4]);

@@ -16,6 +16,7 @@ use crate::{
         NsProxy, UserNamespace,
         signal::{SigStack, sig_mask::SigMask},
     },
+    syscall::nanosleep::SleepRestartBlock,
     vm::vmar::VmarHandle,
 };
 
@@ -53,6 +54,8 @@ pub(crate) struct ThreadLocal {
     /// at the most recent kernel entry, or `None` for non-syscall entries.
     orig_syscall_ret: Cell<Option<usize>>,
 
+    restart_block: Cell<Option<SleepRestartBlock>>,
+
     // Namespaces.
     user_ns: RefCell<Arc<UserNamespace>>,
     ns_proxy: RefCell<Option<Arc<NsProxy>>>,
@@ -82,6 +85,7 @@ impl ThreadLocal {
             sig_stack: RefCell::new(SigStack::default()),
             sig_mask_saved: Cell::new(None),
             orig_syscall_ret: Cell::new(None),
+            restart_block: Cell::new(None),
             user_ns: RefCell::new(user_ns),
             ns_proxy: RefCell::new(Some(ns_proxy)),
         }
@@ -186,6 +190,10 @@ impl ThreadLocal {
     /// for the most recent kernel entry.
     pub(crate) fn set_orig_syscall_ret(&self, value: Option<usize>) {
         self.orig_syscall_ret.set(value);
+    }
+
+    pub(crate) fn restart_block(&self) -> &Cell<Option<SleepRestartBlock>> {
+        &self.restart_block
     }
 
     pub(crate) fn borrow_user_ns(&self) -> Ref<'_, Arc<UserNamespace>> {
