@@ -12,7 +12,7 @@ static SOCKETS: SpinLock<BTreeMap<u64, Weak<dyn Socket>>, BottomHalfDisabled> = 
 
 pub(crate) enum ProcSocket {
     Unix { inode: u64, kind: u32, state: u8, listening: bool, addr: UnixSocketAddr },
-    Netlink { inode: u64, protocol: u32, port: u32, groups: u32 },
+    Netlink { inode: u64, protocol: u32, port: u32, groups: u32, kind: u8, connected: bool, dst_port: u32, dst_group: u32, recv_used: u32, recv_buf: u32, send_buf: u32 },
 }
 
 pub(super) fn register<T: Socket + 'static>(socket: &Arc<T>) {

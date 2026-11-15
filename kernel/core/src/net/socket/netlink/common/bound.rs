@@ -13,6 +13,7 @@ use crate::{
 pub(crate) struct BoundNetlink<Message: 'static> {
     pub(in netlink) handle: BoundHandle<Message>,
     pub(in netlink) remote_addr: NetlinkSocketAddr,
+    pub(in netlink) connected: bool,
     pub(in netlink) receive_queue: Arc<Mutex<MessageQueue<Message>>>,
 }
 
@@ -24,6 +25,7 @@ impl<Message: 'static> BoundNetlink<Message> {
         Self {
             handle,
             remote_addr: NetlinkSocketAddr::new_unspecified(),
+            connected: false,
             receive_queue: message_queue,
         }
     }
