@@ -37,6 +37,17 @@ pub(super) fn sys_prctl(
             };
             ctx.user_space().write_val(write_to_addr, &write_val)?;
         }
+        PrctlCmd::PR_GET_AUXV(addr, size) => {
+            let auxv = {
+                let vmar_guard = ctx.process.lock_vmar();
+                vmar_guard.unwrap().process_vm().init_stack().saved_auxv()
+            };
+            let copy_len = size.min(auxv.len());
+            if copy_len != 0 {
+                ctx.user_space().write_bytes(addr, &auxv[..copy_len])?;
+            }
+            return Ok(SyscallReturn::Return(auxv.len() as _));
+        }
         PrctlCmd::PR_GET_DUMPABLE => {
             let vmar_guard = ctx.process.lock_vmar();
             return Ok(SyscallReturn::Return(vmar_guard.unwrap().process_vm().is_dumpable() as _));
@@ -175,12 +186,14 @@ const PR_GET_CHILD_SUBREAPER: i32 = 37;
 const PR_SET_NO_NEW_PRIVS: i32 = 38;
 const PR_GET_NO_NEW_PRIVS: i32 = 39;
 const PR_CAP_AMBIENT: i32 = 47;
+const PR_GET_AUXV: i32 = 0x4155_5856;
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 enum PrctlCmd {
     PR_SET_PDEATHSIG(Option<SigNum>),
     PR_GET_PDEATHSIG(Vaddr),
+    PR_GET_AUXV(Vaddr, usize),
     PR_GET_DUMPABLE,
     PR_SET_DUMPABLE(Dumpable),
     PR_GET_KEEPCAPS,
@@ -230,6 +243,12 @@ impl PrctlCmd {
                 Ok(PrctlCmd::PR_SET_PDEATHSIG(signum))
             }
             PR_GET_PDEATHSIG => Ok(PrctlCmd::PR_GET_PDEATHSIG(arg2 as _)),
+            PR_GET_AUXV => {
+                if arg4 != 0 || arg5 != 0 {
+                    return_errno_with_message!(Errno::EINVAL, "invalid PR_GET_AUXV arguments");
+                }
+                Ok(PrctlCmd::PR_GET_AUXV(arg2 as _, arg3 as _))
+            }
             PR_GET_DUMPABLE => Ok(PrctlCmd::PR_GET_DUMPABLE),
             PR_SET_DUMPABLE => Ok(PrctlCmd::PR_SET_DUMPABLE(Dumpable::try_from(arg2)?)),
             PR_GET_KEEPCAPS => Ok(PrctlCmd::PR_GET_KEEPCAPS),
