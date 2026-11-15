@@ -161,7 +161,14 @@ impl Pollee {
             .subject
             .register_observer(poller.observer.clone(), mask);
 
-        poller.pollees.push(Arc::downgrade(&self.inner));
+        let pollee = Arc::downgrade(&self.inner);
+        if !poller
+            .pollees
+            .iter()
+            .any(|registered| Weak::ptr_eq(registered, &pollee))
+        {
+            poller.pollees.push(pollee);
+        }
     }
 
     /// Notifies pollers of some events.
@@ -223,8 +230,8 @@ impl PollHandle {
         let observer = &self.observer;
 
         self.pollees
-            .iter()
-            .filter_map(Weak::upgrade)
+            .drain(..)
+            .filter_map(|pollee| pollee.upgrade())
             .for_each(|pollee| {
                 pollee.subject.unregister_observer(observer);
             });
