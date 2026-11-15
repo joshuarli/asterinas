@@ -75,6 +75,10 @@ impl KernelSysNodeRoot {
             SysStr::from("address_bits"),
             SysPerms::DEFAULT_RO_ATTR_PERMS,
         );
+        builder.add(
+            SysStr::from("profiling"),
+            SysPerms::DEFAULT_RW_ATTR_PERMS,
+        );
         // TODO: Add more kernel-specific attributes.
         let attrs = builder
             .build()
@@ -106,6 +110,11 @@ inherit_sys_branch_node!(KernelSysNodeRoot, fields, {
             "address_bits" => {
                 let mut printer = VmPrinter::new_skip(writer, offset);
                 writeln!(printer, "{}", usize::BITS)?;
+                Ok(printer.bytes_written())
+            }
+            "profiling" => {
+                let mut printer = VmPrinter::new_skip(writer, offset);
+                writeln!(printer, "0")?;
                 Ok(printer.bytes_written())
             }
             // TODO: Add support for reading other attributes.

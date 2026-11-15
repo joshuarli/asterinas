@@ -14,6 +14,7 @@ use self::{
     diskstats::DiskStatsFileOps,
     loadavg::LoadAvgFileOps,
     meminfo::MemInfoFileOps,
+    modules::ModulesFileOps,
     mounts::MountsSymOps,
     net::NetDirOps,
     pid::{PidDirOps, TidDirOps},
@@ -49,6 +50,7 @@ mod diskstats;
 mod filesystems;
 mod loadavg;
 mod meminfo;
+mod modules;
 mod mounts;
 mod net;
 mod pid;
@@ -167,6 +169,7 @@ impl RootDirOps {
         ),
         ("loadavg", InodeType::File, LoadAvgFileOps::new_inode),
         ("meminfo", InodeType::File, MemInfoFileOps::new_inode),
+        ("modules", InodeType::File, ModulesFileOps::new_inode),
         ("mounts", InodeType::SymLink, MountsSymOps::new_inode),
         ("net", InodeType::Dir, NetDirOps::new_inode),
         ("self", InodeType::SymLink, SelfSymOps::new_inode),
