@@ -29,6 +29,8 @@ impl<Message> MessageQueue<Message> {
     }
 
     /// Returns whether the message queue is empty.
+    pub(super) fn length(&self) -> usize { self.total_length }
+
     pub(super) fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }

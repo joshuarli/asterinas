@@ -17,7 +17,7 @@ impl datagram_common::Bound for BoundNetlink<SockDiagMessage> {
     fn local_endpoint(&self) -> Self::Endpoint { self.handle.addr() }
     fn bind(&mut self, endpoint: &Self::Endpoint) -> Result<()> { self.bind_common(endpoint) }
     fn remote_endpoint(&self) -> Option<&Self::Endpoint> { Some(&self.remote_addr) }
-    fn set_remote_endpoint(&mut self, endpoint: &Self::Endpoint) { self.remote_addr = *endpoint; }
+    fn set_remote_endpoint(&mut self, endpoint: &Self::Endpoint) { self.remote_addr = *endpoint; self.connected = true; }
 
     fn try_send(&self, reader: &mut dyn MultiRead, remote: &Self::Endpoint, _flags: SendFlags) -> Result<usize> {
         if *remote != NetlinkSocketAddr::new_unspecified() {

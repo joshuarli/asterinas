@@ -33,7 +33,7 @@ impl datagram_common::Bound for BoundNetlinkUevent {
     }
 
     fn set_remote_endpoint(&mut self, endpoint: &Self::Endpoint) {
-        self.remote_addr = *endpoint;
+        self.remote_addr = *endpoint; self.connected = true;
     }
 
     fn try_send(

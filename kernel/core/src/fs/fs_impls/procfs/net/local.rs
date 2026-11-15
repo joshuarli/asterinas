@@ -44,7 +44,7 @@ impl ProcFileOps for LocalFileOps {
                         }
                         writeln!(printer)?;
                     },
-                    ProcSocket::Netlink { inode, protocol, port, groups } if !self.unix => {
+                    ProcSocket::Netlink { inode, protocol, port, groups, .. } if !self.unix && port != 0 => {
                         writeln!(printer, "0000000000000000 {} {} {:08x} 0 0 0 0 0 {}", protocol, port, groups, inode)?;
                     },
                     _ => {},

@@ -43,6 +43,7 @@ use crate::{
             file_system::{FileSystem, FsEventSubscriberStats, SuperBlock},
             inode::{Extension, FileOps, Inode, Metadata},
             path::Dentry,
+            xattr::XattrName,
         },
     },
     prelude::*,
@@ -195,6 +196,7 @@ pub(crate) struct PseudoInode {
     extension: Extension,
     fs: Weak<NaivePseudoFs>,
     is_anon: bool,
+    socket_protocol: Option<&'static str>,
 }
 
 impl PseudoInode {
@@ -234,6 +236,7 @@ impl PseudoInode {
             extension: Extension::new(),
             fs,
             is_anon: type_ == InodeType::Unknown,
+            socket_protocol: None,
         }
     }
 
@@ -271,6 +274,17 @@ impl FileOps for PseudoInode {
 }
 
 impl Inode for PseudoInode {
+    fn get_xattr(&self, name: XattrName, writer: &mut VmWriter) -> Result<usize> {
+        let Some(protocol) = self.socket_protocol.filter(|_| name.full_name() == "system.sockprotoname") else {
+            return Err(Error::new(Errno::EOPNOTSUPP));
+        };
+        let value = protocol.as_bytes();
+        if writer.avail() == 0 { return Ok(value.len()); }
+        if writer.avail() < value.len() { return Err(Error::new(Errno::ERANGE)); }
+        writer.write_fallible(&mut VmReader::from(value))?;
+        Ok(value.len())
+    }
+
     fn size(&self) -> usize {
         self.metadata.lock().size
     }

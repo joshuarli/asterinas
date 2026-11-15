@@ -10,7 +10,7 @@ use crate::{
     net::socket::{
         Socket,
         netlink::{AddMembership, DropMembership, table::SupportedNetlinkProtocol},
-        new_socket_common,
+        new_netlink_socket_common,
         options::{
             Error as SocketError, SocketOption,
             macros::{sock_option_mut, sock_option_ref},
@@ -69,7 +69,7 @@ where
             socket_type,
             timeouts: SocketTimeouts::new(),
             pollee: Pollee::new(),
-            common: new_socket_common(is_nonblocking),
+            common: new_netlink_socket_common(is_nonblocking),
         });
         crate::net::socket::proc_registry::register(&socket);
         socket
@@ -118,13 +118,19 @@ where
     BoundNetlink<P::Message>: Bound<Endpoint = NetlinkSocketAddr>,
 {
     fn proc_info(&self) -> Option<crate::net::socket::proc_registry::ProcSocket> {
-        let endpoint = match &*self.inner.read() {
-            Inner::Unbound(_) => return None,
-            Inner::Bound(bound) => bound.local_endpoint(),
+        let inner = self.inner.read();
+        let (endpoint, remote, connected, recv_used) = match &*inner {
+            Inner::Unbound(unbound) => (unbound.addr(), NetlinkSocketAddr::new_unspecified(), false, 0),
+            Inner::Bound(bound) => (bound.local_endpoint(), bound.remote_addr, bound.connected, bound.receive_queue.lock().length() as u32),
         };
+        let options = self.options.read();
+        let groups = remote.groups().as_u32();
         Some(crate::net::socket::proc_registry::ProcSocket::Netlink {
             inode: self.common.path().inode().ino(), protocol: P::PROTOCOL as u32,
-            port: endpoint.port(), groups: endpoint.groups().as_u32(),
+            port: endpoint.port(), groups: endpoint.groups().as_u32(), kind: self.socket_type as u8,
+            connected, dst_port: remote.port(),
+            dst_group: if groups == 0 { 0 } else { groups.trailing_zeros() + 1 },
+            recv_used, recv_buf: options.socket.recv_buf(), send_buf: options.socket.send_buf(),
         })
     }
 

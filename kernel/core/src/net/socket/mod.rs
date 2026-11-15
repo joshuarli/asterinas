@@ -226,6 +226,11 @@ fn new_socket_common(is_nonblocking: bool) -> FileCommon {
     FileCommon::new(SockFs::new_path(), AccessMode::O_RDWR, status_flags)
 }
 
+fn new_netlink_socket_common(is_nonblocking: bool) -> FileCommon {
+    let status_flags = if is_nonblocking { StatusFlags::O_NONBLOCK } else { StatusFlags::empty() };
+    FileCommon::new(SockFs::new_netlink_path(), AccessMode::O_RDWR, status_flags)
+}
+
 fn new_udp_socket_common(is_nonblocking: bool, uid: crate::process::Uid, gid: crate::process::Gid) -> (FileCommon, Arc<AtomicU32>) {
     let status_flags = if is_nonblocking { StatusFlags::O_NONBLOCK } else { StatusFlags::empty() };
     let (path, owner) = SockFs::new_path_with_owner(uid, gid);

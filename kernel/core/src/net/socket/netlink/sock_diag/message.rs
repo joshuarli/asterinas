@@ -10,6 +10,12 @@ use crate::{
 pub(crate) enum SockDiagMessage {
     Single(Vec<u8>),
     Dump(Mutex<Dump>),
+    NetlinkDump(Mutex<NetlinkDump>),
+}
+
+pub(crate) struct NetlinkDump {
+    pub(super) packets: Vec<Vec<u8>>,
+    pub(super) index: usize,
 }
 
 pub(crate) struct Dump {
@@ -22,6 +28,7 @@ impl SockDiagMessage {
         match self {
             Self::Single(bytes) => { writer.write(&mut VmReader::from(bytes.as_slice()))?; }
             Self::Dump(dump) => { writer.write(&mut VmReader::from(dump.lock().bytes.as_slice()))?; }
+            Self::NetlinkDump(dump) => { let dump = dump.lock(); writer.write(&mut VmReader::from(dump.packets[dump.index].as_slice()))?; }
         }
         Ok(())
     }
@@ -29,6 +36,7 @@ impl SockDiagMessage {
     pub(super) fn advance(&self) -> bool {
         match self {
             Self::Single(_) => true,
+            Self::NetlinkDump(dump) => { let mut dump = dump.lock(); dump.index += 1; dump.index == dump.packets.len() },
             Self::Dump(dump) => {
                 let mut dump = dump.lock();
                 if dump.cursor.finished { return true; }
@@ -44,13 +52,14 @@ impl QueueableMessage for SockDiagMessage {
         match self {
             Self::Single(bytes) => bytes.len(),
             Self::Dump(dump) => dump.lock().bytes.len(),
+            Self::NetlinkDump(dump) => { let dump = dump.lock(); dump.packets[dump.index].len() },
         }
     }
 
     fn queue_len(&self) -> usize {
         match self {
             Self::Single(bytes) => bytes.len(),
-            Self::Dump(_) => DUMP_PACKET_SIZE,
+            Self::Dump(_) | Self::NetlinkDump(_) => DUMP_PACKET_SIZE,
         }
     }
 }

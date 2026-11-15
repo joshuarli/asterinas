@@ -48,6 +48,14 @@ impl SockFs {
         Self::path(socket_inode)
     }
 
+    pub(crate) fn new_netlink_path() -> Path {
+        let mut inode = Self::singleton().alloc_inode(
+            PseudoInodeType::Socket, mkmod!(a+rwx), Uid::new_root(), Gid::new_root(),
+        );
+        inode.socket_protocol = Some("NETLINK\0");
+        Self::path(Arc::new(inode))
+    }
+
     pub(crate) fn new_path_with_owner(uid: Uid, gid: Gid) -> (Path, Arc<AtomicU32>) {
         let mut inode = Self::singleton().alloc_inode(PseudoInodeType::Socket, mkmod!(a+rwx), uid, gid);
         let owner = inode.track_owner();
