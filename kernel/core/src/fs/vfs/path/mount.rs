@@ -497,6 +497,14 @@ impl Mount {
         }
     }
 
+    pub(crate) fn statmount_propagation(&self) -> (u64, u64, u64) {
+        let propagation = self.propagation.read();
+        let peer = propagation.peer_group_id().unwrap_or(0) as u64;
+        let master = propagation.master_id().unwrap_or(0) as u64;
+        let kind = if propagation.is_shared() { 1 << 20 } else if master != 0 { 1 << 19 } else if propagation.is_unbindable() { 1 << 17 } else { 1 << 18 };
+        (kind, peer, master)
+    }
+
     /// Returns whether this mount cannot be bind-cloned.
     pub(super) fn is_unbindable(&self) -> bool {
         self.propagation.read().is_unbindable()
@@ -689,12 +697,12 @@ impl Mount {
     }
 
     /// Gets the root `Dentry` of this mount node.
-    pub(in crate::fs) fn root_dentry(&self) -> &Arc<Dentry> {
+    pub(crate) fn root_dentry(&self) -> &Arc<Dentry> {
         &self.root_dentry
     }
 
     /// Gets the mountpoint `Dentry` of this mount node if any.
-    pub(in crate::fs) fn mountpoint(&self) -> Option<Arc<Dentry>> {
+    pub(crate) fn mountpoint(&self) -> Option<Arc<Dentry>> {
         self.mountpoint.read().clone()
     }
 
@@ -760,7 +768,7 @@ impl Mount {
     }
 
     /// Gets the parent mount node if any.
-    pub(in crate::fs) fn parent(&self) -> Option<Weak<Self>> {
+    pub(crate) fn parent(&self) -> Option<Weak<Self>> {
         self.parent.read().as_ref().cloned()
     }
 

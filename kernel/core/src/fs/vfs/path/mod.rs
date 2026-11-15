@@ -187,7 +187,7 @@ impl Path {
         Self::new(mount, dentry)
     }
 
-    pub(in crate::fs) fn new(mount: Arc<Mount>, dentry: Arc<Dentry>) -> Self {
+    pub(crate) fn new(mount: Arc<Mount>, dentry: Arc<Dentry>) -> Self {
         Self { mount, dentry }
     }
 
@@ -197,7 +197,7 @@ impl Path {
     }
 
     /// Gets the dentry of current `Path`.
-    pub(in crate::fs) fn dentry(&self) -> &Arc<Dentry> {
+    pub(crate) fn dentry(&self) -> &Arc<Dentry> {
         &self.dentry
     }
 
