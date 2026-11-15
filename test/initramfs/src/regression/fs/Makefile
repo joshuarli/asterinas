@@ -18,6 +18,7 @@ SUBDIRS := \
 	procfs \
 	pseudofs \
 	rename \
+	statmount \
 	statx \
 	symlink \
 	sync \

@@ -393,7 +393,7 @@ impl Dentry {
     }
 
     /// Gets the absolute path name of this `Dentry` within the filesystem.
-    pub(in crate::fs) fn path_name(&self) -> String {
+    pub(crate) fn path_name(&self) -> String {
         let mut path_name = self.name().to_string();
         let mut current_dir = self.this();
 

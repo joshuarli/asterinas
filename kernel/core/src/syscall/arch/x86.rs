@@ -165,6 +165,7 @@ use super::{
     socketpair::sys_socketpair,
     stat::{sys_fstat, sys_fstatat, sys_lstat, sys_stat},
     statfs::{sys_fstatfs, sys_statfs},
+    statmount::sys_statmount,
     statx::sys_statx,
     symlink::{sys_symlink, sys_symlinkat},
     sync::{sys_sync, sys_syncfs},
@@ -441,5 +442,6 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_FACCESSAT2 = 439       => sys_faccessat2(args[..4]);
     SYS_EPOLL_PWAIT2 = 441     => sys_epoll_pwait2(args[..6]);
     SYS_FCHMODAT2 = 452        => sys_fchmodat2(args[..4]);
+    SYS_STATMOUNT = 457        => sys_statmount(args[..4]);
     SYS_LISTMOUNT = 458        => sys_listmount(args[..4]);
 }
