@@ -716,6 +716,9 @@ impl DirDentry<'_> {
 
     pub(in crate::fs) fn link_bytes(&self, old_dentry: &Dentry, name: &[u8]) -> Result<()> {
         let children = self.validate_child_absent(name)?;
+        if old_dentry.type_() == InodeType::Dir {
+            return_errno_with_message!(Errno::EPERM, "the link path is a directory");
+        }
         self.inode.link_bytes(self, old_dentry, name)?;
         let dentry = Dentry::new(
             old_dentry.inode().clone(),

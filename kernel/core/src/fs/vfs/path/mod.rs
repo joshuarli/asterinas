@@ -240,6 +240,10 @@ impl Path {
             );
         }
 
+        if inode_type == InodeType::Socket && !status_flags.contains(StatusFlags::O_PATH) {
+            return_errno_with_message!(Errno::ENXIO, "cannot open a socket inode");
+        }
+
         if inode_type.is_regular_file()
             && creation_flags.contains(CreationFlags::O_TRUNC)
             && !status_flags.contains(StatusFlags::O_PATH)

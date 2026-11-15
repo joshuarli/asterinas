@@ -308,6 +308,59 @@ impl Inode {
         Ok(())
     }
 
+    pub(in ext2) fn exchange_bytes(
+        &self,
+        old_name: &[u8],
+        old_inode: &Inode,
+        new_dir_inode: &Inode,
+        new_name: &[u8],
+        new_inode: &Inode,
+    ) -> Result<()> {
+        let mut guards = MultiInodeInnerGuards::lock(&[self, new_dir_inode, old_inode, new_inode]);
+        let old_is_dir = old_inode.type_ == InodeType::Dir;
+        let new_is_dir = new_inode.type_ == InodeType::Dir;
+        let same_dir = self.ino == new_dir_inode.ino;
+
+        if !same_dir {
+            if old_is_dir && guards.inner(old_inode.ino()).find_entry_info(b"..")?.ino != self.ino {
+                return_errno!(Errno::EIO);
+            }
+            if new_is_dir && guards.inner(new_inode.ino()).find_entry_info(b"..")?.ino != new_dir_inode.ino {
+                return_errno!(Errno::EIO);
+            }
+        }
+        if !same_dir && old_is_dir != new_is_dir {
+            let receiving = if old_is_dir { new_dir_inode } else { self };
+            if guards.inner(receiving.ino).link_count() >= MAX_LINK_COUNT {
+                return_errno!(Errno::EMLINK);
+            }
+        }
+        guards.inner_mut(self.ino).overwrite_entry(old_name, new_inode.ino(), DirEntryFileType::from(new_inode.type_))?;
+        guards.inner_mut(new_dir_inode.ino).overwrite_entry(new_name, old_inode.ino(), DirEntryFileType::from(old_inode.type_))?;
+        let now = utils::now();
+        guards.inner_mut(self.ino).set_mtime_ctime(now);
+        guards.inner_mut(new_dir_inode.ino).set_mtime_ctime(now);
+        if !same_dir {
+            if old_is_dir {
+                guards.inner_mut(old_inode.ino()).overwrite_entry(b"..", new_dir_inode.ino, DirEntryFileType::Dir)?;
+                if !new_is_dir {
+                    guards.inner_mut(self.ino).dec_link_count(1);
+                    guards.inner_mut(new_dir_inode.ino).inc_link_count(1);
+                }
+            }
+            if new_is_dir {
+                guards.inner_mut(new_inode.ino()).overwrite_entry(b"..", self.ino, DirEntryFileType::Dir)?;
+                if !old_is_dir {
+                    guards.inner_mut(new_dir_inode.ino).dec_link_count(1);
+                    guards.inner_mut(self.ino).inc_link_count(1);
+                }
+            }
+        }
+        guards.inner_mut(old_inode.ino()).set_ctime(now);
+        guards.inner_mut(new_inode.ino()).set_ctime(now);
+        Ok(())
+    }
+
     fn validate_rename_invariants(
         &self,
         guards: &MultiInodeInnerGuards,

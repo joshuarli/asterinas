@@ -3,7 +3,7 @@
 use super::SyscallReturn;
 use crate::{
     fs::{
-        file::{InodeType, file_table::RawFileDesc},
+        file::file_table::RawFileDesc,
         vfs::path::{AT_FDCWD, EmptyPathStr, FsPath},
     },
     prelude::*,
@@ -49,10 +49,6 @@ pub(super) fn sys_linkat(
         } else {
             path_resolver.lookup_no_follow(&old_fs_path)?
         };
-        if old_path.type_() == InodeType::Dir {
-            return_errno_with_message!(Errno::EPERM, "the link path is a directory");
-        }
-
         let (new_path, new_name) = path_resolver
             .lookup_unresolved_no_follow(&new_fs_path)?
             .into_parent_and_filename()?;
