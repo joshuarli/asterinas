@@ -8,7 +8,9 @@ pub(super) fn new_tcp_socket() -> Box<RawTcpSocket> {
     let raw_tcp_socket = {
         let rx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0u8; TCP_RECV_BUF_LEN]);
         let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0u8; TCP_SEND_BUF_LEN]);
-        RawTcpSocket::new(rx_buffer, tx_buffer)
+        let mut socket = RawTcpSocket::new(rx_buffer, tx_buffer);
+        socket.set_tsval_generator(Some(|| ostd::timer::Jiffies::elapsed().as_duration().as_millis() as u32));
+        socket
     };
     Box::new(raw_tcp_socket)
 }

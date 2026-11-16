@@ -24,3 +24,16 @@ mod systree_node;
 pub(super) fn init() {
     crate::fs::vfs::registry::register(&CgroupFsType).unwrap();
 }
+
+pub(crate) fn current_cgroup_inode() -> u64 {
+    use aster_systree::SysObj;
+    use crate::current;
+    let process = current!();
+    let cgroup = process.cgroup();
+    if let Some(node) = cgroup.get() {
+        crate::fs::utils::systree_inode::ino::from_sysnode_id(node.id())
+    } else {
+        let root = CgroupNamespace::get_init_singleton().root_node();
+        crate::fs::utils::systree_inode::ino::from_sysnode_id(root.id())
+    }
+}

@@ -120,7 +120,7 @@ impl StreamSocket {
         let diagnostic = TcpDiagnosticIdentity::new(owner, common.path().inode().ino(), match family {
             IpAddressFamily::IPv4 => TcpAddressFamily::Ipv4,
             IpAddressFamily::IPv6 => TcpAddressFamily::Ipv6,
-        });
+        }, crate::fs::cgroupfs::current_cgroup_inode());
         Arc::new(Self {
             state: RwLock::new(Takeable::new(State::Init(init_stream))),
             family,

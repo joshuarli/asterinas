@@ -302,7 +302,7 @@ pub enum ConnectState {
 
 impl<E: Ext> TcpConnectionBg<E> {
     pub(crate) fn diagnostic_snapshot(&self) -> TcpSocketSnapshot {
-        let (state, read_queue, write_queue, shutdown) = {
+        let (state, read_queue, write_queue, shutdown, telemetry) = {
             let socket = self.inner.lock();
             (socket.state(), socket.recv_queue().saturating_add(usize::from(
                 !socket.has_consumed_fin && matches!(socket.state(),
@@ -311,10 +311,11 @@ impl<E: Ext> TcpConnectionBg<E> {
              socket.send_queue().min(u32::MAX as usize) as u32,
              u8::from(socket.is_recv_shut || matches!(socket.state(),
                  State::CloseWait | State::LastAck | State::Closing | State::TimeWait))
-                 | (u8::from(socket.is_send_shut) << 1))
+                 | (u8::from(socket.is_send_shut) << 1),
+             socket.telemetry(smoltcp::time::Instant::from_millis(ostd::timer::Jiffies::elapsed().as_duration().as_millis() as i64)))
         };
         let (cookie, inode, uid) = self.inner.diagnostic.values();
-        TcpSocketSnapshot { family: self.inner.diagnostic.family(), local: self.inner.connection_key.local_endpoint(),
+        TcpSocketSnapshot { telemetry, cgroup: self.inner.diagnostic.cgroup(), family: self.inner.diagnostic.family(), local: self.inner.connection_key.local_endpoint(),
             remote: self.inner.connection_key.remote_endpoint(), state, read_queue, write_queue,
             cookie, inode, uid, shutdown, orphan: self.inner.diagnostic.orphaned() }
     }
