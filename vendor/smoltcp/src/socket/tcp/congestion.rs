@@ -15,6 +15,8 @@ pub(super) trait Controller {
     /// Returns the number of bytes that can be sent.
     fn window(&self) -> usize;
 
+    fn slow_start_threshold(&self) -> usize { usize::MAX }
+
     /// Set the remote window size.
     fn set_remote_window(&mut self, remote_window: usize) {}
 

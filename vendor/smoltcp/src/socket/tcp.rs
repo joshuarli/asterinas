@@ -2,6 +2,8 @@
 // the parts of RFC 1122 that discuss TCP, as well as RFC 7323 for some of the TCP options.
 // Consult RFC 7414 when implementing a new feature.
 
+#[cfg(feature = "alloc")]
+use alloc::collections::VecDeque;
 use core::fmt::Display;
 #[cfg(feature = "async")]
 use core::task::Waker;
@@ -405,6 +407,33 @@ pub enum CongestionControl {
     Cubic,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TcpTelemetry {
+    pub bytes_sent: u64,
+    pub bytes_acked: u64,
+    pub bytes_received: u64,
+    pub total_retrans: u32,
+    pub segs_in: u32,
+    pub segs_out: u32,
+    pub packets_out: u32,
+    pub retransmits: u8,
+    pub rtt_us: u32,
+    pub rttvar_us: u32,
+    pub rto_us: u32,
+    pub cwnd_bytes: usize,
+    pub ssthresh_bytes: usize,
+    pub mss: usize,
+    pub receive_mss: usize,
+    pub path_mtu: usize,
+    pub send_wscale: u8,
+    pub receive_wscale: u8,
+    pub wscale: bool,
+    pub sack: bool,
+    pub timestamps: bool,
+    pub timer: u8,
+    pub timer_expires_ms: u32,
+}
+
 /// A Transmission Control Protocol socket.
 ///
 /// A TCP socket may passively listen for connections or actively connect to another endpoint.
@@ -414,6 +443,11 @@ pub enum CongestionControl {
 #[derive(Debug)]
 pub struct Socket<'a> {
     state: State,
+    telemetry: TcpTelemetry,
+    max_data_seq: Option<TcpSeqNumber>,
+    #[cfg(feature = "alloc")]
+    outstanding_segments: VecDeque<TcpSeqNumber>,
+    highest_sent_seq: Option<TcpSeqNumber>,
     timer: Timer,
     rtte: RttEstimator,
     assembler: Assembler,
@@ -518,6 +552,11 @@ impl<'a> Socket<'a> {
 
         Socket {
             state: State::Closed,
+            telemetry: TcpTelemetry::default(),
+            max_data_seq: None,
+            #[cfg(feature = "alloc")]
+            outstanding_segments: VecDeque::new(),
+            highest_sent_seq: None,
             timer: Timer::new(),
             rtte: RttEstimator::default(),
             assembler: Assembler::new(),
@@ -555,6 +594,42 @@ impl<'a> Socket<'a> {
             rx_waker: WakerRegistration::new(),
             #[cfg(feature = "async")]
             tx_waker: WakerRegistration::new(),
+        }
+    }
+
+    pub fn telemetry(&self, now: Instant) -> TcpTelemetry {
+        let mut t = self.telemetry;
+        t.rtt_us = self.rtte.rtt.saturating_mul(1000);
+        t.rttvar_us = self.rtte.deviation.saturating_mul(1000);
+        t.rto_us = (self.rtte.retransmission_timeout().total_millis() as u32).saturating_mul(1000);
+        t.cwnd_bytes = self.congestion_controller.inner().window();
+        t.ssthresh_bytes = self.congestion_controller.inner().slow_start_threshold();
+        let header_len = self.header_len();
+        t.mss = if t.path_mtu > header_len { self.remote_mss.min(t.path_mtu - header_len) } else { self.remote_mss };
+        #[cfg(feature = "alloc")]
+        { t.packets_out = self.outstanding_segments.len().min(u32::MAX as usize) as u32; }
+        t.send_wscale = self.remote_win_scale.unwrap_or(0);
+        t.receive_wscale = self.remote_win_shift;
+        t.wscale = self.remote_win_scale.is_some();
+        t.sack = self.remote_has_sack;
+        t.timestamps = self.tsval_generator.is_some();
+        let (kind, expiry) = match self.timer {
+            Timer::Idle { keep_alive_at: Some(at) } => (2, Some(at)),
+            Timer::Retransmit { expires_at, .. } => (1, Some(expires_at)),
+            Timer::FastRetransmit => (1, Some(now)),
+            Timer::Close { expires_at } => (3, Some(expires_at)),
+            Timer::Idle { keep_alive_at: None } => (0, None),
+        };
+        t.timer = kind;
+        t.timer_expires_ms = expiry.map_or(0, |at| (at.total_millis() - now.total_millis()).max(0).min(u32::MAX as i64) as u32);
+        t
+    }
+
+    fn header_len(&self) -> usize {
+        match self.tuple.as_ref().map(|tuple| tuple.local.addr) {
+            Some(IpAddress::Ipv4(_)) => 40,
+            Some(IpAddress::Ipv6(_)) => 60,
+            _ => 0,
         }
     }
 
@@ -822,6 +897,11 @@ impl<'a> Socket<'a> {
             mem::size_of::<usize>() * 8 - self.rx_buffer.capacity().leading_zeros() as usize;
 
         self.state = State::Closed;
+        self.telemetry = TcpTelemetry::default();
+        self.max_data_seq = None;
+        self.highest_sent_seq = None;
+        #[cfg(feature = "alloc")]
+        self.outstanding_segments.clear();
         self.timer = Timer::new();
         self.rtte = RttEstimator::default();
         self.assembler = Assembler::new();
@@ -1482,6 +1562,8 @@ impl<'a> Socket<'a> {
         repr_payload: P,
     ) -> Option<(IpRepr, TcpRepr<'static>)> {
         debug_assert!(self.accepts(cx, ip_repr, repr));
+        self.telemetry.segs_in = self.telemetry.segs_in.saturating_add(1);
+        self.telemetry.path_mtu = cx.ip_mtu();
 
         // Consider how much the sequence number space differs from the transmit buffer space.
         let (sent_syn, sent_fin) = match self.state {
@@ -1709,6 +1791,14 @@ impl<'a> Socket<'a> {
                     ack_all = self.remote_last_seq == ack_number
                 }
 
+                #[cfg(feature = "alloc")]
+                while self.outstanding_segments.front().map_or(false, |end| *end <= ack_number) {
+                    self.outstanding_segments.pop_front();
+                }
+                if ack_len > 0 || sent_syn || ack_of_fin { self.telemetry.retransmits = 0; }
+                if self.state == State::SynSent && repr.control == TcpControl::Syn {
+                    self.telemetry.bytes_acked = self.telemetry.bytes_acked.saturating_add(1);
+                }
                 self.rtte.on_ack(cx.now(), ack_number);
                 self.congestion_controller
                     .inner_mut()
@@ -1955,6 +2045,7 @@ impl<'a> Socket<'a> {
                 self.tx_buffer.len() - ack_len
             );
             self.tx_buffer.dequeue_allocated(ack_len);
+            self.telemetry.bytes_acked = self.telemetry.bytes_acked.saturating_add(ack_len as u64);
 
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
@@ -2059,6 +2150,12 @@ impl<'a> Socket<'a> {
         let len_written = self.rx_buffer.write_unallocated(payload_offset, payload);
         debug_assert!(len_written == payload_len);
 
+        if payload_len > 0 {
+            let advmss = cx.ip_mtu().saturating_sub(self.header_len());
+            let current = if self.telemetry.receive_mss == 0 { advmss.min(536).max(88) } else { self.telemetry.receive_mss };
+            self.telemetry.receive_mss = if payload_len >= current { payload_len.min(advmss) } else { current };
+        }
+
         if contig_len != 0 {
             // Enqueue the contiguous data octets in front of the buffer.
             tcp_trace!(
@@ -2067,6 +2164,7 @@ impl<'a> Socket<'a> {
                 self.rx_buffer.len() + contig_len
             );
             self.rx_buffer.enqueue_unallocated(contig_len);
+            self.telemetry.bytes_received = self.telemetry.bytes_received.saturating_add(contig_len as u64);
 
             // There's new data in rx_buffer, notify waiting task if any.
             #[cfg(feature = "async")]
@@ -2278,6 +2376,9 @@ impl<'a> Socket<'a> {
             self.set_state(State::Closed);
         } else if !self.seq_to_transmit(cx) {
             if let Some(retransmit_delta) = self.timer.should_retransmit(cx.now()) {
+                if matches!(self.timer, Timer::Retransmit { .. }) {
+                    self.telemetry.retransmits = self.telemetry.retransmits.saturating_add(1);
+                }
                 // If a retransmit timer expired, we should resend data starting at the last ACK.
                 net_debug!("retransmitting at t+{}", retransmit_delta);
 
@@ -2493,6 +2594,24 @@ impl<'a> Socket<'a> {
         // for sure will not be successfully transmitted.
         ip_repr.set_payload_len(repr.buffer_len());
         emit(cx, (ip_repr, repr))?;
+        self.telemetry.segs_out = self.telemetry.segs_out.saturating_add(1);
+        self.telemetry.path_mtu = cx.ip_mtu();
+        if !is_keep_alive && repr.segment_len() > 0 {
+            let end = repr.seq_number + repr.segment_len();
+            if self.highest_sent_seq.map_or(true, |old| end > old) {
+                #[cfg(feature = "alloc")]
+                self.outstanding_segments.push_back(end);
+                self.highest_sent_seq = Some(end);
+            }
+        }
+        if !is_keep_alive && !repr.payload.is_empty() {
+            self.telemetry.bytes_sent = self.telemetry.bytes_sent.saturating_add(repr.payload.len() as u64);
+            if self.max_data_seq.map_or(false, |end| repr.seq_number < end) {
+                self.telemetry.total_retrans = self.telemetry.total_retrans.saturating_add(1);
+            }
+            let end = repr.seq_number + repr.payload.len();
+            if self.max_data_seq.map_or(true, |old| end > old) { self.max_data_seq = Some(end); }
+        }
 
         // We've sent something, whether useful data or a keep-alive packet, so rewind
         // the keep-alive timer.

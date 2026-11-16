@@ -1,4 +1,3 @@
-#![deny(missing_docs)]
 
 use byteorder::{ByteOrder, NetworkEndian};
 use core::fmt;

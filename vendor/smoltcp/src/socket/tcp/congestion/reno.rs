@@ -27,6 +27,8 @@ impl Controller for Reno {
         self.cwnd
     }
 
+    fn slow_start_threshold(&self) -> usize { self.ssthresh }
+
     fn on_ack(&mut self, _now: Instant, len: usize, _rtt: &RttEstimator) {
         let len = if self.cwnd < self.ssthresh {
             // Slow start.
