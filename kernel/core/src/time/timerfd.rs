@@ -2,11 +2,13 @@
 
 use core::{
     fmt::Display,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     time::Duration,
 };
 
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
+use alloc::sync::Weak;
+use ostd::sync::SpinLock;
 
 use crate::{
     events::IoEvents,
@@ -31,6 +33,43 @@ pub(crate) struct TimerfdFile {
     pollee: Pollee,
     settime_flags: AtomicTFDSetTimeFlags,
     common: FileCommon,
+    cancellation: Arc<TimerfdCancellation>,
+}
+
+struct TimerfdCancellation {
+    armed: AtomicBool,
+    cancelled: AtomicBool,
+    pollee: Pollee,
+}
+
+static CLOCK_STEPS: SpinLock<Vec<Weak<TimerfdCancellation>>> = SpinLock::new(Vec::new());
+
+pub(crate) fn clock_step<F, T>(change: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let mut timers = CLOCK_STEPS.disable_irq().lock();
+    let result = change()?;
+    timers.retain(|entry| {
+        if let Some(timer) = entry.upgrade() {
+            if timer.armed.load(Ordering::Relaxed) {
+                timer.cancelled.store(true, Ordering::Release);
+                timer.pollee.notify(IoEvents::IN);
+            }
+            true
+        } else {
+            false
+        }
+    });
+    drop(timers);
+    crate::time::clocks::RealTimeClock::timer_manager().process_expired_timers();
+    crate::time::clocks::TaiClock::timer_manager().process_expired_timers();
+    Ok(result)
+}
+
+pub(crate) fn with_clock_step_lock<F: FnOnce()>(f: F) {
+    let _guard = CLOCK_STEPS.disable_irq().lock();
+    f();
 }
 
 bitflags! {
@@ -120,8 +159,14 @@ impl TimerfdFile {
             StatusFlags::empty()
         };
 
+        let cancellation = Arc::new(TimerfdCancellation {
+            armed: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            pollee: pollee.clone(),
+        });
         Ok(TimerfdFile {
             clockid: clock_id as clockid_t,
+            cancellation,
             timer,
             ticks,
             pollee,
@@ -141,7 +186,16 @@ impl TimerfdFile {
         interval: Duration,
         flags: TFDSetTimeFlags,
     ) -> (Duration, Duration) {
+        let mut registrations = CLOCK_STEPS.disable_irq().lock();
         let mut timer_guard = self.timer.lock();
+        let cancel_on_set = self.clockid == ClockId::CLOCK_REALTIME as clockid_t
+            && flags.contains(TFDSetTimeFlags::TFD_TIMER_ABSTIME | TFDSetTimeFlags::TFD_TIMER_CANCEL_ON_SET);
+        self.cancellation.armed.store(cancel_on_set && expire_time != Duration::ZERO, Ordering::Relaxed);
+        self.cancellation.cancelled.store(false, Ordering::Release);
+        registrations.retain(|entry| entry.strong_count() != 0 && !entry.ptr_eq(&Arc::downgrade(&self.cancellation)));
+        if cancel_on_set && expire_time != Duration::ZERO {
+            registrations.push(Arc::downgrade(&self.cancellation));
+        }
 
         let (old_interval, remain) = (timer_guard.interval(), timer_guard.remain());
 
@@ -152,13 +206,6 @@ impl TimerfdFile {
         self.ticks.store(0, Ordering::Relaxed);
 
         if expire_time != Duration::ZERO {
-            if flags.contains(TFDSetTimeFlags::TFD_TIMER_CANCEL_ON_SET) {
-                // TODO: Currently this flag has no effect since the system time cannot be changed.
-                // Once add the support for modifying the system time, the corresponding logics for
-                // this flag need to be implemented.
-                warn!("TFD_TIMER_CANCEL_ON_SET is not implemented yet and has no effect");
-            }
-
             let timeout = if flags.contains(TFDSetTimeFlags::TFD_TIMER_ABSTIME) {
                 Timeout::When(expire_time)
             } else {
@@ -183,6 +230,10 @@ impl TimerfdFile {
     }
 
     fn try_read(&self, writer: &mut VmWriter) -> Result<()> {
+        if self.cancellation.cancelled.swap(false, Ordering::AcqRel) {
+            self.ticks.store(0, Ordering::Relaxed);
+            return_errno_with_message!(Errno::ECANCELED, "realtime clock was set");
+        }
         let ticks = self.ticks.fetch_and(0, Ordering::Relaxed);
 
         if ticks == 0 {
@@ -197,7 +248,7 @@ impl TimerfdFile {
     fn check_io_events(&self) -> IoEvents {
         let mut events = IoEvents::empty();
 
-        if self.ticks.load(Ordering::Relaxed) != 0 {
+        if self.cancellation.cancelled.load(Ordering::Acquire) || self.ticks.load(Ordering::Relaxed) != 0 {
             events |= IoEvents::IN;
         }
 

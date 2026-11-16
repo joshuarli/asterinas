@@ -63,7 +63,7 @@ use super::{
     getsockname::sys_getsockname,
     getsockopt::sys_getsockopt,
     gettid::sys_gettid,
-    gettimeofday::sys_gettimeofday,
+    gettimeofday::{sys_gettimeofday, sys_settimeofday},
     getuid::sys_getuid,
     getxattr::{sys_fgetxattr, sys_getxattr, sys_lgetxattr},
     impl_syscall_nums_and_dispatch_fn,
@@ -329,6 +329,7 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_PRCTL = 157            => sys_prctl(args[..5]);
     SYS_ARCH_PRCTL = 158       => sys_arch_prctl(args[..2]);
     SYS_SETRLIMIT = 160        => sys_setrlimit(args[..2]);
+    SYS_SETTIMEOFDAY = 164     => sys_settimeofday(args[..2]);
     SYS_CHROOT = 161           => sys_chroot(args[..1]);
     SYS_ADJTIMEX = 159         => sys_adjtimex(args[..1]);
     SYS_SYNC = 162             => sys_sync(args[..0]);

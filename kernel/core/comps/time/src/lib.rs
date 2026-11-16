@@ -116,6 +116,7 @@ pub fn read_wall_time() -> Duration {
 pub struct DisciplinedTime {
     pub monotonic: Duration,
     pub wall: Duration,
+    pub tai: Duration,
     /// The frequency correction in units of 2^-16 ppm.
     pub frequency: i64,
 }
@@ -127,6 +128,7 @@ pub fn disciplined_time_at(raw: Duration) -> DisciplinedTime {
     DisciplinedTime {
         monotonic: Duration::from_nanos(clock.monotonic_ns(raw_ns) as u64),
         wall: Duration::from_nanos(clock.wall_ns(raw_ns).max(0) as u64),
+        tai: Duration::from_nanos((clock.wall_ns(raw_ns) + i128::from(clock.tai_offset()) * 1_000_000_000).max(0) as u64),
         frequency: clock.frequency(),
     }
 }

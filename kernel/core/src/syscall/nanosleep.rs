@@ -83,6 +83,11 @@ fn do_clock_nanosleep(
         clockid, is_abs_time, request_time, remain_timespec_addr
     );
 
+    let clockid = if !is_abs_time && (clockid == ClockId::CLOCK_REALTIME as clockid_t || clockid == ClockId::CLOCK_TAI as clockid_t) {
+        ClockId::CLOCK_MONOTONIC as clockid_t
+    } else {
+        clockid
+    };
     let start_time = read_clock(clockid, ctx)?;
     let deadline = if is_abs_time {
         request_time
@@ -102,8 +107,7 @@ fn do_clock_nanosleep(
 
 fn sleep_until(block: SleepRestartBlock, ctx: &Context) -> Result<SyscallReturn> {
     let SleepRestartBlock { clockid, deadline, remain_timespec_addr } = block;
-    let start_time = read_clock(clockid, ctx)?;
-    let duration = deadline.saturating_sub(start_time);
+    read_clock(clockid, ctx)?;
 
     // FIXME: sleeping thread can only be interrupted by signals that will call signal handler or terminate
     // current process. i.e., the signals that should be ignored will not interrupt sleeping thread.
@@ -115,6 +119,7 @@ fn sleep_until(block: SleepRestartBlock, ctx: &Context) -> Result<SyscallReturn>
             ClockId::CLOCK_BOOTTIME => BootTimeClock::timer_manager(),
             ClockId::CLOCK_MONOTONIC => MonotonicClock::timer_manager(),
             ClockId::CLOCK_REALTIME => RealTimeClock::timer_manager(),
+            ClockId::CLOCK_TAI => crate::time::clocks::TaiClock::timer_manager(),
             // FIXME: We should better not expose this prof timer manager.
             ClockId::CLOCK_PROCESS_CPUTIME_ID => {
                 ctx.process.timer_manager().prof_timer().timer_manager()
@@ -135,7 +140,7 @@ fn sleep_until(block: SleepRestartBlock, ctx: &Context) -> Result<SyscallReturn>
 
     let res = waiter.pause_until_or_timeout(
         || None,
-        ManagedTimeout::new_with_manager(Timeout::After(duration), timer_manager),
+        ManagedTimeout::new_with_manager(Timeout::When(deadline), timer_manager),
     );
 
     match res {

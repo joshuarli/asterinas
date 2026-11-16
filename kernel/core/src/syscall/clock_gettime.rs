@@ -13,7 +13,7 @@ use crate::{
         clockid_t,
         clocks::{
             BootTimeClock, MonotonicClock, MonotonicCoarseClock, MonotonicRawClock, RealTimeClock,
-            RealTimeCoarseClock,
+            RealTimeCoarseClock, TaiClock,
         },
         timespec_t,
     },
@@ -47,6 +47,7 @@ pub(crate) enum ClockId {
     CLOCK_REALTIME_COARSE = 5,
     CLOCK_MONOTONIC_COARSE = 6,
     CLOCK_BOOTTIME = 7,
+    CLOCK_TAI = 11,
 }
 
 /// The information decoded from a dynamic clock ID.
@@ -108,6 +109,7 @@ pub(super) fn read_clock(clockid: clockid_t, ctx: &Context) -> Result<Duration> 
         let clock_id = ClockId::try_from(clockid)?;
         match clock_id {
             ClockId::CLOCK_REALTIME => Ok(RealTimeClock::get().read_time()),
+            ClockId::CLOCK_TAI => Ok(TaiClock::get().read_time()),
             ClockId::CLOCK_MONOTONIC => Ok(MonotonicClock::get().read_time()),
             ClockId::CLOCK_MONOTONIC_RAW => Ok(MonotonicRawClock::get().read_time()),
             ClockId::CLOCK_REALTIME_COARSE => Ok(RealTimeCoarseClock::get().read_time()),

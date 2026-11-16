@@ -62,16 +62,17 @@ impl TimerGuard<'_> {
     /// when reaching timeout. If the timer has a valid interval, this timer
     /// will be set again with the interval when reaching timeout.
     pub(crate) fn set_timeout(&mut self, timeout: Timeout) {
-        let expired_time = match timeout {
+        let (expired_time, relative_clock) = match timeout {
             Timeout::After(timeout) => {
-                let now = self.timer.timer_manager.clock.read_time();
-                now + timeout
+                let clock = self.timer.timer_manager.relative_clock.as_ref();
+                let now = clock.unwrap_or(&self.timer.timer_manager.clock).read_time();
+                (now + timeout, clock.is_some())
             }
-            Timeout::When(timeout) => timeout,
+            Timeout::When(timeout) => (timeout, false),
         };
 
         let timer_weak = Arc::downgrade(self.timer);
-        let new_timer_callback = Arc::new(TimerCallback::new(expired_time, timer_weak));
+        let new_timer_callback = Arc::new(TimerCallback::new(expired_time, timer_weak, relative_clock));
 
         if let Some(timer_callback) = self.inner.timer_callback.upgrade() {
             self.timer.timer_manager.cancel(&timer_callback);
@@ -103,7 +104,12 @@ impl TimerGuard<'_> {
     /// If the timer has not been set, this method
     /// will return `Duration::ZERO`.
     pub(crate) fn remain(&self) -> Duration {
-        let now = self.timer.timer_manager.clock.read_time();
+        let callback = self.inner.timer_callback.upgrade();
+        let now = if callback.as_ref().is_some_and(|callback| callback.relative_clock) {
+            self.timer.timer_manager.relative_clock.as_ref().unwrap().read_time()
+        } else {
+            self.timer.timer_manager.clock.read_time()
+        };
         let expired_time = self.expired_time();
         if expired_time > now {
             expired_time - now
@@ -167,6 +173,8 @@ impl Drop for Timer {
 pub(crate) struct TimerManager {
     clock: Arc<dyn Clock>,
     timer_callbacks: SpinLock<BTreeMap<TimerKey, Arc<TimerCallback>>>,
+    relative_clock: Option<Arc<dyn Clock>>,
+    relative_timer_callbacks: SpinLock<BTreeMap<TimerKey, Arc<TimerCallback>>>,
 }
 
 /// The expiry time of a callback, made unique by the callback's address while it is queued.
@@ -178,6 +186,17 @@ impl TimerManager {
         Arc::new(Self {
             clock,
             timer_callbacks: SpinLock::new(BTreeMap::new()),
+            relative_clock: None,
+            relative_timer_callbacks: SpinLock::new(BTreeMap::new()),
+        })
+    }
+
+    pub(crate) fn new_realtime(clock: Arc<dyn Clock>, relative_clock: Arc<dyn Clock>) -> Arc<Self> {
+        Arc::new(Self {
+            clock,
+            timer_callbacks: SpinLock::new(BTreeMap::new()),
+            relative_clock: Some(relative_clock),
+            relative_timer_callbacks: SpinLock::new(BTreeMap::new()),
         })
     }
 
@@ -198,34 +217,41 @@ impl TimerManager {
     }
 
     fn insert(&self, timer_callback: Arc<TimerCallback>) {
-        self.timer_callbacks
-            .disable_irq()
-            .lock()
-            .insert(timer_callback.key(), timer_callback);
+        let callbacks = if timer_callback.relative_clock { &self.relative_timer_callbacks } else { &self.timer_callbacks };
+        callbacks.disable_irq().lock().insert(timer_callback.key(), timer_callback);
     }
 
     /// Cancels the callback and removes it from the queue so that it does not outlive the wait
     /// that armed it.
     fn cancel(&self, timer_callback: &TimerCallback) {
         timer_callback.cancel();
-        self.timer_callbacks
-            .disable_irq()
-            .lock()
-            .remove(&timer_callback.key());
+        let callbacks = if timer_callback.relative_clock { &self.relative_timer_callbacks } else { &self.timer_callbacks };
+        callbacks.disable_irq().lock().remove(&timer_callback.key());
     }
 
     /// Checks and processes the managed timers.
     ///
     /// If any of the timers have timed out, call the corresponding callback functions.
     pub(crate) fn process_expired_timers(&self) {
+        if let Some(clock) = &self.relative_clock {
+            crate::time::timerfd::with_clock_step_lock(|| {
+                self.process_queue(&self.timer_callbacks, &self.clock);
+                self.process_queue(&self.relative_timer_callbacks, clock);
+            });
+        } else {
+            self.process_queue(&self.timer_callbacks, &self.clock);
+        }
+    }
+
+    fn process_queue(&self, queue: &SpinLock<BTreeMap<TimerKey, Arc<TimerCallback>>>, clock: &Arc<dyn Clock>) {
         let callbacks = {
-            let mut timeout_list = self.timer_callbacks.disable_irq().lock();
+            let mut timeout_list = queue.disable_irq().lock();
             if timeout_list.is_empty() {
                 return;
             }
 
             let mut callbacks = Vec::new();
-            let current_time = self.clock.read_time();
+            let current_time = clock.read_time();
             while let Some(entry) = timeout_list.first_entry() {
                 if entry.key().0 > current_time {
                     break;
@@ -257,15 +283,17 @@ struct TimerCallback {
     expired_time: Duration,
     timer: Weak<Timer>,
     is_cancelled: AtomicBool,
+    relative_clock: bool,
 }
 
 impl TimerCallback {
     /// Creates an instance of `TimerCallback`.
-    fn new(timeout: Duration, timer: Weak<Timer>) -> Self {
+    fn new(timeout: Duration, timer: Weak<Timer>, relative_clock: bool) -> Self {
         Self {
             expired_time: timeout,
             timer,
             is_cancelled: AtomicBool::new(false),
+            relative_clock,
         }
     }
 
@@ -298,7 +326,12 @@ impl TimerCallback {
 
         let interval = timer_guard.interval();
         if interval != Duration::ZERO {
-            timer_guard.set_timeout(Timeout::After(interval));
+            let next = if !self.relative_clock && timer.timer_manager.relative_clock.is_some() {
+                Timeout::When(timer.timer_manager.clock.read_time() + interval)
+            } else {
+                Timeout::After(interval)
+            };
+            timer_guard.set_timeout(next);
         }
 
         // Pass the `timer_guard` guard to the callback, allowing it to prevent race conditions.

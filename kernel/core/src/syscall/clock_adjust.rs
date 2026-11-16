@@ -61,8 +61,11 @@ pub(super) fn sys_clock_settime(
     }
 
     let wall = core::time::Duration::new(timespec.sec as u64, timespec.nsec as u32);
-    aster_time::set_wall_time(wall, may_set_time(ctx)).map_err(adjust_error)?;
-    crate::vdso::refresh_wall_clock();
+    crate::time::timerfd::clock_step(|| {
+        aster_time::set_wall_time(wall, may_set_time(ctx)).map_err(adjust_error)?;
+        crate::vdso::refresh_wall_clock();
+        Ok(())
+    })?;
     Ok(SyscallReturn::Return(0))
 }
 
@@ -98,9 +101,17 @@ fn adjust_realtime(timex_addr: Vaddr, ctx: &Context) -> Result<SyscallReturn> {
         time_subsec: timex.time_subsec,
     };
 
-    let reply = aster_time::adjust_wall_clock(&request, may_set_time(ctx)).map_err(adjust_error)?;
+    let reply = if request.modes & adjust::ADJ_SETOFFSET != 0 {
+        crate::time::timerfd::clock_step(|| {
+            let reply = aster_time::adjust_wall_clock(&request, may_set_time(ctx)).map_err(adjust_error)?;
+            crate::vdso::refresh_wall_clock();
+            Ok(reply)
+        })?
+    } else {
+        aster_time::adjust_wall_clock(&request, may_set_time(ctx)).map_err(adjust_error)?
+    };
 
-    if request.modes != 0 {
+    if request.modes != 0 && request.modes & adjust::ADJ_SETOFFSET == 0 {
         crate::vdso::refresh_wall_clock();
     }
     crate::time::leap::set_deadline(reply.leap_at_ns);
@@ -132,7 +143,7 @@ fn fill_timex(timex: &mut Timex, reply: &Reply) {
     timex.tai = reply.tai;
 }
 
-fn may_set_time(ctx: &Context) -> bool {
+pub(super) fn may_set_time(ctx: &Context) -> bool {
     lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
         UserNamespace::get_init_singleton().as_ref(),
         ctx.posix_thread,
@@ -141,7 +152,7 @@ fn may_set_time(ctx: &Context) -> bool {
     .is_ok()
 }
 
-fn adjust_error(error: adjust::Error) -> Error {
+pub(super) fn adjust_error(error: adjust::Error) -> Error {
     match error {
         adjust::Error::Permission => {
             Error::with_message(Errno::EPERM, "changing the clock needs CAP_SYS_TIME")
