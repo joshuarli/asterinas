@@ -103,8 +103,9 @@ struct VdsoData {
     arch_data: ArchVdsoData,
 }
 
-const HIGH_RES_CLOCK_IDS: [ClockId; 4] = [
+const HIGH_RES_CLOCK_IDS: [ClockId; 5] = [
     ClockId::CLOCK_REALTIME,
+    ClockId::CLOCK_TAI,
     ClockId::CLOCK_MONOTONIC,
     ClockId::CLOCK_MONOTONIC_RAW,
     ClockId::CLOCK_BOOTTIME,
@@ -359,6 +360,7 @@ impl Vdso {
 fn clock_time(clock_id: ClockId, raw: Duration, disciplined: &DisciplinedTime) -> Duration {
     match clock_id {
         ClockId::CLOCK_REALTIME | ClockId::CLOCK_REALTIME_COARSE => disciplined.wall,
+        ClockId::CLOCK_TAI => disciplined.tai,
         ClockId::CLOCK_MONOTONIC_RAW => raw,
         ClockId::CLOCK_MONOTONIC | ClockId::CLOCK_MONOTONIC_COARSE | ClockId::CLOCK_BOOTTIME => {
             disciplined.monotonic
@@ -367,6 +369,17 @@ fn clock_time(clock_id: ClockId, raw: Duration, disciplined: &DisciplinedTime) -
             unreachable!("the vDSO publishes no CPU-time clock")
         }
     }
+}
+
+pub(crate) fn set_timezone(minuteswest: i32, dsttime: i32) {
+    let Some(vdso) = VDSO.get() else { return; };
+    let mut data = vdso.data.lock();
+    data.tz_minuteswest = minuteswest;
+    data.tz_dsttime = dsttime;
+    vdso.begin_update_data_frame(&mut data);
+    vdso.data_frame.write_val(vdso_data_field_offset!(tz_minuteswest), &minuteswest).unwrap();
+    vdso.data_frame.write_val(vdso_data_field_offset!(tz_dsttime), &dsttime).unwrap();
+    vdso.finish_update_data_frame(&mut data);
 }
 
 /// Publishes the wall clock to user space after it was set or adjusted.

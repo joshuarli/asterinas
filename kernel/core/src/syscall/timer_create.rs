@@ -173,6 +173,7 @@ where
         ClockId::CLOCK_PROCESS_CPUTIME_ID => process_timer_manager.create_prof_timer(func),
         ClockId::CLOCK_THREAD_CPUTIME_ID => ctx.posix_thread.create_prof_timer(func),
         ClockId::CLOCK_REALTIME => RealTimeClock::timer_manager().create_timer(func),
+        ClockId::CLOCK_TAI => crate::time::clocks::TaiClock::timer_manager().create_timer(func),
         ClockId::CLOCK_MONOTONIC => MonotonicClock::timer_manager().create_timer(func),
         ClockId::CLOCK_BOOTTIME => BootTimeClock::timer_manager().create_timer(func),
         _ => return_errno_with_message!(Errno::EINVAL, "invalid clock ID"),

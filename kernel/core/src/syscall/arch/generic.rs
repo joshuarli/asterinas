@@ -63,7 +63,7 @@ macro_rules! import_generic_syscall_entries {
             getsockname::sys_getsockname,
             getsockopt::sys_getsockopt,
             gettid::sys_gettid,
-            gettimeofday::sys_gettimeofday,
+            gettimeofday::{sys_gettimeofday, sys_settimeofday},
             getuid::sys_getuid,
             getxattr::{sys_fgetxattr, sys_getxattr, sys_lgetxattr},
             inotify::{sys_inotify_add_watch, sys_inotify_init1, sys_inotify_rm_watch},
@@ -357,6 +357,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_UMASK = 166                  => sys_umask(args[..1]);
             SYS_PRCTL = 167                  => sys_prctl(args[..5]);
             SYS_GETCPU = 168                 => sys_getcpu(args[..3]);
+            SYS_SETTIMEOFDAY = 170           => sys_settimeofday(args[..2]);
             SYS_GETTIMEOFDAY = 169           => sys_gettimeofday(args[..2]);
             SYS_GETPID = 172                 => sys_getpid(args[..0]);
             SYS_GETPPID = 173                => sys_getppid(args[..0]);

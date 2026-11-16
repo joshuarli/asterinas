@@ -154,6 +154,11 @@ impl WallClock {
         self.monotonic_ns(raw_ns) + self.wall_offset_ns
     }
 
+    /// Returns the current TAI offset in seconds.
+    pub fn tai_offset(&self) -> i32 {
+        self.tai
+    }
+
     /// Returns the current frequency correction in units of 2^-16 ppm.
     pub fn frequency(&self) -> i64 {
         self.frequency
@@ -169,7 +174,9 @@ impl WallClock {
         if !privileged {
             return Err(Error::Permission);
         }
-        if wall_ns < 0 {
+        if wall_ns < self.monotonic_ns(raw_ns)
+            || wall_ns / NANOS_PER_SECOND >= i128::from(i64::MAX) / NANOS_PER_SECOND
+        {
             return Err(Error::Invalid);
         }
         self.wall_offset_ns = wall_ns - self.monotonic_ns(raw_ns);
@@ -400,6 +407,8 @@ mod test {
         assert_eq!(clock.wall_ns(10 * SECOND), START + 100 * SECOND);
         assert_eq!(clock.wall_ns(12 * SECOND), START + 102 * SECOND);
         assert_eq!(clock.set(10 * SECOND, -1, true), Err(Error::Invalid));
+        assert_eq!(clock.set(10 * SECOND, 9 * SECOND, true), Err(Error::Invalid));
+        assert_eq!(clock.set(10 * SECOND, i128::from(i64::MAX), true), Err(Error::Invalid));
         assert_eq!(clock.set(10 * SECOND, 0, false), Err(Error::Permission));
     }
 
