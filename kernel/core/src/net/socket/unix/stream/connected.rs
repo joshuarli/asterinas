@@ -2,7 +2,7 @@
 
 use core::{
     num::Wrapping,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use spin::Once;
@@ -45,6 +45,7 @@ impl Connected {
 
         let this_inner = Inner {
             addr: Once::new(),
+            inode: AtomicU64::new(0),
             state,
             reader: Mutex::new(this_reader),
             writer: Mutex::new(this_writer),
@@ -55,6 +56,7 @@ impl Connected {
         };
         let peer_inner = Inner {
             addr: Once::new(),
+            inode: AtomicU64::new(0),
             state: peer_state,
             reader: Mutex::new(peer_reader),
             writer: Mutex::new(peer_writer),
@@ -83,6 +85,19 @@ impl Connected {
         };
 
         (this, peer)
+    }
+
+    pub(super) fn set_inode(&self, inode: u64) {
+        self.inner.this_end().inode.store(inode, Ordering::Relaxed);
+    }
+
+    pub(super) fn peer_inode(&self) -> u32 {
+        self.inner.peer_end().inode.load(Ordering::Relaxed) as u32
+    }
+
+    pub(super) fn queue_lengths(&self) -> (u32, u32) {
+        (self.inner.this_end().reader.lock().len() as u32,
+         self.inner.this_end().writer.lock().len() as u32)
     }
 
     pub(super) fn addr(&self) -> Option<&UnixSocketAddrBound> {
@@ -421,6 +436,7 @@ impl Drop for Connected {
 
 struct Inner {
     addr: Once<UnixSocketAddr>,
+    inode: AtomicU64,
     state: EndpointState,
     // Lock order: `reader` -> `all_aux` & `all_aux` -> `writer`
     reader: Mutex<RbConsumer<u8>>,

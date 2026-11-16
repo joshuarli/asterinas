@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use core::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -25,6 +25,7 @@ use crate::{
 
 pub(super) struct MessageQueue {
     addr: Once<UnixSocketAddr>,
+    inode: AtomicU64,
     inner: Mutex<Option<Inner>>,
     is_pass_cred: AtomicBool,
     pollee: Pollee,
@@ -100,6 +101,10 @@ impl MessageQueue {
         Ok(len)
     }
 
+    pub(super) fn set_inode(&self, inode: u64) { self.inode.store(inode, Ordering::Relaxed); }
+
+    pub(super) fn inode(&self) -> u32 { self.inode.load(Ordering::Relaxed) as u32 }
+
     pub(super) fn addr(&self) -> UnixSocketAddr {
         self.addr.get().cloned().unwrap_or(UnixSocketAddr::Unnamed)
     }
@@ -144,6 +149,7 @@ impl MessageReceiver {
 
         let queue = MessageQueue {
             addr: Once::new(),
+            inode: AtomicU64::new(0),
             inner: Mutex::new(Some(inner)),
             is_pass_cred: AtomicBool::new(false),
             pollee: Pollee::new(),
@@ -235,6 +241,13 @@ impl MessageReceiver {
 
     pub(super) fn addr(&self) -> UnixSocketAddr {
         self.queue.addr()
+    }
+
+    pub(super) fn diag(&self) -> (u32, bool, Option<(u32, u32)>) {
+        let addr = self.addr.lock();
+        let inner = self.queue.inner.lock();
+        let inner = inner.as_ref().unwrap();
+        (inner.messages.front().map_or(0, |m| m.bytes.len() as u32), inner.is_shutdown, addr.as_ref().and_then(|a| a.diag_vfs()))
     }
 
     pub(super) fn queue(&self) -> &Arc<MessageQueue> {

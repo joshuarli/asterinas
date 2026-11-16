@@ -11,8 +11,21 @@ use crate::prelude::*;
 static SOCKETS: SpinLock<BTreeMap<u64, Weak<dyn Socket>>, BottomHalfDisabled> = SpinLock::new(BTreeMap::new());
 
 pub(crate) enum ProcSocket {
-    Unix { inode: u64, kind: u32, state: u8, listening: bool, addr: UnixSocketAddr },
+    Unix { inode: u64, kind: u32, state: u8, listening: bool, addr: UnixSocketAddr, diag: UnixDiag },
     Netlink { inode: u64, protocol: u32, port: u32, groups: u32, kind: u8, connected: bool, dst_port: u32, dst_group: u32, recv_used: u32, recv_buf: u32, send_buf: u32 },
+}
+
+pub(crate) struct UnixDiag {
+    pub state: u8,
+    pub peer: Option<u32>,
+    pub rqueue: u32,
+    pub wqueue: u32,
+    pub shutdown: u8,
+    pub uid: u32,
+    pub vfs: Option<(u32, u32)>,
+    pub icons: Vec<u32>,
+    pub recv_buf: u32,
+    pub send_buf: u32,
 }
 
 pub(super) fn register<T: Socket + 'static>(socket: &Arc<T>) {

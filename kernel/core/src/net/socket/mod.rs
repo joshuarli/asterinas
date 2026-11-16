@@ -15,6 +15,7 @@ use crate::{
     },
     net::socket::util::ioctl::socket_ioctl,
     prelude::*,
+    process::posix_thread::AsPosixThread,
     util::{MultiRead, MultiWrite, ioctl::RawIoctl},
 };
 
@@ -224,6 +225,11 @@ fn new_socket_common(is_nonblocking: bool) -> FileCommon {
     };
     // Reference: <https://elixir.bootlin.com/linux/v7.0/source/net/socket.c#L483>.
     FileCommon::new(SockFs::new_path(), AccessMode::O_RDWR, status_flags)
+}
+
+fn new_unix_socket_common(is_nonblocking: bool) -> FileCommon {
+    let credentials = current_thread!().as_posix_thread().unwrap().credentials();
+    new_udp_socket_common(is_nonblocking, credentials.fsuid(), credentials.fsgid()).0
 }
 
 fn new_netlink_socket_common(is_nonblocking: bool) -> FileCommon {

@@ -12,7 +12,7 @@ use crate::{
     events::IoEvents,
     fs::file::FileCommon,
     net::socket::{
-        Socket, new_socket_common,
+        Socket, new_unix_socket_common,
         options::{Error as SocketError, PeerCred, SocketOption, macros::sock_option_mut},
         private::SocketPrivate,
         unix::{CUserCred, UnixSocketAddr, cred::SocketCred, ctrl_msg::AuxiliaryData},
@@ -58,6 +58,7 @@ impl OptionSet {
 impl UnixDatagramSocket {
     pub(crate) fn new(is_nonblocking: bool) -> Arc<Self> {
         let socket = Arc::new(Self::new_raw(is_nonblocking));
+        socket.local_receiver.queue().set_inode(socket.common.path().inode().ino());
         crate::net::socket::proc_registry::register(&socket);
         socket
     }
@@ -78,6 +79,8 @@ impl UnixDatagramSocket {
 
         let socket_a = Arc::new(socket_a);
         let socket_b = Arc::new(socket_b);
+        socket_a.local_receiver.queue().set_inode(socket_a.common.path().inode().ino());
+        socket_b.local_receiver.queue().set_inode(socket_b.common.path().inode().ino());
         crate::net::socket::proc_registry::register(&socket_a);
         crate::net::socket::proc_registry::register(&socket_b);
         (socket_a, socket_b)
@@ -91,7 +94,7 @@ impl UnixDatagramSocket {
             timeouts: SocketTimeouts::new(),
             peer_cred: None,
             is_write_shutdown: AtomicBool::new(false),
-            common: new_socket_common(is_nonblocking),
+            common: new_unix_socket_common(is_nonblocking),
         }
     }
 
@@ -172,10 +175,19 @@ impl SocketPrivate for UnixDatagramSocket {
 
 impl Socket for UnixDatagramSocket {
     fn proc_info(&self) -> Option<crate::net::socket::proc_registry::ProcSocket> {
-        let state = if self.remote_queue.read().is_some() { 3 } else { 1 };
+        let remote = self.remote_queue.read();
+        let state = if remote.is_some() { 3 } else { 1 };
+        let (rqueue, read_shutdown, vfs) = self.local_receiver.diag();
+        let options = self.options.read();
         Some(crate::net::socket::proc_registry::ProcSocket::Unix {
             inode: self.common.path().inode().ino(), kind: 2, state, listening: false,
             addr: self.local_receiver.addr(),
+            diag: crate::net::socket::proc_registry::UnixDiag {
+                state: if state == 3 { 1 } else { 7 }, peer: remote.as_ref().map(|q| q.inode()), rqueue, wqueue: 0,
+                shutdown: u8::from(read_shutdown) | (u8::from(self.is_write_shutdown.load(Ordering::Relaxed)) << 1),
+                uid: self.common.path().inode().metadata().map_or(0, |m| u32::from(m.uid)),
+                vfs, icons: Vec::new(), recv_buf: options.socket.recv_buf(), send_buf: options.socket.send_buf(),
+            },
         })
     }
 

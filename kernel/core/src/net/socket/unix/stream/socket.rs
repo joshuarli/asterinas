@@ -15,7 +15,7 @@ use crate::{
         utils::EndpointState,
     },
     net::socket::{
-        Socket, new_socket_common,
+        Socket, new_unix_socket_common,
         options::{
             Error as SocketError, PeerCred, PeerGroups, SocketOption, macros::sock_option_mut,
         },
@@ -181,7 +181,7 @@ impl UnixStreamSocket {
             timeouts: SocketTimeouts::new(),
             socket_type,
             pollee: Pollee::new(),
-            common: new_socket_common(is_nonblocking),
+            common: new_unix_socket_common(is_nonblocking),
         });
         crate::net::socket::proc_registry::register(&socket);
         socket
@@ -221,8 +221,9 @@ impl UnixStreamSocket {
             timeouts: SocketTimeouts::new(),
             socket_type,
             pollee: cloned_pollee,
-            common: new_socket_common(is_nonblocking),
+            common: new_unix_socket_common(is_nonblocking),
         });
+        connected_inode(&socket);
         crate::net::socket::proc_registry::register(&socket);
         socket
     }
@@ -290,6 +291,7 @@ impl UnixStreamSocket {
                 Err((err, init)) => return (State::Init(init), Err(err)),
             };
 
+            connected.set_inode(self.common.path().inode().ino());
             (State::Connected(connected), Ok(()))
         })
     }
@@ -319,6 +321,12 @@ impl Pollable for UnixStreamSocket {
     }
 }
 
+fn connected_inode(socket: &UnixStreamSocket) {
+    if let State::Connected(connected) = socket.state.read().as_ref() {
+        connected.set_inode(socket.common.path().inode().ino());
+    }
+}
+
 impl SocketPrivate for UnixStreamSocket {
     fn is_nonblocking(&self) -> bool {
         self.common.is_nonblocking()
@@ -328,14 +336,28 @@ impl SocketPrivate for UnixStreamSocket {
 impl Socket for UnixStreamSocket {
     fn proc_info(&self) -> Option<crate::net::socket::proc_registry::ProcSocket> {
         let state = self.state.read();
-        let (state, listening, addr) = match state.as_ref() {
-            State::Init(init) => (1, false, init.addr().cloned()),
-            State::Listen(listener) => (1, true, Some(listener.addr().clone())),
-            State::Connected(connected) => (3, false, connected.addr().cloned()),
+        let (proc_state, listening, addr, diag_state, peer, rqueue, wqueue, icons) = match state.as_ref() {
+            State::Init(init) => (1, false, init.addr().cloned(), 7, None, 0, 0, Vec::new()),
+            State::Listen(listener) => {
+                let (rqueue, wqueue, icons) = listener.diag_queue();
+                (1, true, Some(listener.addr().clone()), 10, None, rqueue, wqueue, icons)
+            },
+            State::Connected(connected) => {
+                let (rqueue, wqueue) = connected.queue_lengths();
+                (3, false, connected.addr().cloned(), 1, Some(connected.peer_inode()), rqueue, wqueue, Vec::new())
+            },
         };
+        let inode = self.common.path().inode();
+        let uid = inode.metadata().map_or(0, |m| u32::from(m.uid));
+        let shutdown = u8::from(state.is_read_shutdown()) | (u8::from(state.is_write_shutdown()) << 1);
+        let vfs = addr.as_ref().and_then(|addr| addr.diag_vfs());
         Some(crate::net::socket::proc_registry::ProcSocket::Unix {
-            inode: self.common.path().inode().ino(), kind: self.socket_type as u32,
-            state, listening, addr: addr.into(),
+            inode: inode.ino(), kind: self.socket_type as u32,
+            state: proc_state, listening, addr: addr.into(),
+            diag: crate::net::socket::proc_registry::UnixDiag {
+                state: diag_state, peer, rqueue, wqueue, shutdown, uid, vfs, icons,
+                recv_buf: self.options.read().socket.recv_buf(), send_buf: self.options.read().socket.send_buf(),
+            },
         })
     }
 

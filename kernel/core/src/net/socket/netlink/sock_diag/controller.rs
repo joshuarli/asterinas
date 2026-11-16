@@ -367,6 +367,7 @@ pub(super) fn handle(request: &CMsgSegHdr, payload: &[u8], port: PortNum) -> Res
         return error(request, payload, port, Some(if request.type_ == 21 { Errno::EOPNOTSUPP } else { Errno::EINVAL }));
     }
     if payload.first() == Some(&16) { return handle_netlink(request, payload, port); }
+    if payload.first() == Some(&1) { return handle_unix(request, payload, port); }
     let query = match Query::parse(payload) {
         Ok(query) => query,
         Err(errno) => return error(request, payload, port, Some(errno)),
@@ -404,6 +405,100 @@ pub(super) fn handle(request: &CMsgSegHdr, payload: &[u8], port: PortNum) -> Res
         }
     }
     error(request, payload, port, Some(Errno::ENOENT))
+}
+
+fn unix_attr(bytes: &mut Vec<u8>, kind: u16, data: &[u8]) {
+    put_u16(bytes, (data.len() + 4) as u16);
+    put_u16(bytes, kind);
+    bytes.extend_from_slice(data);
+    while bytes.len() % 4 != 0 { bytes.push(0); }
+}
+
+fn handle_unix(request: &CMsgSegHdr, payload: &[u8], port: PortNum) -> Result<()> {
+    use crate::net::socket::{proc_registry::{self, ProcSocket}, unix::UnixSocketAddr};
+
+    if payload.len() < 24 { return error(request, payload, port, Some(Errno::EINVAL)); }
+    let states = native_u32(&payload[4..8]);
+    let inode = native_u32(&payload[8..12]);
+    let show = native_u32(&payload[12..16]);
+    let cookie = native_u32(&payload[16..20]) as u64 | ((native_u32(&payload[20..24]) as u64) << 32);
+    let dump = request.flags & DUMP == DUMP;
+    if !dump && inode == 0 { return error(request, payload, port, Some(Errno::EINVAL)); }
+    let mut packets = Vec::new();
+    let mut bytes = Vec::new();
+    let mut cursor = None;
+    loop {
+        let (next, page) = proc_registry::page(cursor, 128);
+        let Some(next) = next else { break; };
+        cursor = Some(next);
+        for socket in page {
+            let ProcSocket::Unix { inode: socket_inode, kind, addr, diag, .. } = socket else { continue; };
+            if dump && states & (1 << diag.state) == 0 { continue; }
+            if !dump && (socket_inode as u32 != inode || (cookie != u64::MAX && cookie != socket_inode)) { continue; }
+            let mut entry = Vec::new();
+            header(&mut entry, SOCK_DIAG_BY_FAMILY, if dump { MULTI } else { 0 }, request.seq, port);
+            entry.extend_from_slice(&[1, kind as u8, diag.state, 0]);
+            put_u32(&mut entry, socket_inode as u32);
+            put_u32(&mut entry, socket_inode as u32);
+            put_u32(&mut entry, (socket_inode >> 32) as u32);
+            if show & 1 != 0 {
+                match addr {
+                    UnixSocketAddr::Unnamed => {},
+                    UnixSocketAddr::Path(path) => unix_attr(&mut entry, 0, path.to_bytes_with_nul()),
+                    UnixSocketAddr::Abstract(name) => {
+                        let mut value = vec![0];
+                        value.extend_from_slice(&name);
+                        unix_attr(&mut entry, 0, &value);
+                    },
+                }
+            }
+            if show & 2 != 0 {
+                if let Some((ino, dev)) = diag.vfs {
+                    let mut value = Vec::new();
+                    put_u32(&mut value, ino);
+                    put_u32(&mut value, dev);
+                    unix_attr(&mut entry, 1, &value);
+                }
+            }
+            if show & 4 != 0 {
+                if let Some(peer) = diag.peer { unix_attr(&mut entry, 2, &peer.to_ne_bytes()); }
+            }
+            if show & 8 != 0 && diag.state == 10 {
+                let mut value = Vec::new();
+                for icon in diag.icons { put_u32(&mut value, icon); }
+                unix_attr(&mut entry, 3, &value);
+            }
+            if show & 16 != 0 {
+                let mut value = Vec::new();
+                put_u32(&mut value, diag.rqueue);
+                put_u32(&mut value, diag.wqueue);
+                unix_attr(&mut entry, 4, &value);
+            }
+            if show & 32 != 0 {
+                let mut value = Vec::new();
+                for n in [0, diag.recv_buf, 0, diag.send_buf, 0, 0, 0, 0, 0] { put_u32(&mut value, n); }
+                unix_attr(&mut entry, 5, &value);
+            }
+            unix_attr(&mut entry, 6, &[diag.shutdown]);
+            if show & 64 != 0 { unix_attr(&mut entry, 7, &diag.uid.to_ne_bytes()); }
+            let len = entry.len() as u32;
+            entry[..4].copy_from_slice(&len.to_ne_bytes());
+            if !dump {
+                send(port, entry)?;
+                return if request.flags & ACK != 0 { error(request, payload, port, None) } else { Ok(()) };
+            }
+            if bytes.len() + entry.len() + 20 > DUMP_PACKET_SIZE { packets.push(core::mem::take(&mut bytes)); }
+            bytes.extend_from_slice(&entry);
+        }
+    }
+    if !dump { return error(request, payload, port, Some(Errno::ENOENT)); }
+    let mut end = Vec::new();
+    header(&mut end, 3, MULTI, request.seq, port);
+    put_u32(&mut end, 0);
+    end[..4].copy_from_slice(&20u32.to_ne_bytes());
+    bytes.extend_from_slice(&end);
+    packets.push(bytes);
+    NetlinkSockDiagProtocol::unicast(port, SockDiagMessage::NetlinkDump(Mutex::new(super::message::NetlinkDump { packets, index: 0 })))
 }
 
 fn handle_netlink(request: &CMsgSegHdr, payload: &[u8], port: PortNum) -> Result<()> {

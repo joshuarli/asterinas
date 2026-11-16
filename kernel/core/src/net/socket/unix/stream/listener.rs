@@ -78,6 +78,12 @@ impl Listener {
         Ok((socket, peer_addr))
     }
 
+    pub(super) fn diag_queue(&self) -> (u32, u32, Vec<u32>) {
+        let queue = self.backlog.incoming_conns.lock();
+        let icons = queue.as_ref().map_or_else(Vec::new, |queue| queue.iter().map(|conn| conn.peer_inode()).collect());
+        (icons.len() as u32, self.backlog.backlog.load(Ordering::Relaxed).saturating_sub(1) as u32, icons)
+    }
+
     pub(super) fn listen(&self, backlog: usize) {
         self.backlog.set_backlog(backlog);
     }
