@@ -1793,8 +1793,6 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 [[package]]
 name = "smoltcp"
 version = "0.11.0"
-source = "sparse+https://crates.17166969.xyz/current/registry/"
-checksum = "b00c94a2d11da9302f5a08aa172718b75946ea896cbcd63832831353d3b2db06"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",
