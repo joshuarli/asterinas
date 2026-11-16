@@ -65,7 +65,16 @@ fn calculate_status_code(wait_status: &WaitStatus) -> u32 {
         WaitStatus::Zombie(process) => process.status().exit_code(),
         WaitStatus::Stop(_, sig_num) => ((sig_num.as_u8() as u32) << 8) | 0x7f,
         WaitStatus::Continue(_) => 0xffff,
-        WaitStatus::TraceeExit(thread) => thread.as_posix_thread().unwrap().exit_code(),
+        WaitStatus::TraceeExit(thread) => {
+            let posix = thread.as_posix_thread().unwrap();
+            // Linux reports the process exit status for a main-thread tracee once the process is a zombie.
+            if let Some(process) = posix.weak_process().upgrade() {
+                if posix.tid() == process.pid() && process.status().is_zombie() {
+                    return process.status().exit_code();
+                }
+            }
+            posix.exit_code()
+        }
         WaitStatus::TraceeStop(_, status) => status.to_wait4_status(),
     }
 }
