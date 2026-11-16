@@ -770,7 +770,7 @@ pub(in crate::fs) struct Dentry {
     pub type_: InodeType,
 }
 
-mod ino {
+pub(crate) mod ino {
     use super::{Ino, SysNodeId, SysTreeNodeKind};
 
     const ATTR_ID_BITS: u8 = 8;

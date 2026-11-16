@@ -3,7 +3,7 @@
 use aster_bigtcp::{
     iface::UdpSnapshotCursor,
     socket::{TCP_RECV_BUF_LEN, TCP_SEND_BUF_LEN, UDP_RECV_PAYLOAD_LEN, UDP_SEND_PAYLOAD_LEN},
-    diagnostic::{TcpAddressFamily, TcpSocketSnapshot, TcpState, UdpSocketSnapshot, tcp_table_generation},
+    diagnostic::{TcpAddressFamily, TcpSocketSnapshot, TcpState, TcpTelemetry, UdpSocketSnapshot, tcp_table_generation},
     wire::IpAddress,
 };
 
@@ -26,7 +26,9 @@ const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
-const ENTRY_SIZE: usize = 168;
+const ENTRY_SIZE: usize = 480;
+const EXT_INFO: u8 = 1 << 1;
+const EXT_CONG: u8 = 1 << 3;
 const EXT_MEMINFO: u8 = 1 << 0;
 const EXT_SKMEMINFO: u8 = 1 << 6;
 const TCP_CLOSE: u8 = 7;
@@ -116,6 +118,8 @@ struct Entry {
     shutdown: u8,
     v6only: Option<bool>,
     memory: Memory,
+    telemetry: Option<TcpTelemetry>,
+    cgroup: Option<u64>,
 }
 
 struct Memory {
@@ -145,6 +149,8 @@ impl Entry {
             inode: socket.inode as u32,
             shutdown: socket.shutdown,
             v6only: v6only(family, state, &local),
+            telemetry: Some(socket.telemetry),
+            cgroup: Some(socket.cgroup),
             memory: Memory {
                 receive_used: if socket.state == TcpState::Listen { 0 } else { socket.read_queue },
                 receive_capacity: TCP_RECV_BUF_LEN as u32,
@@ -172,6 +178,8 @@ impl Entry {
             inode: socket.inode as u32,
             shutdown: 0,
             v6only: None,
+            telemetry: None,
+            cgroup: None,
             memory: Memory {
                 receive_used: socket.read_queue,
                 receive_capacity: UDP_RECV_PAYLOAD_LEN as u32,
@@ -268,7 +276,8 @@ fn error(request: &CMsgSegHdr, payload: &[u8], port: PortNum, error: Option<Errn
 fn reply(request: &CMsgSegHdr, port: PortNum, socket: &Entry, dump: bool, extensions: u8) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(ENTRY_SIZE);
     header(&mut bytes, SOCK_DIAG_BY_FAMILY, if dump { MULTI } else { 0 }, request.seq, port);
-    bytes.extend_from_slice(&[socket.family, socket.state, 0, 0]);
+    let timer = socket.telemetry.map_or(0, |t| t.timer);
+    bytes.extend_from_slice(&[socket.family, socket.state, timer, socket.telemetry.map_or(0, |t| t.retransmits)]);
     bytes.extend_from_slice(&socket.local_port.to_be_bytes());
     bytes.extend_from_slice(&socket.remote_port.to_be_bytes());
     bytes.extend_from_slice(&socket.local);
@@ -276,7 +285,7 @@ fn reply(request: &CMsgSegHdr, port: PortNum, socket: &Entry, dump: bool, extens
     put_u32(&mut bytes, socket.interface);
     put_u32(&mut bytes, socket.cookie as u32);
     put_u32(&mut bytes, (socket.cookie >> 32) as u32);
-    put_u32(&mut bytes, 0);
+    put_u32(&mut bytes, socket.telemetry.map_or(0, |t| t.timer_expires_ms));
     put_u32(&mut bytes, socket.read_queue);
     put_u32(&mut bytes, socket.write_queue);
     put_u32(&mut bytes, socket.uid);
@@ -301,6 +310,48 @@ fn reply(request: &CMsgSegHdr, port: PortNum, socket: &Entry, dump: bool, extens
         for value in [memory.receive_used, memory.receive_capacity, memory.send_used, memory.send_capacity,
                       0, memory.send_queued, 0, 0, 0] {
             put_u32(&mut bytes, value);
+        }
+    }
+    if let Some(cgroup) = socket.cgroup {
+        put_u16(&mut bytes, 12);
+        put_u16(&mut bytes, 21);
+        bytes.extend_from_slice(&cgroup.to_ne_bytes());
+    }
+    if let Some(t) = socket.telemetry {
+        if extensions & EXT_CONG != 0 {
+            put_u16(&mut bytes, 9);
+            put_u16(&mut bytes, 4);
+            bytes.extend_from_slice(b"reno\0\0\0\0");
+        }
+        if extensions & EXT_INFO != 0 {
+            let mut info = [0u8; 280];
+            info[0] = socket.state;
+            let mss = t.mss.min(u32::MAX as usize) as u32;
+            let cwnd = if mss == 0 { 0 } else { (t.cwnd_bytes / mss as usize).max(1).min(u32::MAX as usize) as u32 };
+            info[80..84].copy_from_slice(&cwnd.to_ne_bytes());
+            if socket.state != TCP_LISTEN {
+                info[5] = u8::from(t.timestamps) | (u8::from(t.sack) << 1) | (u8::from(t.wscale) << 2);
+                info[6] = (t.send_wscale & 15) | ((t.receive_wscale & 15) << 4);
+                let ssthresh = if mss == 0 { 0 } else { (t.ssthresh_bytes / mss as usize).min(u32::MAX as usize) as u32 };
+                let advmss = t.path_mtu.saturating_sub(if socket.family == AF_INET { 40 } else { 60 }).min(u32::MAX as usize) as u32;
+                let rcvmss = if t.receive_mss == 0 { advmss.min(536).max(88) } else { t.receive_mss.min(u32::MAX as usize) as u32 };
+                for (offset, value) in [(8, t.rto_us), (16, mss), (20, rcvmss), (24, t.packets_out), (60, t.path_mtu as u32),
+                    (68, t.rtt_us), (72, t.rttvar_us), (76, ssthresh), (84, advmss), (100, t.total_retrans),
+                    (136, t.segs_out), (140, t.segs_in)] {
+                    info[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+                }
+                // Linux tcp_update_pacing_rate uses srtt_us scaled by eight.
+                let ratio = if cwnd < ssthresh / 2 { 200u64 } else { 120u64 };
+                let rate = (mss as u64).saturating_mul(80_000).saturating_mul(ratio).saturating_mul(cwnd.max(t.packets_out) as u64);
+                let rate = if t.rtt_us == 0 { rate } else { rate / (t.rtt_us as u64 * 8) };
+                for (offset, value) in [(104, rate), (112, u64::MAX), (120, t.bytes_acked),
+                    (128, t.bytes_received), (200, t.bytes_sent)] {
+                    info[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+                }
+            }
+            put_u16(&mut bytes, 284);
+            put_u16(&mut bytes, 2);
+            bytes.extend_from_slice(&info);
         }
     }
     let len = bytes.len() as u32;

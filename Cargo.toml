@@ -119,6 +119,7 @@ default-members = [
 # Their crate-level `Cargo.toml` files are not affected
 # by the shared in-kernel workspace configuration.
 exclude = [
+    "vendor/smoltcp",
     "kernel/libs/comp-sys/cargo-component",
     "kernel/libs/comp-sys/component",
     "kernel/libs/comp-sys/component-macro",
@@ -258,7 +259,7 @@ lru = "0.16.3"
 owo-colors = "4.2.2"
 paste = "1.0.15"
 postcard = "1.0.6"
-smoltcp = { version = "=0.11.0", registry = "mycrates", default-features = false, features = [
+smoltcp = { path = "vendor/smoltcp", version = "=0.11.0", default-features = false, features = [
     "alloc",
     "log",
     "medium-ethernet",
@@ -267,6 +268,7 @@ smoltcp = { version = "=0.11.0", registry = "mycrates", default-features = false
     "proto-ipv6",
     "socket-udp",
     "socket-tcp",
+    "socket-tcp-reno",
     "packetmeta-id",
     "iface-max-addr-count-8",
     "iface-max-route-count-8",

@@ -9,7 +9,7 @@ use aster_softirq::BottomHalfDisabled;
 use ostd::sync::SpinLock;
 use smoltcp::wire::IpEndpoint;
 
-pub use smoltcp::socket::tcp::State as TcpState;
+pub use smoltcp::socket::tcp::{State as TcpState, TcpTelemetry};
 
 /// The address family selected when the socket file was created.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +40,7 @@ pub(crate) fn next_cookie() -> u64 { NEXT_COOKIE.fetch_add(1, Ordering::Relaxed)
 pub struct TcpDiagnosticIdentity {
     cookie: u64,
     family: TcpAddressFamily,
+    cgroup: u64,
     file: SpinLock<TcpDiagnosticFile, BottomHalfDisabled>,
 }
 
@@ -51,11 +52,12 @@ struct TcpDiagnosticFile {
 
 impl TcpDiagnosticIdentity {
     /// Creates an identity for a TCP file or an unaccepted connection.
-    pub fn new(owner: Arc<AtomicU32>, inode: u64, family: TcpAddressFamily) -> Arc<Self> {
+    pub fn new(owner: Arc<AtomicU32>, inode: u64, family: TcpAddressFamily, cgroup: u64) -> Arc<Self> {
         LIVE_TCP_IDENTITIES.fetch_add(1, Ordering::Relaxed);
         Arc::new(Self {
             cookie: next_cookie(),
             family,
+            cgroup,
             file: SpinLock::new(TcpDiagnosticFile { owner: Some(owner), inherited_uid: 0, inode }),
         })
     }
@@ -68,6 +70,7 @@ impl TcpDiagnosticIdentity {
         Arc::new(Self {
             cookie: next_cookie(),
             family: self.family,
+            cgroup: self.cgroup,
             file: SpinLock::new(TcpDiagnosticFile { owner: None, inherited_uid: uid, inode: 0 }),
         })
     }
@@ -89,6 +92,8 @@ impl TcpDiagnosticIdentity {
     }
 
     pub(crate) fn family(&self) -> TcpAddressFamily { self.family }
+
+    pub(crate) fn cgroup(&self) -> u64 { self.cgroup }
 
     pub(crate) fn values(&self) -> (u64, u64, u32) {
         let file = self.file.lock();
@@ -119,6 +124,8 @@ pub struct TcpCounts {
 /// A point-in-time view of one TCP transport.
 #[derive(Clone, Debug)]
 pub struct TcpSocketSnapshot {
+    pub telemetry: TcpTelemetry,
+    pub cgroup: u64,
     pub family: TcpAddressFamily,
     pub local: IpEndpoint,
     pub remote: IpEndpoint,

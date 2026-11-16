@@ -72,10 +72,11 @@ pub(crate) type TcpListenerBg<E> = SocketBg<TcpListenerInner<E>, E>;
 
 impl<E: Ext> TcpListenerBg<E> {
     pub(crate) fn diagnostic_snapshot(&self) -> TcpSocketSnapshot {
-        let (read_queue, write_queue) = {
+        let (read_queue, write_queue, telemetry) = {
             let backlog = self.inner.backlog.lock();
             (backlog.connected.len().min(u32::MAX as usize) as u32,
-             backlog.max_conn.min(u32::MAX as usize) as u32)
+             backlog.max_conn.min(u32::MAX as usize) as u32,
+             backlog.socket.telemetry(smoltcp::time::Instant::from_millis(ostd::timer::Jiffies::elapsed().as_duration().as_millis() as i64)))
         };
         let (cookie, inode, uid) = self.inner.diagnostic.values();
         let local = self.bound.endpoint();
@@ -83,7 +84,7 @@ impl<E: Ext> TcpListenerBg<E> {
             smoltcp::wire::IpAddress::Ipv4(_) => core::net::Ipv4Addr::UNSPECIFIED.into(),
             smoltcp::wire::IpAddress::Ipv6(_) => core::net::Ipv6Addr::UNSPECIFIED.into(),
         }, 0);
-        TcpSocketSnapshot { family: self.inner.diagnostic.family(), local, remote, state: TcpState::Listen, read_queue, write_queue,
+        TcpSocketSnapshot { telemetry, cgroup: self.inner.diagnostic.cgroup(), family: self.inner.diagnostic.family(), local, remote, state: TcpState::Listen, read_queue, write_queue,
             cookie, inode, uid, shutdown: 0, orphan: self.inner.diagnostic.orphaned() }
     }
 

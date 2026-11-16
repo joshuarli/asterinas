@@ -560,6 +560,16 @@ impl Ext2FixtureBuilder {
             .map(|idx| make_valid_group_desc(&sb, idx))
             .collect::<Vec<_>>();
 
+        let descriptor_blocks = (descs.len() * size_of::<RawBlockGroup>()).div_ceil(BLOCK_SIZE) as u32;
+        for (idx, desc) in descs.iter_mut().enumerate().skip(1) {
+            if sb.is_backup_group(idx) {
+                let reserved = 1 + descriptor_blocks;
+                desc.block_bitmap_bid += reserved;
+                desc.inode_bitmap_bid += reserved;
+                desc.inode_table_bid += reserved;
+            }
+        }
+
         let layout = group0_layout(&sb);
         validate_group0_layout(&sb, &layout)?;
         descs[0].block_bitmap_bid = layout.block_bitmap_bid;
@@ -603,12 +613,12 @@ impl Ext2FixtureBuilder {
             set_bit_lsb0(bitmap, (desc.inode_table_bid + i - first) as usize);
         }
 
-        if group_idx == 0 {
-            let sb_bid = sb.bid(0);
+        if group_idx == 0 || sb.is_backup_group(group_idx) {
+            let sb_bid = sb.bid(group_idx);
             if sb_bid >= first && sb_bid <= last {
                 set_bit_lsb0(bitmap, (sb_bid - first) as usize);
             }
-            let group_desc_bid = sb.group_descriptors_bid(0);
+            let group_desc_bid = sb.group_descriptors_bid(group_idx);
             if group_desc_bid >= first && group_desc_bid <= last {
                 set_bit_lsb0(bitmap, (group_desc_bid - first) as usize);
             }
