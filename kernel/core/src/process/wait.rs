@@ -273,7 +273,8 @@ fn cleanup_exited_tracee(
         }
         return;
     }
-
+    // Linux reports the process exit status for a main-thread tracee once the process is a zombie.
+    tracee.set_exit_code(process.status().exit_code());
     reap_zombie_child(
         process.pid(),
         ctx.process.children().lock().as_mut().unwrap(),

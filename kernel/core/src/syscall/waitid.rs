@@ -97,8 +97,14 @@ fn calculate_si_code_and_si_status(wait_status: &WaitStatus) -> (i32, i32) {
         WaitStatus::Stop(_process, signum) => (CLD_STOPPED, signum.as_u8() as i32),
         WaitStatus::Continue(_) => (CLD_CONTINUED, SIGCONT.as_u8() as i32),
         WaitStatus::TraceeExit(thread) => {
-            let exit_code = thread.as_posix_thread().unwrap().exit_code();
-            parse_exit_code(exit_code)
+            let posix = thread.as_posix_thread().unwrap();
+            // Linux reports the process exit status for a main-thread tracee once the process is a zombie.
+            if let Some(process) = posix.weak_process().upgrade() {
+                if posix.tid() == process.pid() && process.status().is_zombie() {
+                    return parse_exit_code(process.status().exit_code());
+                }
+            }
+            parse_exit_code(posix.exit_code())
         }
         WaitStatus::TraceeStop(_, status) => (CLD_TRAPPED, status.to_waitid_si_status()),
     }
