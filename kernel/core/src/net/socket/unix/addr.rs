@@ -85,6 +85,13 @@ pub(super) enum UnixSocketAddrKey {
 }
 
 impl UnixSocketAddrBound {
+    pub(super) fn diag_vfs(&self) -> Option<(u32, u32)> {
+        match self {
+            Self::Path(_, path) => Some((path.inode().ino() as u32, path.inode().fs().sb().container_dev_id.to_raw())),
+            Self::Abstract(_) => None,
+        }
+    }
+
     pub(super) fn to_key(&self) -> UnixSocketAddrKey {
         match self {
             Self::Path(_, path) => UnixSocketAddrKey::Path(KeyableArc::from(path.inode().clone())),

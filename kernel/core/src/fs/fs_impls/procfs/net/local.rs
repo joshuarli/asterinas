@@ -27,7 +27,7 @@ impl ProcFileOps for LocalFileOps {
             cursor = Some(next);
             for socket in page {
                 match socket {
-                    ProcSocket::Unix { inode, kind, state, listening, addr } if self.unix => {
+                    ProcSocket::Unix { inode, kind, state, listening, addr, .. } if self.unix => {
                         write!(printer, "0000000000000000: 00000000 00000000 {:08X} {:04X} {:02X} {}", if listening { 0x10000 } else { 0 }, kind, state, inode)?;
                         match addr {
                             UnixSocketAddr::Unnamed => {},
